@@ -12,3 +12,30 @@ body {
 }
 
 a { color: var(--primary, #10b981); }
+
+.btn-primary {
+  background: #10b981;
+  color: #fff;
+  padding: 0.75rem 1.25rem;
+  border-radius: 0.75rem;
+  font-weight: 600;
+}
+.btn-primary:hover { background: #059669; }
+
+.btn-secondary {
+  background: #ffffff;
+  color: #1e293b;
+  border: 1px solid #e2e8f0;
+  padding: 0.75rem 1.25rem;
+  border-radius: 0.75rem;
+}
+
+.fg-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 1rem;
+  padding: 1rem;
+}
+
+.fg-muted { color: #64748b; }
+.fg-heading { color: #1e293b; font-weight: 700; }
