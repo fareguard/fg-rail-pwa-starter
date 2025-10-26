@@ -2,7 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: light dark; }
+:root { color-scheme: light; }
 html, body { height: 100%; }
-body { background:#0D0D0D; color:#fff; }
-a { color:#FF6A00; }
+
+body {
+  background: var(--bg, #ffffff);
+  color: var(--text, #1e293b);
+  font-family: system-ui, sans-serif;
+}
+
+a { color: var(--primary, #10b981); }
