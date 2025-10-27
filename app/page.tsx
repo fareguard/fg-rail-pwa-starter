@@ -10,23 +10,15 @@ export default function Page() {
       </p>
 
       <div className="mt-8 flex gap-3">
-        <Link
-          href="/results"
-          className="bg-brand-orange text-black px-5 py-3 rounded-2xl font-semibold"
-        >
+        <Link href="/results" className="bg-brand-orange text-black px-5 py-3 rounded-2xl font-semibold">
           Search tickets
         </Link>
-        <Link
-          href="/onboarding"
-          className="bg-neutral-900 px-5 py-3 rounded-2xl"
-        >
+        <Link href="/onboarding" className="bg-neutral-900 px-5 py-3 rounded-2xl">
           Get started
         </Link>
       </div>
 
-      <p className="mt-10 text-neutral-500 text-sm">
-        Install: Share → Add to Home Screen
-      </p>
+      <p className="mt-10 text-neutral-500 text-sm">Install: Share → Add to Home Screen</p>
     </main>
   );
 }
