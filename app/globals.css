@@ -1,42 +1,73 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* ===== Universal theme (navy + green + white) without changing pages ===== */
 
-/* Default theme: Navy + Green */
-:root{
+/* Base palette */
+:root {
   --bg:#ffffff;
   --surface:#f8fafc;
-  --text:#1e293b;     /* navy/slate-800 */
-  --muted:#64748b;    /* slate-500 */
-  --primary:#10b981;  /* emerald-500 */
-  --primaryHover:#059669; /* emerald-600 */
-  --border:#e2e8f0;   /* slate-200 */
+  --text:#1e293b;      /* navy/slate-800 */
+  --muted:#64748b;     /* slate-500 */
+  --primary:#10b981;   /* emerald-500 */
+  --primaryHover:#059669;
+  --border:#e2e8f0;    /* slate-200 */
 }
 
-/* Alternative themes just override the tokens */
-.theme-teal{
-  --text:#0f172a;
-  --primary:#0d9488;
-  --primaryHover:#0f766e;
+html, body { background: var(--bg); color: var(--text); }
+
+/* Links default to primary (looks more friendly/trustworthy) */
+a { color: var(--primary); }
+
+/* ---------- Override existing markup patterns (no JSX edits needed) ---------- */
+
+/* Old "primary button" pattern */
+a.bg-brand-orange.text-black.rounded-2xl,
+button.bg-brand-orange.text-black.rounded-2xl,
+a.bg-brand-orange.text-black.rounded-xl,
+button.bg-brand-orange.text-black.rounded-xl {
+  background: var(--primary) !important;
+  color: #fff !important;
+  padding: 0.75rem 1.25rem !important;
+  border-radius: 0.75rem !important;
+  font-weight: 600 !important;
+  box-shadow: 0 1px 2px rgba(16,24,40,0.06);
 }
-.theme-grey{
-  --text:#334155;
-  --primary:#f97316;
-  --primaryHover:#ea580c;
+a.bg-brand-orange.text-black:hover,
+button.bg-brand-orange.text-black:hover {
+  background: var(--primaryHover) !important;
 }
 
-html,body{height:100%}
-body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif}
-a{color:var(--primary)}
+/* Old "secondary button" pattern (dark/neutral background → white outlined) */
+a.bg-neutral-900.rounded-2xl,
+button.bg-neutral-900.rounded-2xl,
+a.bg-neutral-800.rounded-2xl,
+button.bg-neutral-800.rounded-2xl {
+  background: #fff !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  padding: 0.75rem 1.25rem !important;
+  border-radius: 0.75rem !important;
+  font-weight: 500;
+}
 
-.btn-primary{@apply px-5 py-3 rounded-xl font-semibold shadow-sm}
-.btn-primary{background:var(--primary);color:#fff}
-.btn-primary:hover{background:var(--primaryHover)}
+/* Results/tiles/cards currently using dark blocks → soft surface cards */
+div.bg-neutral-900.rounded-2xl,
+div.bg-neutral-900.rounded-xl,
+div.bg-neutral-800.rounded-2xl,
+div.bg-neutral-800.rounded-xl {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 1rem !important;
+  color: var(--text) !important;
+}
 
-.btn-secondary{@apply px-5 py-3 rounded-xl border font-medium}
-.btn-secondary{background:#fff;color:var(--text);border-color:var(--border)}
+/* Price highlight colour to primary */
+.text-brand-orange,
+div.text-brand-orange,
+span.text-brand-orange {
+  color: var(--primary) !important;
+}
 
-.fg-card{@apply rounded-2xl p-4 border}
-.fg-card{background:var(--surface);border-color:var(--border)}
+/* Muted helper text → softer slate */
+.text-neutral-500 { color: var(--muted) !important; }
 
-.fg-muted{color:var(--muted)}
+/* Page body previously set to near-black → reset */
+body { background: var(--bg) !important; color: var(--text) !important; }
