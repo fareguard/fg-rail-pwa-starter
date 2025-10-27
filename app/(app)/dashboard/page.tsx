@@ -1,3 +1,16 @@
+import Header from "../components/Header";
+
+export default function Landing() {
+  return (
+    <>
+      <Header />
+      <main className="max-w-5xl mx-auto text-center py-20 px-6">
+        {/* existing landing content */}
+      </main>
+    </>
+  );
+}
+
 export default function Dashboard() {
   return (
     <main className="min-h-screen px-6 pt-20">
