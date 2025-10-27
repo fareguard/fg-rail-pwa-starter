@@ -1,16 +1,3 @@
-import Header from "../components/Header";
-
-export default function Landing() {
-  return (
-    <>
-      <Header />
-      <main className="max-w-5xl mx-auto text-center py-20 px-6">
-        {/* existing landing content */}
-      </main>
-    </>
-  );
-}
-
 export default function Onboarding() {
   return (
     <main className="min-h-screen px-6 pt-20">
@@ -20,14 +7,16 @@ export default function Onboarding() {
       </p>
 
       <div className="space-y-3 mt-6">
-        <button className="w-full bg-brand-orange text-black px-4 py-3 rounded-2xl font-semibold">Connect Gmail</button>
-        <button className="w-full bg-white text-black px-4 py-3 rounded-2xl font-semibold">Connect Outlook</button>
+        <button className="w-full bg-brand-orange text-black px-4 py-3 rounded-2xl font-semibold">
+          Connect Gmail
+        </button>
+        <button className="w-full bg-white text-black px-4 py-3 rounded-2xl font-semibold">
+          Connect Outlook
+        </button>
         <div className="bg-neutral-900 rounded-2xl p-4">
           <div className="font-semibold">Your Magic BCC</div>
           <div className="text-neutral-300 mt-1">u_xxxx@tickets.fareguard.co.uk</div>
-          <div className="text-neutral-500 mt-2 text-sm">
-            Add this once in Trainline/SplitMyFare account settings.
-          </div>
+          <div className="text-neutral-500 mt-2 text-sm">Add this once in Trainline/SplitMyFare account settings.</div>
         </div>
       </div>
     </main>
