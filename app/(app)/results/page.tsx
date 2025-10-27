@@ -1,17 +1,3 @@
-import Header from "../components/Header";
-
-export default function Landing() {
-  return (
-    <>
-      <Header />
-      <main className="max-w-5xl mx-auto text-center py-20 px-6">
-        {/* existing landing content */}
-      </main>
-    </>
-  );
-}
-
-
 'use client';
 import Link from "next/link";
 const mock = [
