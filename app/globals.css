@@ -2,40 +2,41 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: light; }
-html, body { height: 100%; }
-
-body {
-  background: var(--bg, #ffffff);
-  color: var(--text, #1e293b);
-  font-family: system-ui, sans-serif;
+/* Default theme: Navy + Green */
+:root{
+  --bg:#ffffff;
+  --surface:#f8fafc;
+  --text:#1e293b;     /* navy/slate-800 */
+  --muted:#64748b;    /* slate-500 */
+  --primary:#10b981;  /* emerald-500 */
+  --primaryHover:#059669; /* emerald-600 */
+  --border:#e2e8f0;   /* slate-200 */
 }
 
-a { color: var(--primary, #10b981); }
-
-.btn-primary {
-  background: #10b981;
-  color: #fff;
-  padding: 0.75rem 1.25rem;
-  border-radius: 0.75rem;
-  font-weight: 600;
+/* Alternative themes just override the tokens */
+.theme-teal{
+  --text:#0f172a;
+  --primary:#0d9488;
+  --primaryHover:#0f766e;
 }
-.btn-primary:hover { background: #059669; }
-
-.btn-secondary {
-  background: #ffffff;
-  color: #1e293b;
-  border: 1px solid #e2e8f0;
-  padding: 0.75rem 1.25rem;
-  border-radius: 0.75rem;
+.theme-grey{
+  --text:#334155;
+  --primary:#f97316;
+  --primaryHover:#ea580c;
 }
 
-.fg-card {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 1rem;
-  padding: 1rem;
-}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif}
+a{color:var(--primary)}
 
-.fg-muted { color: #64748b; }
-.fg-heading { color: #1e293b; font-weight: 700; }
+.btn-primary{@apply px-5 py-3 rounded-xl font-semibold shadow-sm}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover{background:var(--primaryHover)}
+
+.btn-secondary{@apply px-5 py-3 rounded-xl border font-medium}
+.btn-secondary{background:#fff;color:var(--text);border-color:var(--border)}
+
+.fg-card{@apply rounded-2xl p-4 border}
+.fg-card{background:var(--surface);border-color:var(--border)}
+
+.fg-muted{color:var(--muted)}
