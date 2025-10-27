@@ -7,6 +7,5 @@ export default withPWA({
   dest: 'public',
   disable: !isProd
 })({
-  experimental: { appDir: true },
   images: { unoptimized: true }
 });
