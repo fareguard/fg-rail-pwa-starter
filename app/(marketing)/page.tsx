@@ -1,16 +1,3 @@
-import Header from "../components/Header";
-
-export default function Landing() {
-  return (
-    <>
-      <Header />
-      <main className="max-w-5xl mx-auto text-center py-20 px-6">
-        {/* existing landing content */}
-      </main>
-    </>
-  );
-}
-
 import Link from "next/link";
 
 export default function Landing() {
@@ -23,8 +10,12 @@ export default function Landing() {
       </p>
 
       <div className="mt-8 flex gap-3">
-        <Link href="/results" className="bg-brand-orange text-black px-5 py-3 rounded-2xl font-semibold">Search tickets</Link>
-        <Link href="/onboarding" className="bg-neutral-900 px-5 py-3 rounded-2xl">Get started</Link>
+        <Link href="/results" className="bg-brand-orange text-black px-5 py-3 rounded-2xl font-semibold">
+          Search tickets
+        </Link>
+        <Link href="/onboarding" className="bg-neutral-900 px-5 py-3 rounded-2xl">
+          Get started
+        </Link>
       </div>
 
       <p className="mt-10 text-neutral-500 text-sm">Install: Share → Add to Home Screen</p>
