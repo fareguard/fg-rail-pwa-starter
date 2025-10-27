@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
-// relative path from app/api/health to lib/
-import { supabaseAdmin } from "../../../lib/supabase";
+import { getSupabaseAdmin } from "../../../lib/supabase";
+
+export const dynamic = "force-dynamic"; // ensure not prerendered at build
 
 export async function GET() {
-  const { error } = await supabaseAdmin.from("profiles").select("user_id").limit(1);
-  if (error) return NextResponse.json({ ok:false, error: error.message }, { status: 500 });
-  return NextResponse.json({ ok:true });
+  try {
+    const supabaseAdmin = getSupabaseAdmin();
+    const { error } = await supabaseAdmin.from("profiles").select("user_id").limit(1);
+    if (error) throw error;
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
+  }
 }
