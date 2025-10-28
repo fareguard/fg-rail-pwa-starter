@@ -15,6 +15,12 @@ async function fetchTrips() {
   return data || [];
 }
 
+async function call(path: string) {
+  "use server";
+  // server action: run internal fetch on the server
+  await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}${path}`, { cache: "no-store" });
+}
+
 export default async function Dashboard() {
   const trips = await fetchTrips();
 
