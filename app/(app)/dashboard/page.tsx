@@ -15,18 +15,11 @@ async function fetchTrips() {
   return data || [];
 }
 
+// server action to trigger API routes
 async function call(path: string) {
   "use server";
-  // server action: run internal fetch on the server
-  await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}${path}`, { cache: "no-store" });
+  await fetch(path, { method: "POST", cache: "no-store" });
 }
-
-<form action={call.bind(null, "/api/cron/ingest")} >
-  <button className="rounded-xl bg-neutral-900 px-4 py-2 mr-2">Run ingest now</button>
-</form>
-<form action={call.bind(null, "/api/eligibility/check")} >
-  <button className="rounded-xl bg-neutral-900 px-4 py-2">Check eligibility</button>
-</form>
 
 export default async function Dashboard() {
   const trips = await fetchTrips();
@@ -38,6 +31,17 @@ export default async function Dashboard() {
         Parsed from your email confirmations. We’ll check delays and file claims automatically.
       </p>
 
+      {/* Action buttons */}
+      <div className="mt-4 flex gap-3">
+        <form action={call.bind(null, "/api/cron/ingest")}>
+          <button className="rounded-xl bg-neutral-900 px-4 py-2">Run ingest now</button>
+        </form>
+        <form action={call.bind(null, "/api/eligibility/run")}>
+          <button className="rounded-xl bg-neutral-900 px-4 py-2">Check eligibility</button>
+        </form>
+      </div>
+
+      {/* Trips list */}
       <div className="mt-6 grid gap-4">
         {trips.map((t: any) => (
           <div key={t.id} className="rounded-xl border border-neutral-800 p-4">
