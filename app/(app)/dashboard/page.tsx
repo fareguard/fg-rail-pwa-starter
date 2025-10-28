@@ -21,6 +21,13 @@ async function call(path: string) {
   await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}${path}`, { cache: "no-store" });
 }
 
+<form action={call.bind(null, "/api/cron/ingest")} >
+  <button className="rounded-xl bg-neutral-900 px-4 py-2 mr-2">Run ingest now</button>
+</form>
+<form action={call.bind(null, "/api/eligibility/check")} >
+  <button className="rounded-xl bg-neutral-900 px-4 py-2">Check eligibility</button>
+</form>
+
 export default async function Dashboard() {
   const trips = await fetchTrips();
 
