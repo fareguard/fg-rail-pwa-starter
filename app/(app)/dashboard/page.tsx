@@ -1,10 +1,17 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { revalidatePath } from "next/cache";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+function baseUrl() {
+  return (
+    process.env.NEXT_PUBLIC_BASE_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000")
+  );
+}
+
 async function fetchTrips() {
-  // For now: server-side with service role (fast). After RLS, we’ll use anon key + user session.
   const supa = getSupabaseAdmin();
   const { data, error } = await supa
     .from("trips")
@@ -15,10 +22,22 @@ async function fetchTrips() {
   return data || [];
 }
 
-// server action to trigger API routes
-async function call(path: string) {
+async function callApi(path: string) {
   "use server";
-  await fetch(path, { method: "POST", cache: "no-store" });
+  try {
+    const res = await fetch(`${baseUrl()}${path}`, {
+      method: "POST",
+      cache: "no-store",
+    });
+    // don't crash the page on non-2xx — just log
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      console.error("callApi non-200", path, res.status, txt);
+    }
+  } catch (e) {
+    console.error("callApi failed", path, e);
+  }
+  revalidatePath("/dashboard");
 }
 
 export default async function Dashboard() {
@@ -31,17 +50,18 @@ export default async function Dashboard() {
         Parsed from your email confirmations. We’ll check delays and file claims automatically.
       </p>
 
-      {/* Action buttons */}
-      <div className="mt-4 flex gap-3">
-        <form action={call.bind(null, "/api/cron/ingest")}>
+      <div className="mt-4 flex gap-2">
+        {/* Ingest: hit the real ingest endpoint directly */}
+        <form action={callApi.bind(null, "/api/ingest/google/save")}>
           <button className="rounded-xl bg-neutral-900 px-4 py-2">Run ingest now</button>
         </form>
-        <form action={call.bind(null, "/api/eligibility/run")}>
+
+        {/* Eligibility check */}
+        <form action={callApi.bind(null, "/api/eligibility/run")}>
           <button className="rounded-xl bg-neutral-900 px-4 py-2">Check eligibility</button>
         </form>
       </div>
 
-      {/* Trips list */}
       <div className="mt-6 grid gap-4">
         {trips.map((t: any) => (
           <div key={t.id} className="rounded-xl border border-neutral-800 p-4">
@@ -70,7 +90,7 @@ export default async function Dashboard() {
                 Status: {t.status || "new"}
               </span>
               <span className="text-xs rounded-full bg-neutral-900 px-2 py-1">
-                Eligible: {t.eligible ? "Yes" : "TBC"}
+                Eligible: {"eligible" in t ? (t.eligible ? "Yes" : "No") : "TBC"}
               </span>
             </div>
           </div>
