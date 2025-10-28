@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { parseEmail } from "@/lib/parsers";
+import { getFreshAccessToken } from "@/lib/google";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -27,20 +28,27 @@ function extractBody(payload: any): string {
 export async function GET() {
   try {
     const supa = getSupabaseAdmin();
-    const { data } = await supa
+
+    // latest connected Gmail
+    const { data, error } = await supa
       .from("oauth_staging").select("*")
-      .eq("provider", "google").order("created_at", { ascending: false }).limit(1);
-    if (!data?.length) return NextResponse.json({ ok: false, error: "No Gmail connected" }, { status: 400 });
+      .eq("provider", "google")
+      .order("created_at", { ascending: false })
+      .limit(1);
 
-    const { access_token: accessToken, user_email } = data[0] as any;
+    if (error) throw error;
+    if (!data?.length) return NextResponse.json({ ok:false, error:"No Gmail connected" }, { status:400 });
 
-    // Broad query – same as preview
+    const row: any = data[0];
+    const accessToken = await getFreshAccessToken(supa, row);
+    const user_email: string = row.user_email;
+
     const q = `in:anywhere (subject:"ticket" OR subject:"booking" OR from:trainline.com OR from:lner.co.uk OR from:avantiwestcoast.co.uk OR from:gwr.com) newer_than:2y`;
     const listRes = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=20`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
-    if (!listRes.ok) return NextResponse.json({ ok: false, error: await listRes.text() }, { status: 500 });
+    if (!listRes.ok) return NextResponse.json({ ok:false, error: await listRes.text() }, { status:500 });
     const list = await listRes.json();
 
     const ids = (list.messages || []).map((m: any) => m.id);
@@ -54,15 +62,14 @@ export async function GET() {
       if (!msgRes.ok) continue;
       const m: any = await msgRes.json();
 
-      const headers: Record<string, string> = {};
+      const headers: Record<string,string> = {};
       for (const h of m.payload?.headers ?? []) {
-        const k = (h.name || "").toLowerCase();
-        if (["subject", "from", "date"].includes(k)) headers[k] = h.value || "";
+        const k = (h.name||"").toLowerCase();
+        if (["subject","from","date"].includes(k)) headers[k] = h.value||"";
       }
-
       const body = extractBody(m.payload);
 
-      // store raw
+      // raw_emails
       const { error: rawErr } = await supa.from("raw_emails").upsert({
         provider: "google",
         user_email,
@@ -74,10 +81,9 @@ export async function GET() {
       }, { onConflict: "provider,message_id" } as any);
       if (!rawErr) saved++;
 
-      // parse → trip
+      // parse → trips (only if we have enough to be useful)
       const parsed = parseEmail(headers.subject, body);
-      const anyCore = parsed.origin || parsed.destination || parsed.booking_ref;
-      if (anyCore) {
+      if (parsed.origin || parsed.destination || parsed.booking_ref) {
         const { error: tripErr } = await supa.from("trips").insert({
           user_email,
           retailer: parsed.retailer,
@@ -85,16 +91,16 @@ export async function GET() {
           booking_ref: parsed.booking_ref,
           origin: parsed.origin,
           destination: parsed.destination,
-          depart_planned: parsed.depart_planned ? new Date(parsed.depart_planned).toISOString() : null,
-          arrive_planned: parsed.arrive_planned ? new Date(parsed.arrive_planned).toISOString() : null,
+          depart_planned: parsed.depart_planned,
+          arrive_planned: parsed.arrive_planned,
           pnr_json: parsed as any,
         });
         if (!tripErr) trips++;
       }
     }
 
-    return NextResponse.json({ ok: true, saved, trips });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
+    return NextResponse.json({ ok:true, saved, trips });
+  } catch (e:any) {
+    return NextResponse.json({ ok:false, error: e.message }, { status:500 });
   }
 }
