@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { toQuery } from "../../../../lib/oauth";
+import { toQuery } from "@lib/oauth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
