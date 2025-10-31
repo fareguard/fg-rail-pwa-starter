@@ -22,14 +22,20 @@ async function fetchTrips() {
   return data || [];
 }
 
+async function fetchCounts() {
+  const supa = getSupabaseAdmin();
+  try {
+    const { data } = await supa.rpc("claim_status_counts").single();
+    return data || {};
+  } catch {
+    return {};
+  }
+}
+
 async function callApi(path: string) {
   "use server";
   try {
-    const res = await fetch(`${baseUrl()}${path}`, {
-      method: "POST",
-      cache: "no-store",
-    });
-    // don't crash the page on non-2xx — just log
+    const res = await fetch(`${baseUrl()}${path}`, { method: "POST", cache: "no-store" });
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
       console.error("callApi non-200", path, res.status, txt);
@@ -41,7 +47,7 @@ async function callApi(path: string) {
 }
 
 export default async function Dashboard() {
-  const trips = await fetchTrips();
+  const [trips, counts] = await Promise.all([fetchTrips(), fetchCounts()]);
 
   return (
     <main className="min-h-screen px-6 pt-10 max-w-5xl mx-auto">
@@ -51,15 +57,24 @@ export default async function Dashboard() {
       </p>
 
       <div className="mt-4 flex gap-2">
-        {/* Ingest: hit the real ingest endpoint directly */}
         <form action={callApi.bind(null, "/api/ingest/google/save")}>
           <button className="rounded-xl bg-neutral-900 px-4 py-2">Run ingest now</button>
         </form>
 
-        {/* Eligibility check */}
         <form action={callApi.bind(null, "/api/eligibility/run")}>
           <button className="rounded-xl bg-neutral-900 px-4 py-2">Check eligibility</button>
         </form>
+
+        <form action={callApi.bind(null, "/api/cron/claims/worker")}>
+          <button className="rounded-xl bg-neutral-900 px-4 py-2">Process 1 claim</button>
+        </form>
+      </div>
+
+      <div className="mt-3 flex gap-2 text-sm">
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Queued: {counts?.queued ?? 0}</span>
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Processing: {counts?.processing ?? 0}</span>
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Submitted: {counts?.submitted ?? 0}</span>
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Failed: {counts?.failed ?? 0}</span>
       </div>
 
       <div className="mt-6 grid gap-4">
@@ -90,7 +105,7 @@ export default async function Dashboard() {
                 Status: {t.status || "new"}
               </span>
               <span className="text-xs rounded-full bg-neutral-900 px-2 py-1">
-                Eligible: {"eligible" in t ? (t.eligible ? "Yes" : "No") : "TBC"}
+                Eligible: {"eligible" in t ? (t.eligible ? "Yes" : "TBC") : "TBC"}
               </span>
             </div>
           </div>
