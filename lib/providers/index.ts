@@ -4,25 +4,25 @@ export async function submitClaimByProvider(provider: string, payload: any) {
   const p = (provider || "").toLowerCase();
 
   if (p === "avanti") {
-    // Only load Playwright code when explicitly enabled (local / worker box)
+    // Load Playwright-based module only when allowed (e.g. local dev)
     if (process.env.PLAYWRIGHT_ENABLED === "true") {
       try {
-        const mod = await import("./avanti.auto"); // loaded at runtime, not build-time
+        const mod = await import("./avanti.auto"); // dynamic import at runtime
         return mod.submitAvantiClaim(payload);
-      } catch (e: any) {
-        return { ok: false, error: `Failed to load avanti.auto: ${e?.message || e}` };
+      } catch (err: any) {
+        return { ok: false, error: `Failed to load avanti.auto: ${err.message || err}` };
       }
     }
-    // Production-safe stub (so serverless build doesn’t need playwright)
+
+    // Stub: production-safe response (no Playwright)
     return {
       ok: true,
       submitted_at: new Date().toISOString(),
       provider: "avanti",
       provider_ref: null,
-      raw: { note: "Playwright disabled; submission stub" },
+      raw: { note: "Playwright disabled in production" },
     };
   }
 
-  // TODO: add more providers (gwr/wmt/etc) here, behind the same guard
   return { ok: false, error: `Unknown provider: ${provider}` };
 }
