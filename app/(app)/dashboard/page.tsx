@@ -4,6 +4,13 @@ import { revalidatePath } from "next/cache";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+type ClaimCounts = {
+  queued: number;
+  processing: number;
+  submitted: number;
+  failed: number;
+};
+
 function baseUrl() {
   return (
     process.env.NEXT_PUBLIC_BASE_URL ||
@@ -22,13 +29,20 @@ async function fetchTrips() {
   return data || [];
 }
 
-async function fetchCounts() {
+async function fetchCounts(): Promise<ClaimCounts> {
   const supa = getSupabaseAdmin();
   try {
+    // our RPC returns a JSON object; coerce + default safely
     const { data } = await supa.rpc("claim_status_counts").single();
-    return data || {};
+    const d = (data || {}) as Partial<ClaimCounts>;
+    return {
+      queued: d.queued ?? 0,
+      processing: d.processing ?? 0,
+      submitted: d.submitted ?? 0,
+      failed: d.failed ?? 0,
+    };
   } catch {
-    return {};
+    return { queued: 0, processing: 0, submitted: 0, failed: 0 };
   }
 }
 
@@ -71,10 +85,10 @@ export default async function Dashboard() {
       </div>
 
       <div className="mt-3 flex gap-2 text-sm">
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Queued: {counts?.queued ?? 0}</span>
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Processing: {counts?.processing ?? 0}</span>
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Submitted: {counts?.submitted ?? 0}</span>
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Failed: {counts?.failed ?? 0}</span>
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Queued: {counts.queued}</span>
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Processing: {counts.processing}</span>
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Submitted: {counts.submitted}</span>
+        <span className="rounded-full bg-neutral-900 px-3 py-1">Failed: {counts.failed}</span>
       </div>
 
       <div className="mt-6 grid gap-4">
