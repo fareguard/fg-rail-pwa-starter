@@ -4,61 +4,91 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// very simple placeholder rule: only trips that have both planned times
-function isEligible(trip: any) {
-  if (!trip?.depart_planned || !trip?.arrive_planned) {
-    return { eligible: false, reason: "missing_times" };
-  }
-  return { eligible: true, reason: "placeholder_rule" };
-}
+export async function GET() {
+  const db = getSupabaseAdmin();
 
-async function runCheck() {
-  const supa = getSupabaseAdmin();
-
-  // pull trips (don’t assume any extra columns exist)
-  const { data: trips, error } = await supa
+  // 1) Pull recent trips with minimal required fields
+  const { data: trips, error } = await db
     .from("trips")
-    .select("*")
+    .select("id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status")
     .order("created_at", { ascending: false })
-    .limit(1000);
+    .limit(200);
 
-  if (error) throw error;
+  if (error) return NextResponse.json({ ok:false, error: error.message }, { status: 500 });
 
-  let examined = 0;
   let created = 0;
 
-  for (const t of trips ?? []) {
-    examined++;
-    const res = isEligible(t);
-    if (!res.eligible) continue;
+  for (const t of trips || []) {
+    // skip if clearly not a rail booking
+    const senderLikely =
+      (t.retailer || '').toLowerCase().includes("trainline") ||
+      (t.retailer || '').toLowerCase().includes("avanti") ||
+      (t.operator || '').toLowerCase().includes("avanti") ||
+      (t.operator || '').toLowerCase().includes("west midlands") ||
+      (t.operator || '').toLowerCase().includes("lner") ||
+      (t.operator || '').toLowerCase().includes("gwr") ||
+      (t.operator || '').toLowerCase().includes("crosscountry");
 
-    // create a claim record (ignore if already created for this trip)
-    const { error: insErr } = await supa
+    if (!senderLikely) continue;
+
+    // avoid duplicates: if a claim exists for this trip, skip
+    const { data: existing } = await db
+      .from("claims")
+      .select("id")
+      .eq("trip_id", t.id)
+      .limit(1);
+
+    if (existing && existing.length) continue;
+
+    // 2) Insert a pending claim (even if delay not computed yet)
+    const { data: ins, error: e1 } = await db
       .from("claims")
       .insert({
         trip_id: t.id,
         user_email: t.user_email ?? null,
         status: "pending",
         fee_pct: 25,
-        meta: { reason: res.reason },
-      });
+        meta: {
+          origin: t.origin, destination: t.destination,
+          booking_ref: t.booking_ref,
+          depart_planned: t.depart_planned, arrive_planned: t.arrive_planned,
+          operator: t.operator, retailer: t.retailer
+        }
+      })
+      .select("id")
+      .single();
 
-    // ignore duplicate-key errors if you added a unique constraint later
-    if (!insErr) created++;
+    if (e1) continue;
+
+    // 3) Auto-queue it for submission pipeline (we can submit later)
+    const provider =
+      (t.operator || '').toLowerCase().includes("avanti") ? "avanti" :
+      (t.operator || '').toLowerCase().includes("west midlands") ? "wmt" :
+      "unknown";
+
+    await db.from("claim_queue").insert({
+      claim_id: ins.id,
+      provider,
+      status: "queued",
+      payload: {
+        user_email: t.user_email ?? null,
+        booking_ref: t.booking_ref ?? null,
+        operator: t.operator ?? null,
+        origin: t.origin ?? null,
+        destination: t.destination ?? null,
+        depart_planned: t.depart_planned ?? null,
+        arrive_planned: t.arrive_planned ?? null,
+        delay_minutes: null
+      }
+    });
+
+    created++;
   }
 
-  return { ok: true, examined, created };
+  return NextResponse.json({ ok:true, examined: trips?.length || 0, created });
 }
 
+// Allow POST too if you prefer
 export async function POST() {
-  try {
-    const out = await runCheck();
-    return NextResponse.json(out);
-  } catch (e: any) {
-    console.error(e);
-    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
-  }
+  return GET();
 }
-
-// allow manual GET in the browser too
-export const GET = POST;
