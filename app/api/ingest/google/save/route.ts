@@ -82,7 +82,7 @@ export async function GET() {
       if (!rawErr) saved++;
 
       // parse → trips (only if we have enough to be useful)
-      const parsed = parseEmail(headers.subject, body);
+const parsed = parseEmail(body, headers.from, headers.subject);
       if (parsed.origin || parsed.destination || parsed.booking_ref) {
         const { error: tripErr } = await supa.from("trips").insert({
           user_email,
