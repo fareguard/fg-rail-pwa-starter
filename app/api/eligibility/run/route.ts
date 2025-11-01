@@ -5,35 +5,41 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// --- helpers ---
-function isLikelyStationName(s?: string | null) {
-  if (!s) return false;
-  const t = String(s).trim();
+function sanitizeStation(raw: string | null): string | null {
+  if (!raw) return null;
+  // keep first line, strip marketing sentences, keep only station-like chars
+  let s = String(raw).split(/\r?\n/)[0]
+    .replace(/\s{2,}/g, " ")
+    .trim();
 
-  // length guard
-  if (t.length < 2 || t.length > 40) return false;
-
-  // only normal station chars
-  if (!/^[A-Za-z&.' -]+$/.test(t)) return false;
-
-  // reject common marketing/junk fragments you just saw
-  const bad = [
-    "we know", "get a ticket", "buy tickets", "learn more", "help and support",
-    "delay repay", "terms", "privacy"
+  // kill obvious non-stations your screenshot showed
+  const badStarts = [
+    "you are about to travel",
+    "your tickets have been issued",
+    "booking reference",
+    "you recently contacted",
+    "if someone you know",
+    "make a new request",
+    "get your feedback",
   ];
-  const tl = t.toLowerCase();
-  if (bad.some(b => tl.includes(b))) return false;
+  if (badStarts.some(b => s.toLowerCase().startsWith(b))) return null;
 
-  // ban triple spaces etc
-  if (/\s{3,}/.test(t)) return false;
+  // keep letters, spaces, apostrophes, ampersands and hyphens
+  s = s.match(/[A-Za-z&' -]+/g)?.join("").trim() || "";
+  if (!s) return null;
 
-  return true;
+  // a station is unlikely to be longer than ~4 words
+  const words = s.split(" ").filter(Boolean);
+  if (words.length > 6) s = words.slice(0, 6).join(" ");
+
+  return s || null;
 }
 
-function isIsoDateLike(x?: string | null) {
-  if (!x) return false;
-  const d = new Date(x);
-  return !Number.isNaN(d.getTime());
+function pickProvider(operator?: string | null, retailer?: string | null): "avanti" | "wmt" | "unknown" {
+  const op = (operator || retailer || "").toLowerCase();
+  if (op.includes("avanti")) return "avanti";
+  if (op.includes("west midlands")) return "wmt";
+  return "unknown";
 }
 
 async function getUserIdForEmail(db: any, email: string | null) {
@@ -50,25 +56,10 @@ async function getUserIdForEmail(db: any, email: string | null) {
       .rpc("get_auth_user_id_by_email", { p_email: email })
       .maybeSingle();
     if (authRow?.user_id) return authRow.user_id;
-  } catch {}
+  } catch (_) {}
   return null;
 }
 
-function pickProvider(operator?: string | null, retailer?: string | null) {
-  const txt = ((operator || "") + " " + (retailer || "")).toLowerCase();
-  if (txt.includes("avanti")) return "avanti";
-  if (txt.includes("west midlands")) return "wmt";
-  if (txt.includes("lner")) return "lner";
-  if (txt.includes("gwr")) return "gwr";
-  if (txt.includes("crosscountry")) return "crosscountry";
-  if (txt.includes("thameslink")) return "thameslink";
-  if (txt.includes("southern")) return "southern";
-  if (txt.includes("south western")) return "southwestern";
-  if (txt.includes("tpe") || txt.includes("transpennine")) return "tpe";
-  return "unknown";
-}
-
-// --- route ---
 export async function GET() {
   const db = getSupabaseAdmin();
 
@@ -82,26 +73,24 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  let created = 0, skipped = 0;
+  let created = 0;
 
   for (const t of trips || []) {
-    // validate essentials
-    if (!isLikelyStationName(t.origin) || !isLikelyStationName(t.destination)) { skipped++; continue; }
+    // sanitize fields coming from parsers
+    const origin = sanitizeStation(t.origin);
+    const destination = sanitizeStation(t.destination);
+    if (!origin || !destination) continue;
 
-    const userId = await getUserIdForEmail(db, t.user_email);
-    if (!userId) { skipped++; continue; }
-
-    // optional: guard booking_ref (simple sanity)
-    const refOk = t.booking_ref && String(t.booking_ref).trim().length >= 6 && String(t.booking_ref).trim().length <= 12;
-    if (!refOk) { skipped++; continue; }
-
-    // de-dupe: existing claim
-    const { data: existing } = await db
+    // Skip if a claim already exists
+    const { data: existing, error: exErr } = await db
       .from("claims")
       .select("id")
       .eq("trip_id", t.id)
       .limit(1);
-    if (existing && existing.length) { skipped++; continue; }
+    if (exErr || (existing && existing.length)) continue;
+
+    const userId = await getUserIdForEmail(db, t.user_email);
+    if (!userId) continue;
 
     const { data: ins, error: insErr } = await db
       .from("claims")
@@ -112,11 +101,11 @@ export async function GET() {
         status: "pending",
         fee_pct: 25,
         meta: {
-          origin: t.origin,
-          destination: t.destination,
+          origin,
+          destination,
           booking_ref: t.booking_ref,
-          depart_planned: isIsoDateLike(t.depart_planned) ? t.depart_planned : null,
-          arrive_planned: isIsoDateLike(t.arrive_planned) ? t.arrive_planned : null,
+          depart_planned: t.depart_planned,
+          arrive_planned: t.arrive_planned,
           operator: t.operator,
           retailer: t.retailer,
         },
@@ -124,9 +113,17 @@ export async function GET() {
       .select("id")
       .single();
 
-    if (insErr || !ins?.id) { skipped++; continue; }
+    if (insErr || !ins?.id) continue;
 
     const provider = pickProvider(t.operator, t.retailer);
+
+    if (provider === "unknown") {
+      // Don’t enqueue unknowns; mark for a quick manual look instead.
+      await db.from("claims")
+        .update({ status: "needs_review" })
+        .eq("id", ins.id);
+      continue;
+    }
 
     await db.from("claim_queue").insert({
       claim_id: ins.id,
@@ -136,11 +133,10 @@ export async function GET() {
         user_email: t.user_email ?? null,
         booking_ref: t.booking_ref ?? null,
         operator: t.operator ?? null,
-        retailer: t.retailer ?? null,
-        origin: t.origin ?? null,
-        destination: t.destination ?? null,
-        depart_planned: isIsoDateLike(t.depart_planned) ? t.depart_planned : null,
-        arrive_planned: isIsoDateLike(t.arrive_planned) ? t.arrive_planned : null,
+        origin,
+        destination,
+        depart_planned: t.depart_planned ?? null,
+        arrive_planned: t.arrive_planned ?? null,
         delay_minutes: null,
       },
     });
@@ -148,7 +144,7 @@ export async function GET() {
     created++;
   }
 
-  return NextResponse.json({ ok: true, examined: trips?.length || 0, created, skipped });
+  return NextResponse.json({ ok: true, examined: trips?.length || 0, created });
 }
 
 export async function POST() {
