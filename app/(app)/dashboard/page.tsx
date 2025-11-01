@@ -1,134 +1,165 @@
-import { getSupabaseAdmin } from "@/lib/supabase";
-import { revalidatePath } from "next/cache";
+// app/dashboard/page.tsx
+import { cookies, headers } from "next/headers";
+import Link from "next/link";
+import { createServerClient } from "@supabase/ssr";
 
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
-
-type ClaimCounts = {
-  queued: number;
-  processing: number;
-  submitted: number;
-  failed: number;
+type Trip = {
+  id: string;
+  origin: string | null;
+  destination: string | null;
+  depart_planned: string | null;
+  arrive_planned: string | null;
+  status: string | null;        // e.g., "not_delayed" | "delayed" | "claimed" | etc.
+  delay_minutes: number | null; // if you store it
+  potential_refund: number | null; // optional estimate
 };
 
-function baseUrl() {
-  return (
-    process.env.NEXT_PUBLIC_BASE_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000")
-  );
-}
-
-async function fetchTrips() {
-  const supa = getSupabaseAdmin();
-  const { data, error } = await supa
-    .from("trips")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(100);
-  if (error) throw error;
-  return data || [];
-}
-
-async function fetchCounts(): Promise<ClaimCounts> {
-  const supa = getSupabaseAdmin();
-  try {
-    // our RPC returns a JSON object; coerce + default safely
-    const { data } = await supa.rpc("claim_status_counts").single();
-    const d = (data || {}) as Partial<ClaimCounts>;
-    return {
-      queued: d.queued ?? 0,
-      processing: d.processing ?? 0,
-      submitted: d.submitted ?? 0,
-      failed: d.failed ?? 0,
-    };
-  } catch {
-    return { queued: 0, processing: 0, submitted: 0, failed: 0 };
-  }
-}
-
-async function callApi(path: string) {
-  "use server";
-  try {
-    const res = await fetch(`${baseUrl()}${path}`, { method: "POST", cache: "no-store" });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      console.error("callApi non-200", path, res.status, txt);
-    }
-  } catch (e) {
-    console.error("callApi failed", path, e);
-  }
-  revalidatePath("/dashboard");
-}
-
 export default async function Dashboard() {
-  const [trips, counts] = await Promise.all([fetchTrips(), fetchCounts()]);
+  const cookieStore = cookies();
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookies: () => cookieStore }
+  );
 
-  return (
-    <main className="min-h-screen px-6 pt-10 max-w-5xl mx-auto">
-      <h1 className="text-2xl font-bold">Your trips</h1>
-      <p className="text-neutral-400 mt-1">
-        Parsed from your email confirmations. We’ll check delays and file claims automatically.
-      </p>
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-      <div className="mt-4 flex gap-2">
-        <form action={callApi.bind(null, "/api/ingest/google/save")}>
-          <button className="rounded-xl bg-neutral-900 px-4 py-2">Run ingest now</button>
-        </form>
-
-        <form action={callApi.bind(null, "/api/eligibility/run")}>
-          <button className="rounded-xl bg-neutral-900 px-4 py-2">Check eligibility</button>
-        </form>
-
-        <form action={callApi.bind(null, "/api/cron/claims/worker")}>
-          <button className="rounded-xl bg-neutral-900 px-4 py-2">Process 1 claim</button>
-        </form>
-      </div>
-
-      <div className="mt-3 flex gap-2 text-sm">
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Queued: {counts.queued}</span>
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Processing: {counts.processing}</span>
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Submitted: {counts.submitted}</span>
-        <span className="rounded-full bg-neutral-900 px-3 py-1">Failed: {counts.failed}</span>
-      </div>
-
-      <div className="mt-6 grid gap-4">
-        {trips.map((t: any) => (
-          <div key={t.id} className="rounded-xl border border-neutral-800 p-4">
-            <div className="flex items-center justify-between">
-              <div className="font-semibold">
-                {t.origin || "—"} → {t.destination || "—"}
-              </div>
-              <div className="text-sm text-neutral-400">
-                {new Date(t.created_at).toLocaleString()}
-              </div>
-            </div>
-
-            <div className="mt-2 text-sm text-neutral-300">
-              <div>Operator: {t.operator || "—"}</div>
-              <div>Retailer: {t.retailer || "—"}</div>
-              <div>Booking ref: {t.booking_ref || "—"}</div>
-              <div>
-                Planned:{" "}
-                {t.depart_planned ? new Date(t.depart_planned).toLocaleString() : "—"} →{" "}
-                {t.arrive_planned ? new Date(t.arrive_planned).toLocaleString() : "—"}
-              </div>
-            </div>
-
-            <div className="mt-3 flex gap-2">
-              <span className="text-xs rounded-full bg-neutral-900 px-2 py-1">
-                Status: {t.status || "new"}
-              </span>
-              <span className="text-xs rounded-full bg-neutral-900 px-2 py-1">
-                Eligible: {"eligible" in t ? (t.eligible ? "Yes" : "TBC") : "TBC"}
-              </span>
+  if (!user) {
+    return (
+      <>
+        <div className="nav">
+          <div className="container navInner">
+            <div className="brand">FareGuard</div>
+            <div />
+          </div>
+        </div>
+        <section className="hero">
+          <div className="container">
+            <h1 className="h1">Sign in to view your journeys</h1>
+            <p className="sub">You’re not signed in.</p>
+            <div className="ctaRow">
+              <Link className="btn btnPrimary" href="/">Go to landing</Link>
             </div>
           </div>
-        ))}
+        </section>
+      </>
+    );
+  }
 
-        {!trips.length && (
-          <div className="text-neutral-400">No trips yet. Connect Gmail and run ingest.</div>
-        )}
+  // Only fetch this user’s trips (RLS should enforce row-level access).
+  const { data: trips } = await supabase
+    .from("trips")
+    .select(
+      "id, origin, destination, depart_planned, arrive_planned, status, delay_minutes, potential_refund"
+    )
+    .order("depart_planned", { ascending: false })
+    .limit(50);
+
+  return (
+    <>
+      <div className="nav">
+        <div className="container navInner">
+          <div className="brand">FareGuard</div>
+          <div style={{ color: "var(--fg-muted)" }}>Hi, {user.email}</div>
+        </div>
       </div>
-    </main>
+
+      <section className="hero">
+        <div className="container">
+          <div className="badge">Live</div>
+          <h1 className="h1" style={{ marginTop: 10 }}>
+            Your journeys & refund status
+          </h1>
+          <p className="sub">
+            We’re watching your tickets and filing Delay Repay when eligible.
+          </p>
+
+          {/* Grid of journey cards */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+              gap: 16,
+              marginTop: 18,
+            }}
+          >
+            {(trips ?? []).map((t) => {
+              const delayed = (t.delay_minutes ?? 0) > 0;
+              return (
+                <div key={t.id} className="card">
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div
+                      className="badge"
+                      style={{
+                        background: delayed ? "#fff1f1" : "#ecf8f2",
+                        color: delayed ? "#b42323" : "var(--fg-green)",
+                        borderColor: delayed ? "#ffd8d8" : "#d6f0e4",
+                      }}
+                    >
+                      {delayed
+                        ? `Delayed ${t.delay_minutes}m`
+                        : "Not delayed"}
+                    </div>
+                    {t.potential_refund != null && (
+                      <div
+                        className="small"
+                        style={{ fontWeight: 800, color: "var(--fg-navy)" }}
+                      >
+                        £{t.potential_refund.toFixed(2)}
+                      </div>
+                    )}
+                  </div>
+
+                  <h3
+                    style={{
+                      margin: "10px 0 4px",
+                      color: "var(--fg-navy)",
+                      fontSize: 18,
+                    }}
+                  >
+                    {(t.origin ?? "Unknown")} → {(t.destination ?? "Unknown")}
+                  </h3>
+                  <p className="small">
+                    Depart:{" "}
+                    {t.depart_planned
+                      ? new Date(t.depart_planned).toLocaleString("en-GB", {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })
+                      : "—"}
+                    <br />
+                    Arrive:{" "}
+                    {t.arrive_planned
+                      ? new Date(t.arrive_planned).toLocaleString("en-GB", {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })
+                      : "—"}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+
+          {!trips?.length && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="kicker">Setup complete</div>
+              <p className="sub">
+                We’ll populate this list as we detect your e-tickets. Check back
+                after your next booking.
+              </p>
+            </div>
+          )}
+        </div>
+      </section>
+    </>
   );
 }
