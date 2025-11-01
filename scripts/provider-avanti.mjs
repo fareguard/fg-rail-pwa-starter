@@ -1,6 +1,41 @@
 // scripts/provider-avanti.mjs
 import { chromium } from "@playwright/test";
 
+// Kill TrustArc / OneTrust overlays that block clicks
+async function dismissCookies(page) {
+  // Try the obvious “Accept” buttons first
+  const selectors = [
+    "#truste-consent-button",
+    ".truste_button_accept",
+    "a.truste_button_2",
+    "#onetrust-accept-btn-handler",
+    'button[title="Accept All"]',
+    'button:has-text("Accept All")',
+    'button:has-text("Accept")',
+  ];
+  for (const sel of selectors) {
+    try {
+      const loc = page.locator(sel);
+      if (await loc.count()) {
+        await loc.first().click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(300);
+        break;
+      }
+    } catch {}
+  }
+
+  // As a safety net, remove common overlay elements entirely
+  await page
+    .evaluate(() => {
+      const kill = (q) => document.querySelectorAll(q).forEach((n) => n.remove());
+      kill(".truste_cm_outerdiv");
+      kill(".truste_box_overlay_border");
+      kill("#onetrust-banner-sdk");
+      kill(".ot-sdk-container");
+    })
+    .catch(() => {});
+}
+
 export async function submitAvantiClaim(payload, { submitLive = false } = {}) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -12,11 +47,25 @@ export async function submitAvantiClaim(payload, { submitLive = false } = {}) {
       timeout: 60000,
     });
 
+    // NEW: clear cookie/consent overlays so clicks aren’t intercepted
+    await dismissCookies(page);
+
     // Try to find a “Start claim” or similar CTA
-    const start = page.locator('a:has-text("Delay Repay"), a:has-text("Start"), a[href*="delay-repay"]');
+    const start = page.locator(
+      'a:has-text("Delay Repay"), a:has-text("Start"), a[href*="delay-repay"]'
+    );
+
+    // Give the CTA a moment to render after consent changes
+    await start.first().waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
     if (await start.count()) {
-      await start.first().click();
-      await page.waitForLoadState("domcontentloaded", { timeout: 30000 });
+      // Retry click once if something still intercepts pointer events
+      try {
+        await start.first().click({ timeout: 30000 });
+      } catch {
+        await dismissCookies(page);
+        await start.first().click({ timeout: 30000 });
+      }
+      await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
     }
 
     // Basic fields from payload
@@ -63,10 +112,12 @@ export async function submitAvantiClaim(payload, { submitLive = false } = {}) {
 
     // Submit only when explicitly enabled
     if (submitLive) {
-      const submitBtn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Submit")');
+      const submitBtn = page.locator(
+        'button[type="submit"], input[type="submit"], button:has-text("Submit")'
+      );
       if (await submitBtn.count()) {
         await submitBtn.first().click();
-        await page.waitForLoadState("networkidle", { timeout: 30000 });
+        await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
       }
     }
 
