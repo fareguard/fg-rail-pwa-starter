@@ -27,10 +27,24 @@ async function getUserIdForEmail(db: any, email: string | null) {
   return null;
 }
 
+function pickProvider(operator?: string | null, retailer?: string | null) {
+  const txt = ((operator || "") + " " + (retailer || "")).toLowerCase();
+  if (txt.includes("avanti")) return "avanti";
+  if (txt.includes("west midlands")) return "wmt";
+  if (txt.includes("lner")) return "lner";
+  if (txt.includes("gwr")) return "gwr";
+  if (txt.includes("crosscountry")) return "crosscountry";
+  if (txt.includes("thameslink")) return "thameslink";
+  if (txt.includes("southern")) return "southern";
+  if (txt.includes("south western")) return "southwestern";
+  if (txt.includes("tpe") || txt.includes("transpennine")) return "tpe";
+  return "unknown";
+}
+
 export async function GET() {
   const db = getSupabaseAdmin();
 
-  // Pull recent trips; minimal fields needed
+  // Pull recent trips
   const { data: trips, error } = await db
     .from("trips")
     .select(
@@ -46,7 +60,6 @@ export async function GET() {
   let created = 0;
 
   for (const t of trips || []) {
-    // Basic sanity: we need at least origin & destination to be useful
     if (!t.origin || !t.destination) continue;
 
     // Skip if a claim already exists
@@ -59,7 +72,6 @@ export async function GET() {
     if (exErr) continue;
     if (existing && existing.length) continue;
 
-    // Resolve user_id (required by your schema)
     const userId = await getUserIdForEmail(db, t.user_email);
     if (!userId) continue;
 
@@ -87,15 +99,10 @@ export async function GET() {
 
     if (insErr || !ins?.id) continue;
 
-    // Pick provider for queue (best-effort)
-    const op = (t.operator || "").toLowerCase();
-    const provider = op.includes("avanti")
-      ? "avanti"
-      : op.includes("west midlands")
-      ? "wmt"
-      : "unknown";
+    // Provider: use BOTH operator & retailer
+    const provider = pickProvider(t.operator, t.retailer);
 
-    // Queue it
+    // Queue it with rich payload (operator+retailer included)
     await db.from("claim_queue").insert({
       claim_id: ins.id,
       provider,
@@ -104,6 +111,7 @@ export async function GET() {
         user_email: t.user_email ?? null,
         booking_ref: t.booking_ref ?? null,
         operator: t.operator ?? null,
+        retailer: t.retailer ?? null,
         origin: t.origin ?? null,
         destination: t.destination ?? null,
         depart_planned: t.depart_planned ?? null,
