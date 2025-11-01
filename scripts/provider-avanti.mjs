@@ -1,92 +1,88 @@
 // scripts/provider-avanti.mjs
 import { chromium } from "@playwright/test";
 
-async function dismissConsent(page) {
-  // Try common TrustArc / OneTrust selectors
-  const selectors = [
-    '#truste-consent-button',                     // TrustArc main accept
-    '.truste-button1',                            // alt TrustArc class
-    'a.truste_button_1',                          // older TrustArc
-    '#onetrust-accept-btn-handler',               // OneTrust
-    'button:has-text("Accept All")',
-    'button:has-text("Accept")',
-  ];
+const COOKIE_SELECTORS = [
+  // OneTrust / TrustArc variants seen on Avanti
+  '#onetrust-accept-btn-handler',
+  'button[aria-label*="Accept"]',
+  'button:has-text("Accept all")',
+  'button:has-text("Accept All")',
+  '#truste-consent-button',
+  '.truste_popframe .call, .truste_box_overlay_border ~ button:has-text("I Agree")',
+];
 
-  for (const sel of selectors) {
-    const el = page.locator(sel);
-    try {
-      if (await el.count()) {
-        await el.first().click({ timeout: 1000 }).catch(() => {});
-      }
-    } catch {}
-  }
-
-  // Brutal fallback: remove overlays that intercept pointer events
-  await page.evaluate(() => {
-    const killers = [
-      '.truste_overlay', '.truste_box_overlay_border', '.truste_cm_outerdiv',
-      '#truste-consent-track', '#truste-consent-required',
-      '#onetrust-banner-sdk', '.ot-sdk-container', '.ot-sdk-row'
-    ];
-    killers.forEach(k => document.querySelectorAll(k).forEach(n => n.remove()));
-  }).catch(() => {});
-}
-
-async function safeClick(page, locator) {
-  try {
-    await locator.first().click({ timeout: 2000 });
-    return true;
-  } catch {
-    // Try dismissing overlays then click again
-    await dismissConsent(page);
-    try {
-      await locator.first().click({ timeout: 2500 });
-      return true;
-    } catch {
-      // Force click as last resort
-      try {
-        await locator.first().click({ timeout: 2500, force: true });
-        return true;
-      } catch {
-        return false;
-      }
+async function clearCookieWall(page) {
+  // Try normal clicks first
+  for (const sel of COOKIE_SELECTORS) {
+    const btn = page.locator(sel);
+    if (await btn.first().isVisible().catch(() => false)) {
+      try { await btn.first().click({ timeout: 2000 }); return; } catch {}
     }
   }
+  // If overlay still intercepts, nuke it (safe for headless CI)
+  await page.evaluate(() => {
+    const killers = [
+      '[id^="onetrust"]',
+      '.ot-sdk-container',
+      '.ot-sdk-row',
+      '.truste_box_overlay_border',
+      '.truste_overlay',
+      '#truste-consent-track',
+      '.truste_cm_outerdiv',
+    ];
+    document.querySelectorAll(killers.join(",")).forEach(el => {
+      try { el.style.display = "none"; el.remove?.(); } catch {}
+    });
+  }).catch(() => {});
 }
 
 export async function submitAvantiClaim(payload, { submitLive = false } = {}) {
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage']
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-      '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  });
-  const page = await context.newPage();
+  const page = await browser.newPage();
 
   try {
-    // Go straight to Delay Repay portal (avoids marketing page redirect/overlays)
-    await page.goto('https://delayrepay.avantiwestcoast.co.uk/en/login', {
-      waitUntil: 'domcontentloaded',
+    await page.goto("https://www.avantiwestcoast.co.uk/help-and-support/delay-repay", {
+      waitUntil: "domcontentloaded",
       timeout: 60000,
     });
 
-    await dismissConsent(page);
+    await clearCookieWall(page);
 
-    // If we didn't land on login, try a visible CTA as fallback
-    if (!/delayrepay\..*\/en\/login/i.test(page.url())) {
-      const start = page.locator('a:has-text("Delay Repay"), a:has-text("Start"), a[href*="delay-repay"]');
-      if (await start.count()) {
-        await safeClick(page, start);
-        await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+    // Be explicit about the target domain before interacting
+    await page.waitForURL(/avantiwestcoast\.co\.uk\/help-and-support\/delay-repay/i, { timeout: 10000 })
+      .catch(() => {});
+
+    // Find “Delay Repay / Start” CTA, with fallbacks
+    const start = page.locator(
+      [
+        'a:has-text("Delay Repay")',
+        'a:has-text("Start")',
+        'a[href*="delay-repay"]',
+        'a[title*="Delay Repay"]',
+      ].join(", ")
+    );
+
+    if (await start.count()) {
+      try {
+        await start.first().click({ timeout: 30000 });
+      } catch {
+        // If overlay intercepts again, purge & retry once
+        await clearCookieWall(page);
+        await start.first().click({ timeout: 30000 });
       }
-      await dismissConsent(page);
+      await page.waitForLoadState("domcontentloaded", { timeout: 30000 });
     }
 
-    // Prepare values
+    // Hard wait for the Delay Repay subdomain (login/start/claim)
+    await page.waitForURL(
+      /delayrepay\..*\/(en|gb)\/(login|start|claim)/i,
+      { timeout: 15000 }
+    ).catch(() => {});
+
+    // --------- Populate basics (best-effort) ----------
     const email = payload.user_email || "hello@fareguard.co.uk";
     const ref = payload.booking_ref || "UNKNOWN";
     const origin = payload.origin || "Wolverhampton";
@@ -99,13 +95,8 @@ export async function submitAvantiClaim(payload, { submitLive = false } = {}) {
       : "N/A";
     const delay = payload.delay_minutes ?? "TBC";
 
-    // Take a snapshot on arrival
-    await page.screenshot({ path: "avanti_before.png", fullPage: true }).catch(() => {});
-
-    // Fill what we can on login/start page (selectors vary; we try broadly)
     const tryFill = async (selectorOrLabelRegex, value) => {
       try {
-        if (value == null) return;
         if (selectorOrLabelRegex instanceof RegExp) {
           const ctl = page.getByLabel(selectorOrLabelRegex);
           if (await ctl.count()) return ctl.first().fill(String(value));
@@ -116,32 +107,34 @@ export async function submitAvantiClaim(payload, { submitLive = false } = {}) {
       } catch {}
     };
 
-    await tryFill(/Email/i, email);
-    await tryFill('input[type="email"]', email);
     await tryFill(/Booking\s*reference/i, ref);
+    await tryFill(/Email/i, email);
     await tryFill('input[name*="booking"]', ref);
+    await tryFill('input[type="email"]', email);
 
-    // Journey notes (if a textarea exists)
     const notes = page.locator("textarea, [name*='journey']");
     if (await notes.count()) {
       await notes.first().fill(
         `${origin} → ${destination}\nDepart: ${dep}\nArrive: ${arr}\nDelay approx: ${delay} mins`
-      ).catch(() => {});
+      );
     }
 
-    // Submit only if explicitly enabled
+    // Screens before/after
+    const beforePng = await page.screenshot({ path: "avanti_before.png", fullPage: true });
+
     if (submitLive) {
-      // Typical submit
-      const submitBtn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("Continue")');
+      const submitBtn = page.locator(
+        'button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("Continue")'
+      );
       if (await submitBtn.count()) {
-        await safeClick(page, submitBtn);
-        await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+        await submitBtn.first().click().catch(() => {});
+        await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
       }
     }
 
-    await page.screenshot({ path: "avanti_after.png", fullPage: true }).catch(() => {});
-    await browser.close();
+    const afterPng = await page.screenshot({ path: "avanti_after.png", fullPage: true });
 
+    await browser.close();
     return {
       ok: true,
       provider: "avanti",
