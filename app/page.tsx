@@ -1,6 +1,6 @@
 // app/page.tsx
 import Link from "next/link";
-import ConnectGmailButton from "@/components/ConnectGmailButton";
+import ConnectGmailButton from "./components/ConnectGmailButton";
 
 const operators = [
   "Avanti West Coast","Great Western Railway","West Midlands Trains","Northern",
@@ -10,7 +10,6 @@ const operators = [
 export default function Home() {
   return (
     <>
-      {/* NAV */}
       <div className="nav">
         <div className="container navInner">
           <div className="brand">FareGuard</div>
@@ -22,7 +21,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* HERO */}
       <section className="hero">
         <div className="container heroGrid">
           <div>
@@ -36,16 +34,13 @@ export default function Home() {
             </p>
             <div className="ctaRow">
               <ConnectGmailButton />
-              <Link href="/search" className="btn btnGhost">
-                Search tickets
-              </Link>
+              <Link href="/search" className="btn btnGhost">Search tickets</Link>
             </div>
             <p className="small" style={{ marginTop: 8 }}>
               Works with Gmail e-tickets. All UK operators supported.
             </p>
           </div>
 
-          {/* Right card */}
           <div className="card">
             <div className="kicker">Plug & play</div>
             <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>
@@ -56,39 +51,21 @@ export default function Home() {
               claimed. From now on, we’ll file eligible claims automatically.
             </p>
             <ul className="list">
-              <li>
-                <span className="dot" />
-                <span>Detect delays (e.g. 30–60+ mins)</span>
-              </li>
-              <li>
-                <span className="dot" />
-                <span>Auto-file Delay Repay with the operator</span>
-              </li>
-              <li>
-                <span className="dot" />
-                <span>Approved? Money back to you. (Fee shown clearly.)</span>
-              </li>
+              <li><span className="dot" /><span>Detect delays (30–60+ mins)</span></li>
+              <li><span className="dot" /><span>Auto-file with the operator</span></li>
+              <li><span className="dot" /><span>Approved? Money back to you</span></li>
             </ul>
           </div>
         </div>
       </section>
 
-      {/* TRUST / OPERATORS */}
       <section className="section">
         <div className="container">
           <h2>All UK train operators</h2>
           <p className="small">If they offer Delay Repay, we support it.</p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
             {operators.map((op) => (
-              <span
-                key={op}
-                className="badge"
-                style={{
-                  background: "#f2f6fb",
-                  color: "var(--fg-navy)",
-                  borderColor: "#e6eef7",
-                }}
-              >
+              <span key={op} className="badge" style={{ background:"#f2f6fb", color:"var(--fg-navy)", borderColor:"#e6eef7" }}>
                 {op}
               </span>
             ))}
@@ -96,42 +73,25 @@ export default function Home() {
         </div>
       </section>
 
-      {/* HOW IT WORKS */}
       <section className="section">
         <div className="container">
           <h2>How it works</h2>
           <div className="card">
             <ul className="list">
-              <li>
-                <span className="dot" />
-                <span>
-                  Connect Gmail (read-only). We only look for rail e-ticket emails.
-                </span>
-              </li>
-              <li>
-                <span className="dot" />
-                <span>
-                  We match journeys, detect delays, and calculate what you’re owed.
-                </span>
-              </li>
-              <li>
-                <span className="dot" />
-                <span>
-                  We file the claim with the operator. You get paid when approved.
-                </span>
-              </li>
+              <li><span className="dot" /><span>Connect Gmail (read-only) – we only look for rail e-tickets</span></li>
+              <li><span className="dot" /><span>We match journeys, detect delays, and calculate what you’re owed</span></li>
+              <li><span className="dot" /><span>We file the claim. You get paid when approved</span></li>
             </ul>
             <div className="ctaRow" style={{ marginTop: 14 }}>
               <ConnectGmailButton label="Get started — free" />
             </div>
             <p className="small" style={{ marginTop: 8 }}>
-              Transparent pricing shown after connection. No surprises.
+              Transparent pricing shown after connection.
             </p>
           </div>
         </div>
       </section>
 
-      {/* FOOTER */}
       <footer className="footer">
         <div className="container" style={{ display: "flex", gap: 16 }}>
           <span>© {new Date().getFullYear()} FareGuard</span>
