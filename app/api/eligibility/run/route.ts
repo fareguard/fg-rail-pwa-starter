@@ -1,54 +1,33 @@
-// app/api/eligibility/run/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-function sanitizeStation(raw: string | null): string | null {
-  if (!raw) return null;
-  // keep first line, strip marketing sentences, keep only station-like chars
-  let s = String(raw).split(/\r?\n/)[0]
-    .replace(/\s{2,}/g, " ")
-    .trim();
+// ==== SECURITY GATE ====
+// Option A: Only allow in development
+const DEV_ONLY = process.env.NODE_ENV !== "production";
 
-  // kill obvious non-stations your screenshot showed
-  const badStarts = [
-    "you are about to travel",
-    "your tickets have been issued",
-    "booking reference",
-    "you recently contacted",
-    "if someone you know",
-    "make a new request",
-    "get your feedback",
-  ];
-  if (badStarts.some(b => s.toLowerCase().startsWith(b))) return null;
+// Option B: Allow in prod only with an admin header key
+const ADMIN_KEY = process.env.ADMIN_API_KEY || "";
 
-  // keep letters, spaces, apostrophes, ampersands and hyphens
-  s = s.match(/[A-Za-z&' -]+/g)?.join("").trim() || "";
-  if (!s) return null;
-
-  // a station is unlikely to be longer than ~4 words
-  const words = s.split(" ").filter(Boolean);
-  if (words.length > 6) s = words.slice(0, 6).join(" ");
-
-  return s || null;
+function isAuthorized(request: Request) {
+  if (DEV_ONLY) return true;
+  if (!ADMIN_KEY) return false;
+  const hdr = request.headers.get("x-admin-key") || "";
+  return hdr === ADMIN_KEY;
 }
 
-function pickProvider(operator?: string | null, retailer?: string | null): "avanti" | "wmt" | "unknown" {
-  const op = (operator || retailer || "").toLowerCase();
-  if (op.includes("avanti")) return "avanti";
-  if (op.includes("west midlands")) return "wmt";
-  return "unknown";
-}
-
+// ===== Helpers =====
 async function getUserIdForEmail(db: any, email: string | null) {
   if (!email) return null;
+
   const { data: prof } = await db
     .from("profiles")
     .select("user_id")
     .eq("user_email", email)
     .maybeSingle();
+
   if (prof?.user_id) return prof.user_id;
 
   try {
@@ -57,15 +36,23 @@ async function getUserIdForEmail(db: any, email: string | null) {
       .maybeSingle();
     if (authRow?.user_id) return authRow.user_id;
   } catch (_) {}
+
   return null;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  if (!isAuthorized(req)) {
+    // Don’t reveal this route exists to the public
+    return NextResponse.json({ ok: false }, { status: 404 });
+  }
+
   const db = getSupabaseAdmin();
 
   const { data: trips, error } = await db
     .from("trips")
-    .select("id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at")
+    .select(
+      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at"
+    )
     .order("created_at", { ascending: false })
     .limit(200);
 
@@ -76,18 +63,15 @@ export async function GET() {
   let created = 0;
 
   for (const t of trips || []) {
-    // sanitize fields coming from parsers
-    const origin = sanitizeStation(t.origin);
-    const destination = sanitizeStation(t.destination);
-    if (!origin || !destination) continue;
+    if (!t.origin || !t.destination) continue;
 
-    // Skip if a claim already exists
-    const { data: existing, error: exErr } = await db
+    const { data: existing } = await db
       .from("claims")
       .select("id")
       .eq("trip_id", t.id)
       .limit(1);
-    if (exErr || (existing && existing.length)) continue;
+
+    if (existing && existing.length) continue;
 
     const userId = await getUserIdForEmail(db, t.user_email);
     if (!userId) continue;
@@ -101,8 +85,8 @@ export async function GET() {
         status: "pending",
         fee_pct: 25,
         meta: {
-          origin,
-          destination,
+          origin: t.origin,
+          destination: t.destination,
           booking_ref: t.booking_ref,
           depart_planned: t.depart_planned,
           arrive_planned: t.arrive_planned,
@@ -115,15 +99,12 @@ export async function GET() {
 
     if (insErr || !ins?.id) continue;
 
-    const provider = pickProvider(t.operator, t.retailer);
-
-    if (provider === "unknown") {
-      // Don’t enqueue unknowns; mark for a quick manual look instead.
-      await db.from("claims")
-        .update({ status: "needs_review" })
-        .eq("id", ins.id);
-      continue;
-    }
+    const op = (t.operator || "").toLowerCase();
+    const provider = op.includes("avanti")
+      ? "avanti"
+      : op.includes("west midlands")
+      ? "wmt"
+      : "unknown";
 
     await db.from("claim_queue").insert({
       claim_id: ins.id,
@@ -133,8 +114,8 @@ export async function GET() {
         user_email: t.user_email ?? null,
         booking_ref: t.booking_ref ?? null,
         operator: t.operator ?? null,
-        origin,
-        destination,
+        origin: t.origin ?? null,
+        destination: t.destination ?? null,
         depart_planned: t.depart_planned ?? null,
         arrive_planned: t.arrive_planned ?? null,
         delay_minutes: null,
@@ -147,6 +128,6 @@ export async function GET() {
   return NextResponse.json({ ok: true, examined: trips?.length || 0, created });
 }
 
-export async function POST() {
-  return GET();
+export async function POST(req: Request) {
+  return GET(req);
 }
