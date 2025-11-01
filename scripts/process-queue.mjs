@@ -17,42 +17,28 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
-async function inferProviderForClaim(claimId) {
-  const { data, error } = await db
-    .from("claims")
-    .select("id, trip_id, status")
-    .eq("id", claimId)
-    .maybeSingle();
+// Map operator/retailer strings -> provider ids we support
+function detectProviderFromPayload(payload = {}) {
+  const txt = [
+    payload.operator,
+    payload.retailer,
+    payload.origin,
+    payload.destination,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 
-  if (error || !data?.trip_id) return null;
-
-  const { data: trip } = await db
-    .from("trips")
-    .select("operator, retailer")
-    .eq("id", data.trip_id)
-    .maybeSingle();
-
-  const op = (trip?.operator || trip?.retailer || "").toLowerCase();
-
-  if (op.includes("avanti")) return "avanti";
-  // add more as we implement: wmt, gwr, lner, crosscountry, etc.
-  return null;
-}
-
-function isTransientError(msg = "") {
-  const m = msg.toLowerCase();
-  return (
-    m.includes("timeout") ||
-    m.includes("net::") ||
-    m.includes("navigation") ||
-    m.includes("detached") ||
-    m.includes("intercepts pointer events") ||
-    m.includes("execution context was destroyed")
-  );
+  if (txt.includes("avanti")) return "avanti";
+  if (txt.includes("west midlands")) return "wmt";
+  if (txt.includes("lner")) return "lner";
+  if (txt.includes("gwr")) return "gwr";
+  if (txt.includes("crosscountry")) return "crosscountry";
+  return "unknown";
 }
 
 async function runOnce() {
-  // 1) Oldest queued row
+  // 1) Get the oldest queued item
   const { data: items, error } = await db
     .from("claim_queue")
     .select("id, claim_id, provider, status, payload, attempts, created_at")
@@ -62,62 +48,54 @@ async function runOnce() {
 
   if (error) throw error;
   if (!items?.length) {
-    console.log(JSON.stringify({ ok: true, processed: 0, note: "nothing queued" }));
+    console.log(JSON.stringify({ ok: true, processed: 0 }));
     return;
   }
 
   const q = items[0];
 
-  // 2) If provider unknown, infer from trip/operator
-  let provider = (q.provider || "").toLowerCase();
-  if (!provider || provider === "unknown") {
-    const inferred = await inferProviderForClaim(q.claim_id);
-    if (inferred) {
-      provider = inferred;
-      await db.from("claim_queue").update({ provider: inferred }).eq("id", q.id);
-    }
-  }
-
-  // 3) Mark processing
+  // 2) Mark processing
   await db
     .from("claim_queue")
     .update({
       status: "processing",
       attempts: (q.attempts ?? 0) + 1,
       last_error: null,
-      started_at: new Date().toISOString(),
     })
     .eq("id", q.id);
 
-  const attempt = (q.attempts ?? 0) + 1;
-  const maxAttempts = 3;
+  // 2a) Determine provider (use DB, else infer from payload)
+  let provider = (q.provider || "").toLowerCase();
+  if (!provider || provider === "unknown") {
+    provider = detectProviderFromPayload(q.payload || {});
+    // Persist the detection for next time
+    await db.from("claim_queue").update({ provider }).eq("id", q.id);
+  }
 
   let result;
   try {
+    // 3) Route by provider
     if (provider === "avanti") {
-      result = await submitAvantiClaim(q.payload || {}, { submitLive: SUBMIT_LIVE === "true" });
+      result = await submitAvantiClaim(q.payload || {}, {
+        submitLive: SUBMIT_LIVE === "true",
+      });
     } else {
-      result = { ok: false, error: `Unknown provider ${provider || "unknown"}` };
+      result = { ok: false, error: `Unknown provider ${provider}` };
     }
 
-    if (!result?.ok) {
-      // Transient? retry up to maxAttempts; otherwise fail
-      const transient = isTransientError(result?.error || "");
-      const newStatus = transient && attempt < maxAttempts ? "queued" : "failed";
-
+    // 4) Update DB based on result
+    if (!result.ok) {
       await db
         .from("claim_queue")
         .update({
-          status: newStatus,
-          last_error: result?.error || "submit failed",
-          response: result || null,
-          // tiny backoff: push it back a bit if retrying
-          ...(newStatus === "queued" ? { created_at: new Date().toISOString() } : {}),
-          finished_at: new Date().toISOString(),
+          status: "failed",
+          last_error: result.error || "submit failed",
         })
         .eq("id", q.id);
 
-      console.log(JSON.stringify({ ok: true, processed: 1, retry: newStatus === "queued", result }));
+      console.log(
+        JSON.stringify({ ok: true, processed: 1, result, provider })
+      );
       return;
     }
 
@@ -127,7 +105,6 @@ async function runOnce() {
         status: "submitted",
         submitted_at: result.submitted_at,
         response: result,
-        finished_at: new Date().toISOString(),
       })
       .eq("id", q.id);
 
@@ -140,22 +117,18 @@ async function runOnce() {
       })
       .eq("id", q.claim_id);
 
-    console.log(JSON.stringify({ ok: true, processed: 1, result }));
+    console.log(
+      JSON.stringify({ ok: true, processed: 1, result, provider })
+    );
   } catch (e) {
-    const msg = e?.message || String(e);
-    const transient = isTransientError(msg);
-    const newStatus = transient && attempt < maxAttempts ? "queued" : "failed";
-
     await db
       .from("claim_queue")
       .update({
-        status: newStatus,
-        last_error: msg,
-        finished_at: new Date().toISOString(),
+        status: "failed",
+        last_error: e?.message || String(e),
       })
       .eq("id", q.id);
-
-    console.error(JSON.stringify({ ok: false, error: msg, retry: newStatus === "queued" }));
+    console.error(JSON.stringify({ ok: false, error: e?.message || String(e) }));
   }
 }
 
