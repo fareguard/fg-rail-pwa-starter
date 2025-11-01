@@ -1,37 +1,44 @@
-"use client";
-
-import { useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
-import { useRouter } from "next/navigation";
+'use client';
+import { useEffect, useState } from 'react';
+import { createClient } from '@supabase/supabase-js';
+import Link from 'next/link';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-  { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false } }
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-export default function AuthCallback() {
-  const router = useRouter();
-  const [msg, setMsg] = useState("Finalising sign-in…");
+export default function OAuthCallback() {
+  const [status, setStatus] = useState<'working'|'ok'|'err'>('working');
+  const [msg, setMsg] = useState<string>('Connecting…');
 
   useEffect(() => {
     (async () => {
       try {
-        // Exchange the ?code= for a session and set cookies/local storage
-        const { error } = await supabase.auth.exchangeCodeForSession(window.location.href);
+        const { data, error } = await supabase.auth.exchangeCodeForSession(window.location.href);
         if (error) throw error;
-        setMsg("Connected! Redirecting…");
-        router.replace("/onboarding"); // or "/"
+        setStatus('ok');
+        setMsg('Connected! Redirecting…');
+        // Send them back to dashboard/home
+        setTimeout(() => { window.location.href = '/dashboard'; }, 800);
       } catch (e: any) {
-        setMsg(e?.message || "Could not complete sign-in");
+        setStatus('err');
+        setMsg(e?.message || 'Sign-in failed');
       }
     })();
-  }, [router]);
+  }, []);
 
   return (
-    <main style={{padding:24}}>
-      <h1>Connecting Gmail…</h1>
-      <p>{msg}</p>
+    <main className="mx-auto max-w-md p-6">
+      <h1 className="text-xl font-semibold mb-2">Google Sign-in</h1>
+      <p className={status === 'err' ? 'text-red-600' : 'text-gray-700'}>
+        {msg}
+      </p>
+      {status === 'err' && (
+        <p className="mt-4">
+          <Link className="text-blue-600 underline" href="/">Go back</Link>
+        </p>
+      )}
     </main>
   );
 }
