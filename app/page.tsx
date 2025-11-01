@@ -30,7 +30,7 @@ export default function Home() {
       {/* HERO */}
       <section className="hero">
         <Image
-          src="/hero.png"
+          src="/public/hero.png"
           alt="UK train station commuter"
           width={1920}
           height={600}
