@@ -1,9 +1,17 @@
 // lib/providers/index.ts
+
 export async function submitClaimByProvider(provider: string, payload: any) {
-  // Dynamically import only when needed — avoids Playwright build errors
-  if (provider === "avanti") {
+  // Normalize provider string
+  const p = provider?.toLowerCase?.() ?? "";
+
+  // ✅ Dynamically import only when needed — avoids Playwright build errors
+  if (p.includes("avanti") || p === "avanti west coast") {
     const { submitAvantiClaim } = await import("./avanti");
     return await submitAvantiClaim(payload);
   }
-  throw new Error(`No provider handler found for ${provider}`);
+
+  // ✅ fallback to Avanti for now (until we add WMT, GWR, etc.)
+  console.warn(`Unknown provider "${provider}", defaulting to Avanti West Coast`);
+  const { submitAvantiClaim } = await import("./avanti");
+  return await submitAvantiClaim(payload);
 }
