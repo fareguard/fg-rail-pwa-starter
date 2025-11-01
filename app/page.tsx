@@ -1,74 +1,84 @@
-// app/page.tsx
-import Link from "next/link";
-import styles from "./page.module.css"; // not required—kept for future if you want
-
 export default function Home() {
   return (
-    <>
-      {/* NAV */}
-      <nav className="nav">
-        <div className="container navInner">
-          <div className="brand">FareGuard</div>
-          <div style={{display:"flex", gap:12}}>
-            <Link href="/search" className="btn btnGhost">Search tickets</Link>
-            <Link href="/onboarding" className="btn btnPrimary">Get started</Link>
+    <main className="min-h-screen bg-white">
+      <header className="border-b">
+        <div className="mx-auto max-w-6xl px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-lg bg-[#0a2a4a] flex items-center justify-center text-white font-bold">F</div>
+            <span className="text-xl font-semibold text-[#0a2a4a]">FareGuard</span>
           </div>
-        </div>
-      </nav>
-
-      {/* HERO */}
-      <header className="hero">
-        <div className="container heroGrid">
-          <div>
-            <span className="badge">
-              <span>⚡</span> Automatic refunds
-            </span>
-            <h1 className="h1">Cheapest UK train tickets.<br/> Refunds handled for you.</h1>
-            <p className="sub">
-              £1.50 service fee per booking. If we don’t win a refund, you pay nothing.
-              If we do, we take 20% of the refunded amount. Simple.
-            </p>
-            <div className="ctaRow">
-              <Link href="/search" className="btn btnPrimary">Search tickets</Link>
-              <Link href="/onboarding" className="btn btnGhost">Get started</Link>
-            </div>
-            <p className="small" style={{marginTop:10}}>
-              Install the app: Share → Add to Home Screen
-            </p>
-          </div>
-
-          {/* Right column: benefits card */}
-          <div className="card">
-            <h2>Why FareGuard?</h2>
-            <ul className="list">
-              <li><span className="dot" /> Best-price tickets from trusted retailers.</li>
-              <li><span className="dot" /> We track delays automatically in the background.</li>
-              <li><span className="dot" /> File Delay Repay for you with no forms.</li>
-              <li><span className="dot" /> “No win, no fee” on refunds (20%).</li>
-              <li><span className="dot" /> Works with Avanti, West Midlands Trains & more.</li>
-            </ul>
-          </div>
+          <nav className="hidden md:flex items-center gap-6 text-sm text-slate-700">
+            <a href="/how-it-works" className="hover:text-[#0a2a4a]">How it works</a>
+            <a href="/pricing" className="hover:text-[#0a2a4a]">Pricing</a>
+            <a href="/dashboard" className="hover:text-[#0a2a4a]">Dashboard</a>
+          </nav>
         </div>
       </header>
 
-      {/* HOW IT WORKS */}
-      <section className="section">
-        <div className="container">
-          <h2>How it works</h2>
-          <ul className="list">
-            <li><span className="dot" /> Connect your email or forward tickets to <b>tickets@fareguard.co.uk</b>.</li>
-            <li><span className="dot" /> We detect journeys + delays and prepare your claim.</li>
-            <li><span className="dot" /> You get updates and keep 80% of any refund.</li>
-          </ul>
+      <section className="mx-auto max-w-6xl px-4 py-16 grid md:grid-cols-2 gap-12 items-center">
+        <div>
+          <h1 className="text-4xl md:text-5xl font-bold tracking-tight text-[#0a2a4a]">
+            Cheaper UK train tickets.<br />Automatic refunds.
+          </h1>
+          <p className="mt-4 text-slate-700 text-lg">
+            We search fares, track your journey, and auto-file Delay Repay for you.
+            £1.50 per booking. No win, no fee (20% of refunds).
+          </p>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <a
+              href="/search"
+              className="inline-flex items-center justify-center rounded-lg bg-[#0a2a4a] px-5 py-3 text-white font-medium hover:opacity-90"
+            >
+              Search tickets
+            </a>
+            <a
+              href="/get-started"
+              className="inline-flex items-center justify-center rounded-lg border border-[#13a86b] px-5 py-3 text-[#0a2a4a] font-medium hover:bg-[#13a86b]/10"
+            >
+              Get started
+            </a>
+          </div>
+          <p className="mt-3 text-sm text-slate-500">Works with Gmail and PDF e-tickets.</p>
+        </div>
+
+        <div className="relative">
+          <div className="absolute -inset-4 rounded-2xl bg-[#13a86b]/10 blur-lg" />
+          <div className="relative rounded-2xl border shadow-sm bg-white">
+            <div className="p-4 border-b">
+              <p className="text-sm font-medium text-[#0a2a4a]">Sample refund timeline</p>
+            </div>
+            <ul className="p-4 space-y-3 text-sm">
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-[#13a86b]" />
+                Book Wolverhampton → Birmingham (£6.40)
+              </li>
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-[#13a86b]" />
+                Train delayed 38 minutes — we detect it automatically
+              </li>
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-[#13a86b]" />
+                FareGuard files Delay Repay with Avanti
+              </li>
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-[#13a86b]" />
+                Refund approved — money back to you (we keep 20%)
+              </li>
+            </ul>
+          </div>
         </div>
       </section>
 
-      {/* FOOTER */}
-      <footer className="footer">
-        <div className="container">
-          © {new Date().getFullYear()} FareGuard • <Link href="/legal">Legal</Link>
+      <footer className="border-t">
+        <div className="mx-auto max-w-6xl px-4 py-8 text-sm text-slate-600 flex flex-wrap items-center justify-between gap-4">
+          <p>© {new Date().getFullYear()} FareGuard</p>
+          <div className="flex gap-4">
+            <a href="/privacy" className="hover:text-[#0a2a4a]">Privacy</a>
+            <a href="/terms" className="hover:text-[#0a2a4a]">Terms</a>
+            <a href="/contact" className="hover:text-[#0a2a4a]">Contact</a>
+          </div>
         </div>
       </footer>
-    </>
+    </main>
   );
 }
