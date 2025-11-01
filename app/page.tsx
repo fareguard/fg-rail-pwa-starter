@@ -1,4 +1,3 @@
-// app/page.tsx
 import Link from "next/link";
 import Image from "next/image";
 import ConnectGmailButton from "./components/ConnectGmailButton";
@@ -14,14 +13,15 @@ export default function Home() {
       {/* NAVBAR */}
       <div className="nav">
         <div className="container navInner">
-          <div className="brand">
+          <div className="brand" style={{ display: "flex", alignItems: "center" }}>
             <Link href="/">
               <Image
                 src="/media/logo.png"
                 alt="FareGuard logo"
-                width={160}
-                height={44}
+                width={190}
+                height={52}
                 priority
+                style={{ height: "auto", width: "auto", maxHeight: "52px" }}
               />
             </Link>
           </div>
@@ -34,37 +34,49 @@ export default function Home() {
       </div>
 
       {/* HERO */}
-      <section className="hero" style={{ position: "relative", overflow: "hidden" }}>
-        {/* Full-width hero image */}
-        <div style={{ position: "relative", width: "100%", height: "520px" }}>
-          <Image
-            src="/hero.png"
-            alt="UK train station"
-            fill
-            priority
-            sizes="100vw"
-            style={{ objectFit: "cover", objectPosition: "center" }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              background:
-                "linear-gradient(90deg, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.85) 45%, rgba(255,255,255,0) 100%)",
-            }}
-          />
-        </div>
+      <section
+        className="hero"
+        style={{
+          position: "relative",
+          width: "100%",
+          height: "540px",
+          overflow: "hidden",
+          marginBottom: "60px",
+        }}
+      >
+        {/* Background hero image */}
+        <Image
+          src="/hero.png"
+          alt="UK train station background"
+          fill
+          priority
+          sizes="100vw"
+          style={{
+            objectFit: "cover",
+            objectPosition: "center",
+            zIndex: 1,
+          }}
+        />
+        {/* Subtle gradient overlay for contrast */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background:
+              "linear-gradient(90deg, rgba(255,255,255,0.97) 0%, rgba(255,255,255,0.92) 40%, rgba(255,255,255,0.7) 100%)",
+            zIndex: 2,
+          }}
+        />
 
-        {/* Hero content centered */}
+        {/* HERO CONTENT */}
         <div
           className="container"
           style={{
-            position: "absolute",
+            position: "relative",
+            zIndex: 3,
             top: "50%",
-            left: "50%",
-            transform: "translate(-50%, -50%)",
-            width: "100%",
-            zIndex: 2,
+            transform: "translateY(-50%)",
+            maxWidth: "1120px",
           }}
         >
           <div className="badge">Automatic refunds for UK train delays</div>
