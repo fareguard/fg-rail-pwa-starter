@@ -34,3 +34,12 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUBMIT_LIVE: ${{ secrets.SUBMIT_LIVE }}
           PLAYWRIGHT_ENABLED: ${{ secrets.PLAYWRIGHT_ENABLED }}
+
+      - name: Upload Playwright screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: avanti-screens
+          path: |
+            avanti_before.png
+            avanti_after.png
+        if: always()
