@@ -18,12 +18,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
+          # removed cache line to avoid lockfile requirement
 
       - name: Install deps (no build)
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Install Playwright (Chromium)
+        if: env.PLAYWRIGHT_ENABLED == 'true'
         run: npx playwright install --with-deps chromium
 
       - name: Process one queued claim
@@ -32,3 +33,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUBMIT_LIVE: ${{ secrets.SUBMIT_LIVE }} # set to "true" when you want real submits
+          PLAYWRIGHT_ENABLED: ${{ secrets.PLAYWRIGHT_ENABLED }} # "true" to allow browser automation
