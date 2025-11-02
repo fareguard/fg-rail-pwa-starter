@@ -1,7 +1,7 @@
 // app/(app)/dashboard/page.tsx
-import { cookies } from "next/headers";
+// Server component that reads/writes with the admin client (no @supabase/ssr needed)
 import Link from "next/link";
-import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 
 function StatusBadge({ status }: { status: string }) {
   const map: any = {
@@ -27,19 +27,17 @@ function makeIso(dateStr?: string, timeStr?: string) {
   return base.toISOString();
 }
 
-async function getServerSupabase() {
-  const cookieStore = cookies();
-  return createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
-    cookies: {
-      get(name: string) {
-        return cookieStore.get(name)?.value;
-      },
-    },
-  });
+function getAdmin() {
+  // These must be set in your Vercel env:
+  // SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error("Missing SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 export default async function Dashboard() {
-  const db = await getServerSupabase();
+  const db = getAdmin();
 
   // Latest claims with basic trip context
   const { data: claims } = await db
@@ -48,14 +46,12 @@ export default async function Dashboard() {
     .order("created_at", { ascending: false })
     .limit(20);
 
-  // Show dev manual form only when explicitly enabled in env
   const showDev = process.env.NEXT_PUBLIC_SHOW_DEV === "1";
 
   return (
     <div className="container" style={{ padding: "24px 0 80px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h1 className="h1">Your journeys & refund status</h1>
-        <div className="small">Hi, <strong>{/* show email if you want */}</strong></div>
       </div>
       <p className="sub">We’re watching your tickets and filing Delay Repay when eligible.</p>
 
@@ -63,6 +59,8 @@ export default async function Dashboard() {
         <form
           action={async (formData) => {
             "use server";
+            const db = getAdmin();
+
             const email = String(formData.get("email") || "");
             const operator = String(formData.get("operator") || "");
             const origin = String(formData.get("origin") || "");
@@ -73,7 +71,7 @@ export default async function Dashboard() {
             const departISO = makeIso(String(formData.get("depart_date") || ""), departTime);
             const arriveISO = makeIso(String(formData.get("arrive_date") || ""), arriveTime);
 
-            // find user_id by email (helper RPC OR profiles table)
+            // find user_id by email (profiles first, then RPC)
             const uid = await (async () => {
               const { data: prof } = await db.from("profiles").select("user_id").eq("user_email", email).maybeSingle();
               if (prof?.user_id) return prof.user_id;
@@ -131,7 +129,7 @@ export default async function Dashboard() {
                 ? "avanti"
                 : operator?.toLowerCase().includes("west midlands")
                 ? "wmt"
-                : "avanti", // default for now
+                : "avanti",
               status: "queued",
               payload: {
                 user_email: email,
