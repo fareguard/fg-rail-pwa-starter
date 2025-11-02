@@ -65,13 +65,13 @@ export default function PrivacyPolicy() {
             <p>
               You can request deletion of your data or disconnection of your Google
               account by contacting{" "}
-              <a href="mailto:support@fareguard.co.uk">support@fareguard.co.uk</a>.
+              <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>.
             </p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>7. Contact Us</h3>
             <p>
               Questions? Email us at{" "}
-              <a href="mailto:support@fareguard.co.uk">support@fareguard.co.uk</a>.
+              <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>.
             </p>
           </div>
         </div>
