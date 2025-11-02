@@ -14,7 +14,16 @@ function StatusBadge({ status }: { status: string }) {
   };
   const s = map[status] || map.pending;
   return (
-    <span style={{ background: s.bg, color: s.fg, padding: "6px 10px", borderRadius: 999, fontWeight: 700, fontSize: 12 }}>
+    <span
+      style={{
+        background: s.bg,
+        color: s.fg,
+        padding: "6px 10px",
+        borderRadius: 999,
+        fontWeight: 700,
+        fontSize: 12,
+      }}
+    >
       {s.label}
     </span>
   );
@@ -32,7 +41,8 @@ function getAdmin() {
   // SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) throw new Error("Missing SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key)
+    throw new Error("Missing SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
@@ -42,7 +52,9 @@ export default async function Dashboard() {
   // Latest claims with basic trip context
   const { data: claims } = await db
     .from("claims")
-    .select("id, status, provider_ref, created_at, submitted_at, error, trip:trip_id (origin, destination, depart_planned, arrive_planned)")
+    .select(
+      "id, status, provider_ref, created_at, submitted_at, error, trip:trip_id (origin, destination, depart_planned, arrive_planned)"
+    )
     .order("created_at", { ascending: false })
     .limit(20);
 
@@ -73,10 +85,23 @@ export default async function Dashboard() {
 
             // find user_id by email (profiles first, then RPC)
             const uid = await (async () => {
-              const { data: prof } = await db.from("profiles").select("user_id").eq("user_email", email).maybeSingle();
-              if (prof?.user_id) return prof.user_id;
-              const { data: rpc } = await db.rpc("get_auth_user_id_by_email", { p_email: email }).maybeSingle();
-              return rpc?.user_id || null;
+              // 1) profiles.user_id (fast path)
+              const { data: prof } = await db
+                .from("profiles")
+                .select("user_id")
+                .eq("user_email", email)
+                .maybeSingle();
+
+              if (prof?.user_id) return prof.user_id as string;
+
+              // 2) auth.users via RPC (typed)
+              // get_auth_user_id_by_email RETURNS TABLE(user_id uuid)
+              const { data: rpcRows } = await db
+                .rpc("get_auth_user_id_by_email", { p_email: email })
+                .returns<{ user_id: string }[]>(); // 👈 makes TS happy
+
+              const userId = rpcRows?.[0]?.user_id ?? null;
+              return userId;
             })();
 
             if (!uid) throw new Error("No user found for that email");
@@ -142,10 +167,21 @@ export default async function Dashboard() {
               },
             });
           }}
-          style={{ marginTop: 16, padding: 16, border: "1px dashed #e5eaf0", borderRadius: 12 }}
+          style={{
+            marginTop: 16,
+            padding: 16,
+            border: "1px dashed #e5eaf0",
+            borderRadius: 12,
+          }}
         >
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Dev • Manual loop</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 280px))", gap: 10 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, minmax(0, 280px))",
+              gap: 10,
+            }}
+          >
             <input name="email" placeholder="email" defaultValue="hassanisherenow@gmail.com" />
             <input name="operator" placeholder="operator" defaultValue="Avanti West Coast" />
             <input name="booking_ref" placeholder="booking ref" defaultValue="12345678" />
@@ -162,7 +198,14 @@ export default async function Dashboard() {
         </form>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16, marginTop: 24 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+          gap: 16,
+          marginTop: 24,
+        }}
+      >
         {(claims || []).map((c: any) => (
           <div key={c.id} className="card">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -175,7 +218,13 @@ export default async function Dashboard() {
               {new Date(c?.trip?.depart_planned || c.created_at).toLocaleString()}
             </div>
             <div className="small" style={{ marginTop: 6 }}>
-              {c.provider_ref ? <>Ref: <code>{c.provider_ref}</code></> : <>Awaiting provider ref…</>}
+              {c.provider_ref ? (
+                <>
+                  Ref: <code>{c.provider_ref}</code>
+                </>
+              ) : (
+                <>Awaiting provider ref…</>
+              )}
             </div>
             {c.error && (
               <div className="small" style={{ marginTop: 6, color: "#b00020" }}>
