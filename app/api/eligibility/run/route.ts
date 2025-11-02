@@ -48,11 +48,13 @@ export async function GET(req: Request) {
 
   const db = getSupabaseAdmin();
 
+  // Pull recent likely-ticket trips only
   const { data: trips, error } = await db
     .from("trips")
     .select(
       "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at"
     )
+    .eq("is_ticket", true) // 👈 only real tickets
     .order("created_at", { ascending: false })
     .limit(200);
 
