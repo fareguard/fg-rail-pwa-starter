@@ -4,26 +4,28 @@
 
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
-import avanti from './providers/avanti.ts'; // default export run(payload)
+
+// Provider entry points (drop these files into /scripts/)
+import { submitAvantiClaim } from './provider-avanti.mjs';
+import { submitWMTClaim }    from './provider-wmt.mjs';
+import { submitGWRClaim }    from './provider-gwr.mjs';
+import { submitLNERClaim }   from './provider-lner.mjs';
+import { submitGTRClaim }    from './provider-gtr.mjs';
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const serviceKey  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUBMIT_LIVE = String(process.env.SUBMIT_LIVE || '').toLowerCase();
+
 if (!supabaseUrl || !serviceKey) {
   console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
   process.exit(1);
 }
 const db = createClient(supabaseUrl, serviceKey);
 
-// map provider id -> runner
-const providers = {
-  avanti, // { default export }
-  // add others here: wmt, gwr, ...
-};
-
 async function nextQueueItem() {
   const { data, error } = await db
     .from('claim_queue')
-    .select('id, claim_id, provider, payload, status')
+    .select('id, claim_id, provider, payload, status, created_at')
     .eq('status', 'queued')
     .order('created_at', { ascending: true })
     .limit(1)
@@ -33,11 +35,42 @@ async function nextQueueItem() {
 }
 
 async function updateQueue(id, patch) {
-  await db.from('claim_queue').update(patch).eq('id', id);
+  const { error } = await db.from('claim_queue').update(patch).eq('id', id);
+  if (error) throw error;
 }
 
 async function updateClaim(claimId, patch) {
-  await db.from('claims').update(patch).eq('id', claimId);
+  const { error } = await db.from('claims').update(patch).eq('id', claimId);
+  if (error) throw error;
+}
+
+function isLive() {
+  // Treat "true", "1", "yes", "y" as live; anything else is dry-run
+  return ['true', '1', 'yes', 'y'].includes(SUBMIT_LIVE);
+}
+
+async function runProvider(providerId, payload) {
+  const submitOpts = { submitLive: isLive() };
+
+  // Normalize just in case
+  const p = String(providerId || '').trim().toLowerCase();
+
+  let result;
+  if (p === 'avanti') {
+    result = await submitAvantiClaim(payload || {}, submitOpts);
+  } else if (p === 'wmt') {
+    result = await submitWMTClaim(payload || {}, submitOpts);
+  } else if (p === 'gwr') {
+    result = await submitGWRClaim(payload || {}, submitOpts);
+  } else if (p === 'lner') {
+    result = await submitLNERClaim(payload || {}, submitOpts);
+  } else if (p === 'gtr') {
+    result = await submitGTRClaim(payload || {}, submitOpts);
+  } else {
+    result = { ok: false, error: `Unknown provider ${providerId}` };
+  }
+
+  return result;
 }
 
 async function main() {
@@ -47,25 +80,27 @@ async function main() {
     return;
   }
 
-  const runner = providers[item.provider];
-  if (!runner) {
-    await updateQueue(item.id, { status: 'failed', error: `Unsupported provider: ${item.provider}` });
-    await updateClaim(item.claim_id, { status: 'failed', error: `Unsupported provider: ${item.provider}` });
-    console.log(JSON.stringify({ ok: false, processed: 1, provider: item.provider, error: 'unsupported' }));
-    return;
+  // Mark as processing right away
+  await updateQueue(item.id, { status: 'processing', error: null });
+
+  let result;
+  try {
+    result = await runProvider(item.provider, item.payload || {});
+  } catch (e) {
+    // Normalize unexpected errors to a failed result
+    result = { ok: false, error: e?.message || 'Provider threw an error' };
   }
 
-  await updateQueue(item.id, { status: 'processing' });
-
-  const result = await runner(item.payload || {});
   const ok = !!result?.ok;
 
+  // Update queue row
   await updateQueue(item.id, {
     status: ok ? 'submitted' : 'failed',
     error: ok ? null : (result?.error || null),
     meta: result?.screenshots ? result.screenshots : null,
   });
 
+  // Update claim row
   await updateClaim(item.claim_id, {
     status: ok ? 'submitted' : 'failed',
     provider_ref: result?.provider_ref || null,
@@ -73,11 +108,13 @@ async function main() {
     error: ok ? null : (result?.error || null),
   });
 
+  // Emit a compact, useful log
   console.log(
     JSON.stringify({
       ok: true,
       processed: 1,
       provider: item.provider,
+      live: isLive(),
       source: 'queue.provider',
       result: {
         ok,
