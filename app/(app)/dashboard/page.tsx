@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import Link from "next/link";
+import QuickAddTripCard from "@/app/components/QuickAddTripCard";
 
 type Trip = {
   id: string;
@@ -81,6 +82,9 @@ export default function Dashboard() {
                   marginTop: 18,
                 }}
               >
+                {/* Quick add card always shows for signed-in users */}
+                <QuickAddTripCard />
+
                 {(trips ?? []).map((t) => {
                   const delayed = (t.delay_minutes ?? 0) > 0;
                   return (
