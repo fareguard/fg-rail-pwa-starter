@@ -1,137 +1,210 @@
 // app/(app)/dashboard/page.tsx
-"use client";
-
-import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { cookies } from "next/headers";
 import Link from "next/link";
-import QuickAddTripCard from "@/app/components/QuickAddTripCard";
+import { createServerClient } from "@supabase/ssr";
 
-type Trip = {
-  id: string;
-  origin: string | null;
-  destination: string | null;
-  depart_planned: string | null;
-  arrive_planned: string | null;
-  status: string | null;
-  delay_minutes: number | null;
-  potential_refund: number | null;
-};
+function StatusBadge({ status }: { status: string }) {
+  const map: any = {
+    pending: { bg: "#fff6e5", fg: "#9a6b00", label: "Pending" },
+    queued: { bg: "#eef5ff", fg: "#1a4fbf", label: "Queued" },
+    processing: { bg: "#f4f6ff", fg: "#3b4cc0", label: "Processing" },
+    submitted: { bg: "#eefaf3", fg: "#0e7a3b", label: "Submitted" },
+    approved: { bg: "#e8fff2", fg: "#0a8f43", label: "Approved" },
+    failed: { bg: "#ffefef", fg: "#b00020", label: "Failed" },
+  };
+  const s = map[status] || map.pending;
+  return (
+    <span style={{ background: s.bg, color: s.fg, padding: "6px 10px", borderRadius: 999, fontWeight: 700, fontSize: 12 }}>
+      {s.label}
+    </span>
+  );
+}
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+function makeIso(dateStr?: string, timeStr?: string) {
+  const base = dateStr ? new Date(dateStr) : new Date();
+  const [hh, mm] = (timeStr || "00:00").split(":").map((n) => parseInt(n || "0", 10));
+  base.setHours(hh || 0, mm || 0, 0, 0);
+  return base.toISOString();
+}
 
-export default function Dashboard() {
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [trips, setTrips] = useState<Trip[] | null>(null);
+async function getServerSupabase() {
+  const cookieStore = cookies();
+  return createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+    cookies: {
+      get(name: string) {
+        return cookieStore.get(name)?.value;
+      },
+    },
+  });
+}
 
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      setUserEmail(data.user?.email ?? null);
-      if (!data.user) return;
-      supabase
-        .from("trips")
-        .select(
-          "id, origin, destination, depart_planned, arrive_planned, status, delay_minutes, potential_refund"
-        )
-        .order("depart_planned", { ascending: false })
-        .limit(50)
-        .then(({ data }) => setTrips(data ?? []));
-    });
-  }, []);
+export default async function Dashboard() {
+  const db = await getServerSupabase();
+
+  // Latest claims with basic trip context
+  const { data: claims } = await db
+    .from("claims")
+    .select("id, status, provider_ref, created_at, submitted_at, error, trip:trip_id (origin, destination, depart_planned, arrive_planned)")
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  // Show dev manual form only when explicitly enabled in env
+  const showDev = process.env.NEXT_PUBLIC_SHOW_DEV === "1";
 
   return (
-    <>
-      <div className="nav">
-        <div className="container navInner">
-          <div className="brand">FareGuard</div>
-          <div style={{ color: "var(--fg-muted)" }}>
-            {userEmail ? `Hi, ${userEmail}` : ""}
+    <div className="container" style={{ padding: "24px 0 80px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h1 className="h1">Your journeys & refund status</h1>
+        <div className="small">Hi, <strong>{/* show email if you want */}</strong></div>
+      </div>
+      <p className="sub">We’re watching your tickets and filing Delay Repay when eligible.</p>
+
+      {showDev && (
+        <form
+          action={async (formData) => {
+            "use server";
+            const email = String(formData.get("email") || "");
+            const operator = String(formData.get("operator") || "");
+            const origin = String(formData.get("origin") || "");
+            const destination = String(formData.get("destination") || "");
+            const booking_ref = String(formData.get("booking_ref") || "");
+            const departTime = String(formData.get("depart_time") || "00:00");
+            const arriveTime = String(formData.get("arrive_time") || "00:00");
+            const departISO = makeIso(String(formData.get("depart_date") || ""), departTime);
+            const arriveISO = makeIso(String(formData.get("arrive_date") || ""), arriveTime);
+
+            // find user_id by email (helper RPC OR profiles table)
+            const uid = await (async () => {
+              const { data: prof } = await db.from("profiles").select("user_id").eq("user_email", email).maybeSingle();
+              if (prof?.user_id) return prof.user_id;
+              const { data: rpc } = await db.rpc("get_auth_user_id_by_email", { p_email: email }).maybeSingle();
+              return rpc?.user_id || null;
+            })();
+
+            if (!uid) throw new Error("No user found for that email");
+
+            // insert trip
+            const { data: trip, error: tErr } = await db
+              .from("trips")
+              .insert({
+                user_id: uid,
+                user_email: email,
+                operator,
+                origin,
+                destination,
+                booking_ref,
+                depart_planned: departISO,
+                arrive_planned: arriveISO,
+                status: "planned",
+                source: "manual",
+              })
+              .select("id")
+              .single();
+            if (tErr || !trip?.id) throw tErr || new Error("trip insert failed");
+
+            // insert claim
+            const { data: claim, error: cErr } = await db
+              .from("claims")
+              .insert({
+                trip_id: trip.id,
+                user_id: uid,
+                user_email: email,
+                status: "pending",
+                fee_pct: 25,
+                meta: {
+                  origin,
+                  destination,
+                  booking_ref,
+                  depart_planned: departISO,
+                  arrive_planned: arriveISO,
+                  operator,
+                },
+              })
+              .select("id")
+              .single();
+            if (cErr || !claim?.id) throw cErr || new Error("claim insert failed");
+
+            // queue it
+            await db.from("claim_queue").insert({
+              claim_id: claim.id,
+              provider: operator?.toLowerCase().includes("avanti")
+                ? "avanti"
+                : operator?.toLowerCase().includes("west midlands")
+                ? "wmt"
+                : "avanti", // default for now
+              status: "queued",
+              payload: {
+                user_email: email,
+                booking_ref,
+                operator,
+                origin,
+                destination,
+                depart_planned: departISO,
+                arrive_planned: arriveISO,
+              },
+            });
+          }}
+          style={{ marginTop: 16, padding: 16, border: "1px dashed #e5eaf0", borderRadius: 12 }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>Dev • Manual loop</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 280px))", gap: 10 }}>
+            <input name="email" placeholder="email" defaultValue="hassanisherenow@gmail.com" />
+            <input name="operator" placeholder="operator" defaultValue="Avanti West Coast" />
+            <input name="booking_ref" placeholder="booking ref" defaultValue="12345678" />
+            <input name="origin" placeholder="origin" defaultValue="Wolverhampton" />
+            <input name="destination" placeholder="destination" defaultValue="Birmingham New Street" />
+            <input name="depart_date" placeholder="depart date (YYYY-MM-DD)" />
+            <input name="depart_time" placeholder="depart HH:mm" defaultValue="18:45" />
+            <input name="arrive_date" placeholder="arrive date (YYYY-MM-DD)" />
+            <input name="arrive_time" placeholder="arrive HH:mm" defaultValue="19:07" />
           </div>
-        </div>
+          <button className="btn btnPrimary" style={{ marginTop: 12 }} type="submit">
+            Create & Queue
+          </button>
+        </form>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16, marginTop: 24 }}>
+        {(claims || []).map((c: any) => (
+          <div key={c.id} className="card">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <strong style={{ color: "var(--fg-navy)" }}>
+                {c.trip?.origin} → {c.trip?.destination}
+              </strong>
+              <StatusBadge status={c.status} />
+            </div>
+            <div className="small" style={{ marginTop: 6 }}>
+              {new Date(c?.trip?.depart_planned || c.created_at).toLocaleString()}
+            </div>
+            <div className="small" style={{ marginTop: 6 }}>
+              {c.provider_ref ? <>Ref: <code>{c.provider_ref}</code></> : <>Awaiting provider ref…</>}
+            </div>
+            {c.error && (
+              <div className="small" style={{ marginTop: 6, color: "#b00020" }}>
+                {c.error}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
 
-      <section className="hero">
-        <div className="container">
-          <div className="badge">Live</div>
-          <h1 className="h1" style={{ marginTop: 10 }}>
-            Your journeys & refund status
-          </h1>
-          {!userEmail && (
-            <>
-              <p className="sub">You’re not signed in.</p>
-              <div className="ctaRow">
-                <Link className="btn btnPrimary" href="/">
-                  Go to landing
-                </Link>
-              </div>
-            </>
-          )}
-
-          {userEmail && (
-            <>
-              <p className="sub">
-                We’re watching your tickets and filing Delay Repay when eligible.
-              </p>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-                  gap: 16,
-                  marginTop: 18,
-                }}
-              >
-                {/* Quick add card always shows for signed-in users */}
-                <QuickAddTripCard />
-
-                {(trips ?? []).map((t) => {
-                  const delayed = (t.delay_minutes ?? 0) > 0;
-                  return (
-                    <div key={t.id} className="card">
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div
-                          className="badge"
-                          style={{
-                            background: delayed ? "#fff1f1" : "#ecf8f2",
-                            color: delayed ? "#b42323" : "var(--fg-green)",
-                            borderColor: delayed ? "#ffd8d8" : "#d6f0e4",
-                          }}
-                        >
-                          {delayed ? `Delayed ${t.delay_minutes}m` : "Not delayed"}
-                        </div>
-                        {t.potential_refund != null && (
-                          <div className="small" style={{ fontWeight: 800, color: "var(--fg-navy)" }}>
-                            £{t.potential_refund.toFixed(2)}
-                          </div>
-                        )}
-                      </div>
-                      <h3 style={{ margin: "10px 0 4px", color: "var(--fg-navy)", fontSize: 18 }}>
-                        {(t.origin ?? "Unknown")} → {(t.destination ?? "Unknown")}
-                      </h3>
-                      <p className="small">
-                        Depart: {t.depart_planned ? new Date(t.depart_planned).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "—"}
-                        <br />
-                        Arrive: {t.arrive_planned ? new Date(t.arrive_planned).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "—"}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {trips && trips.length === 0 && (
-                <div className="card" style={{ marginTop: 16 }}>
-                  <div className="kicker">Setup complete</div>
-                  <p className="sub">
-                    We’ll populate this list as we detect your e-tickets. Check back
-                    after your next booking.
-                  </p>
-                </div>
-              )}
-            </>
-          )}
+      {!claims?.length && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <div style={{ fontWeight: 800, color: "var(--fg-green)" }}>Setup complete</div>
+          <p className="small" style={{ marginTop: 6 }}>
+            We’ll populate this list as we detect your e-tickets. Check back after your next booking.
+          </p>
         </div>
-      </section>
-    </>
+      )}
+
+      <footer className="footer" style={{ marginTop: 32 }}>
+        <div className="container" style={{ display: "flex", gap: 16 }}>
+          <span>© {new Date().getFullYear()} FareGuard</span>
+          <Link href="/privacy">Privacy</Link>
+          <Link href="/terms">Terms</Link>
+          <Link href="/contact">Contact</Link>
+        </div>
+      </footer>
+    </div>
   );
 }
