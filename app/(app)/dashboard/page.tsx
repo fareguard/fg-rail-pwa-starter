@@ -94,11 +94,13 @@ export default async function Dashboard() {
 
               if (prof?.user_id) return prof.user_id as string;
 
-              // 2) auth.users via RPC (typed)
-              // get_auth_user_id_by_email RETURNS TABLE(user_id uuid)
-              const { data: rpcRows } = await db
-                .rpc("get_auth_user_id_by_email", { p_email: email })
-                .returns<{ user_id: string }[]>(); // 👈 makes TS happy
+              // 2) auth.users via RPC (typed as a single row)
+              const { data: rpc } = await db
+               .rpc("get_auth_user_id_by_email", { p_email: email })
+               .returns<{ user_id: string }>()
+               .maybeSingle();
+
+              return rpc?.user_id ?? null;
 
               const userId = rpcRows?.[0]?.user_id ?? null;
               return userId;
