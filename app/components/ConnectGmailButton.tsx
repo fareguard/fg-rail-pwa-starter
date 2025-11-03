@@ -1,42 +1,35 @@
 // app/components/ConnectGmailButton.tsx
 "use client";
 
-import { useState } from "react";
 import { createClient } from "@supabase/supabase-js";
+import * as React from "react";
 
-const supabase =
-  typeof window !== "undefined"
-    ? createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-      )
-    : (null as any);
+type Props = { label?: string; className?: string };
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export default function ConnectGmailButton({
-  label = "Connect Gmail (1-click)",
-  className = "",
-}: { label?: string; className?: string }) {
-  const [loading, setLoading] = useState(false);
+  label = "Connect Gmail (1–click)",
+  className = "btn btnPrimary",
+}: Props) {
+  const onClick = async () => {
+    const redirectTo = `${window.location.origin}/dashboard?auth=1`;
+    await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo,
+        scopes:
+          "https://www.googleapis.com/auth/gmail.readonly openid email profile",
+      },
+    });
+  };
 
   return (
-    <button
-      className={`btn btnPrimary ${className}`}
-      disabled={loading}
-      onClick={async () => {
-        if (!supabase) return;
-        setLoading(true);
-        await supabase.auth.signInWithOAuth({
-          provider: "google",
-          options: {
-            scopes:
-              "openid email https://www.googleapis.com/auth/gmail.readonly",
-            redirectTo: `${window.location.origin}/dashboard`,
-          },
-        });
-        setLoading(false);
-      }}
-    >
-      {loading ? "Opening Google…" : label}
+    <button onClick={onClick} className={className}>
+      {label}
     </button>
   );
 }
