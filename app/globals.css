@@ -7,6 +7,8 @@
   --fg-navy: #0F2A43;
   --fg-green:#18A05E;
   --fg-ring: rgba(15,42,67,0.15);
+  /* new */
+  --fg-hero-overlay: linear-gradient(180deg, rgba(15,42,67,.06), rgba(255,255,255,0));
 }
 
 *{box-sizing:border-box; margin:0; padding:0;}
@@ -125,3 +127,48 @@ button{ font: inherit; cursor:pointer; }
   gap:20px;
   flex-wrap:wrap;
 }
+
+/* --- additions for full-bleed hero + nicer header --- */
+
+/* make brand image look crisp (overrides earlier .brand img) */
+.brand img { display:block; height:28px; width:auto; }
+@media (min-width: 1024px){
+  .brand img { height:32px; }
+}
+
+/* full-bleed hero container */
+.hero-bleed {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border-bottom: 1px solid #eef1f5;
+}
+.hero-bleed .heroImg {
+  width: 100%;
+  height: clamp(300px, 42vw, 520px);
+  background-image: var(--fg-hero-overlay), url("/hero.png");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+/* overrides base .heroContent when nested in .hero-bleed */
+.hero-bleed .heroContent {
+  position: relative;
+  margin-top: -140px; /* pull content up over image */
+  padding-bottom: 24px;
+}
+@media (max-width: 900px) {
+  .hero-bleed .heroContent { margin-top: -80px; }
+}
+
+/* status chips for dashboard */
+.chip {
+  display:inline-flex; align-items:center; gap:8px;
+  padding:6px 10px; border-radius:999px; font-weight:700; font-size:12px;
+  border:1px solid #eef1f5; background:#f7fafc; color:#334155;
+}
+.chip.ok { background:#ecf8f2; color:var(--fg-green); border-color:#d6f0e4; }
+.chip.warn { background:#fff4ed; color:#b85619; border-color:#ffd9c1; }
+.chip.err { background:#ffefef; color:#b71c1c; border-color:#ffd0d0; }
