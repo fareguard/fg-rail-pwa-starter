@@ -11,15 +11,15 @@ const operators = [
 export default function Home() {
   return (
     <>
-      {/* ====== NAV ====== */}
+      {/* NAV */}
       <div className="nav">
         <div className="container navInner">
           <div className="brand">
             <Image
-              src="/media/logo.png"   // must exist exactly at /public/media/logo.png
-              alt="FareGuard logo"
-              width={176}              // maintain visible size
-              height={44}
+              src="/media/logo.png"
+              alt="FareGuard"
+              width={240}
+              height={56}
               priority
             />
           </div>
@@ -31,7 +31,7 @@ export default function Home() {
         </div>
       </div>
 
-      {/* ====== HERO (simple, no absolute positioning) ====== */}
+      {/* HERO - single column */}
       <section className="hero">
         <div className="container heroGrid">
           <div>
@@ -51,26 +51,10 @@ export default function Home() {
               Works with Gmail e-tickets. All UK operators supported.
             </p>
           </div>
-
-          <div className="card">
-            <div className="kicker">Plug & play</div>
-            <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>
-              “You’ve been missing out on money.”
-            </h3>
-            <p className="small">
-              We scan your inbox for past trips and show what you could have claimed.
-              From now on, we’ll file eligible claims automatically.
-            </p>
-            <ul className="list">
-              <li><span className="dot" /><span>Detect delays (30–60+ mins)</span></li>
-              <li><span className="dot" /><span>Auto-file with the operator</span></li>
-              <li><span className="dot" /><span>Approved? Money back to you</span></li>
-            </ul>
-          </div>
         </div>
       </section>
 
-      {/* ====== OPERATORS ====== */}
+      {/* OPERATORS */}
       <section className="section">
         <div className="container">
           <h2>All UK train operators</h2>
@@ -89,27 +73,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ====== HOW IT WORKS ====== */}
-      <section className="section">
-        <div className="container">
-          <h2>How it works</h2>
-          <div className="card">
-            <ul className="list">
-              <li><span className="dot" /><span>Connect Gmail (read-only) – we only look for rail e-tickets</span></li>
-              <li><span className="dot" /><span>We match journeys, detect delays, and calculate what you’re owed</span></li>
-              <li><span className="dot" /><span>We file the claim. You get paid when approved</span></li>
-            </ul>
-            <div className="ctaRow" style={{ marginTop: 14 }}>
-              <ConnectGmailButton label="Get started — free" />
-            </div>
-            <p className="small" style={{ marginTop: 8 }}>
-              Transparent pricing shown after connection.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* ====== FOOTER ====== */}
+      {/* FOOTER */}
       <footer className="footer">
         <div className="container" style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <span>© {new Date().getFullYear()} FareGuard</span>
