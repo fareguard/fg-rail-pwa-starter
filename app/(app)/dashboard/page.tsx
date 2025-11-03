@@ -26,7 +26,7 @@ function fmt(dt?: string | null) {
   try {
     return new Date(dt).toLocaleString();
   } catch {
-    return dt;
+    return dt || "";
   }
 }
 
@@ -65,6 +65,27 @@ function statusTone(s?: string | null): "pending" | "submitted" | "error" | "don
   if (["failed", "error"].includes(v)) return "error";
   if (["approved", "paid", "complete", "completed"].includes(v)) return "done";
   return "pending";
+}
+
+/**
+ * Renders the example chip row inside each trip card.
+ * Matches your example:
+ *  - pending/queued      -> "Claim queued" (chip warn)
+ *  - submitted/processing-> "Submitted" (chip ok)
+ *  - no-delay            -> "Not delayed" (plain chip)
+ *  - error/failed        -> "Action needed" (chip err)
+ */
+function ClaimChips({ status }: { status?: string | null }) {
+  const v = (status || "").toLowerCase();
+
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+      {(["pending", "queued"].includes(v)) && <span className="chip warn">Claim queued</span>}
+      {(["submitted", "processing"].includes(v)) && <span className="chip ok">Submitted</span>}
+      {(["no-delay", "no delay", "not delayed", "not_delayed"].includes(v)) && <span className="chip">Not delayed</span>}
+      {(["error", "failed"].includes(v)) && <span className="chip err">Action needed</span>}
+    </div>
+  );
 }
 
 export default async function Dashboard() {
@@ -168,12 +189,16 @@ export default async function Dashboard() {
                       </div>
                       <StatusBadge label={mainStatus} tone={statusTone(mainStatus)} />
                     </div>
+
                     <div className="small" style={{ marginTop: 8 }}>
                       {fmt(r.depart_planned)}
                     </div>
                     <div className="small" style={{ marginTop: 4 }}>
                       {r.provider ? `Provider: ${r.provider}` : "Awaiting provider ref..."}
                     </div>
+
+                    {/* example inside your trip card */}
+                    <ClaimChips status={mainStatus} />
                   </div>
                 );
               })}
