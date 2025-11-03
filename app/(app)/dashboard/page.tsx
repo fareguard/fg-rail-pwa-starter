@@ -6,9 +6,10 @@ import { useSearchParams } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
 import ConnectGmailButton from "@/app/components/ConnectGmailButton";
 
-// Force CSR (no prerender) to avoid static export errors
+// ✅ Make sure this page is never prerendered
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
+// ✅ Valid values: number or false. Use false to fully disable ISR on this page.
+export const revalidate = false;
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -18,7 +19,6 @@ const supabase = createClient(
 export default function DashboardPage() {
   return (
     <div className="container" style={{ padding: "40px 0" }}>
-      {/* Wrap the inner component (that uses useSearchParams) in Suspense */}
       <Suspense fallback={<div>Loading…</div>}>
         <DashboardInner />
       </Suspense>
@@ -124,7 +124,7 @@ function DashboardInner() {
         </div>
       )}
 
-      {/* TODO: render journeys list here (claims/trips) */}
+      {/* TODO: render journeys / claims list here */}
     </>
   );
 }
