@@ -1,103 +1,57 @@
+// app/page.tsx
 import Link from "next/link";
 import Image from "next/image";
 import ConnectGmailButton from "./components/ConnectGmailButton";
 
 const operators = [
-  "Avanti West Coast", "Great Western Railway", "West Midlands Trains", "Northern",
-  "LNER", "Thameslink", "Southern", "Southeastern", "ScotRail", "TransPennine",
+  "Avanti West Coast","Great Western Railway","West Midlands Trains","Northern",
+  "LNER","Thameslink","Southern","Southeastern","ScotRail","TransPennine",
 ];
 
 export default function Home() {
   return (
     <>
-      {/* NAVBAR */}
+      {/* Nav */}
       <div className="nav">
         <div className="container navInner">
-          <div className="brand" style={{ display: "flex", alignItems: "center" }}>
+          <div className="brand">
             <Link href="/">
-              <Image
-                src="/media/logo.png"
-                alt="FareGuard logo"
-                width={190}
-                height={52}
-                priority
-                style={{ height: "auto", width: "auto", maxHeight: "52px" }}
-              />
+              <Image src="/media/logo.png" width={132} height={32} alt="FareGuard" priority />
             </Link>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
             <Link className="btn btnGhost" href="/how-it-works">How it works</Link>
             <Link className="btn btnGhost" href="/pricing">Pricing</Link>
-            <Link className="btn btnGhost" href="/dashboard">Dashboard</Link>
+            <Link className="btn btnPrimary" href="/dashboard">Dashboard</Link>
           </div>
         </div>
       </div>
 
-      {/* HERO */}
-      <section
-        className="hero"
-        style={{
-          position: "relative",
-          width: "100%",
-          height: "540px",
-          overflow: "hidden",
-          marginBottom: "60px",
-        }}
-      >
-        {/* Background hero image */}
-        <Image
-          src="/hero.png"
-          alt="UK train station background"
-          fill
-          priority
-          sizes="100vw"
-          style={{
-            objectFit: "cover",
-            objectPosition: "center",
-            zIndex: 1,
-          }}
-        />
-        {/* Subtle gradient overlay for contrast */}
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            background:
-              "linear-gradient(90deg, rgba(255,255,255,0.97) 0%, rgba(255,255,255,0.92) 40%, rgba(255,255,255,0.7) 100%)",
-            zIndex: 2,
-          }}
-        />
-
-        {/* HERO CONTENT */}
-        <div
-          className="container"
-          style={{
-            position: "relative",
-            zIndex: 3,
-            top: "50%",
-            transform: "translateY(-50%)",
-            maxWidth: "1120px",
-          }}
-        >
-          <div className="badge">Automatic refunds for UK train delays</div>
-          <h1 className="h1" style={{ marginTop: 10 }}>
-            Cheaper UK train tickets. <br /> Automatic refunds.
-          </h1>
-          <p className="sub">
-            We track your journeys and auto-file Delay Repay — so you never miss
-            money you’re owed. Set up once, then it runs in the background.
-          </p>
-          <div className="ctaRow">
-            <ConnectGmailButton />
-            <Link href="/search" className="btn btnGhost">Search tickets</Link>
+      {/* Full-bleed hero */}
+      <section className="hero-bleed">
+        <div className="heroImg" />
+        <div className="container heroContent">
+          <div className="card" style={{ padding: 22 }}>
+            <div className="badge">Automatic refunds for UK train delays</div>
+            <h1 className="h1" style={{ marginTop: 10 }}>
+              Plug in once. Get back money forever.
+            </h1>
+            <p className="sub">
+              We find your rail e-tickets in Gmail, detect delays, and auto-file Delay Repay.
+              No forms. No hassle. If a claim is approved, the money goes to you.
+            </p>
+            <div className="ctaRow">
+              <ConnectGmailButton />
+              <Link href="/search" className="btn btnGhost">Search cheap tickets</Link>
+            </div>
+            <p className="small" style={{ marginTop: 8 }}>
+              Works with Gmail e-tickets. All major UK operators supported.
+            </p>
           </div>
-          <p className="small" style={{ marginTop: 8 }}>
-            Works with Gmail e-tickets. All UK operators supported.
-          </p>
         </div>
       </section>
 
-      {/* OPERATORS */}
+      {/* Operators */}
       <section className="section">
         <div className="container">
           <h2>All UK train operators</h2>
@@ -107,11 +61,7 @@ export default function Home() {
               <span
                 key={op}
                 className="badge"
-                style={{
-                  background: "#f2f6fb",
-                  color: "var(--fg-navy)",
-                  borderColor: "#e6eef7",
-                }}
+                style={{ background:"#f2f6fb", color:"var(--fg-navy)", borderColor:"#e6eef7" }}
               >
                 {op}
               </span>
@@ -120,39 +70,34 @@ export default function Home() {
         </div>
       </section>
 
-      {/* HOW IT WORKS */}
+      {/* How it works */}
       <section className="section">
         <div className="container">
           <h2>How it works</h2>
-          <div
-            className="card"
-            style={{
-              background: "white",
-              borderRadius: "16px",
-              padding: "24px",
-            }}
-          >
+          <div className="card">
             <ul className="list">
-              <li><span className="dot" /><span>Connect Gmail (read-only) — we only look for rail e-tickets</span></li>
-              <li><span className="dot" /><span>We match journeys, detect delays, and calculate what you’re owed</span></li>
-              <li><span className="dot" /><span>We file the claim. You get paid when approved</span></li>
+              <li><span className="dot" /><span>Connect Gmail (read-only). We only look for rail e-tickets.</span></li>
+              <li><span className="dot" /><span>We match journeys, detect delays, and calculate what you’re owed.</span></li>
+              <li><span className="dot" /><span>We auto-file the claim with the operator. You get paid when approved.</span></li>
             </ul>
             <div className="ctaRow" style={{ marginTop: 14 }}>
               <ConnectGmailButton label="Get started — free" />
             </div>
             <p className="small" style={{ marginTop: 8 }}>
-              Transparent pricing shown after connection.
+              Transparent success fee shown after connection.
             </p>
           </div>
         </div>
       </section>
 
-      {/* FOOTER */}
+      {/* Footer */}
       <footer className="footer">
-        <span>© {new Date().getFullYear()} FareGuard</span>
-        <Link href="/privacy">Privacy</Link>
-        <Link href="/terms">Terms</Link>
-        <Link href="/contact">Contact</Link>
+        <div className="container" style={{ display: "flex", gap: 16, flexWrap:"wrap" }}>
+          <span>© {new Date().getFullYear()} FareGuard</span>
+          <Link href="/privacy-policy">Privacy</Link>
+          <Link href="/tos">Terms</Link>
+          <Link href="/contact">Contact</Link>
+        </div>
       </footer>
     </>
   );
