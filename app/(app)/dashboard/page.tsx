@@ -1,129 +1,98 @@
-'use client';
+// app/(app)/dashboard/page.tsx
+"use client";
 
-import { useEffect, useState, useCallback } from 'react';
-import Link from 'next/link';
-import ConnectGmailButton from '@/app/components/ConnectGmailButton';
+import { useEffect, useState } from "react";
+import Link from "next/link";
 
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
-
-type Me =
-  | { authed: false }
-  | {
-      authed: true;
-      user: { id: string; email: string };
-      profile?: { gmail_connected?: boolean | null };
-    };
+type Me = {
+  authenticated: boolean;
+  email?: string;
+  userId?: string;
+  error?: string;
+};
 
 export default function DashboardPage() {
   const [me, setMe] = useState<Me | null>(null);
+  const [summary, setSummary] = useState<{ ok: boolean; claims?: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadMe = useCallback(async () => {
-    try {
-      const res = await fetch('/api/me', { cache: 'no-store' });
-      const data = (await res.json()) as Me;
-      setMe(data);
-    } catch {
-      setMe({ authed: false });
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      try {
+        // never cache user state
+        const r = await fetch("/api/me", { cache: "no-store" });
+        const j: Me = await r.json();
+        if (!alive) return;
+        setMe(j);
+
+        // lightweight sanity metric (also no-store)
+        const s = await fetch("/dashboard/summary", { cache: "no-store" });
+        const sj = await s.json();
+        if (!alive) return;
+        setSummary(sj);
+      } catch (e: any) {
+        if (alive) setMe({ authenticated: false, error: String(e?.message || e) });
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  useEffect(() => {
-    loadMe();
-    // also auto-refresh once after OAuth redirect (?code=…)
-    const url = new URL(window.location.href);
-    if (url.searchParams.has('code')) {
-      // clean the URL and refresh state once
-      url.searchParams.delete('code');
-      window.history.replaceState({}, '', url.toString());
-      setTimeout(loadMe, 800);
-    }
-  }, [loadMe]);
-
-  // --- UI blocks (match your current styling) ---
-  const Title = () => (
-    <div className="container" style={{ maxWidth: 1120, padding: '32px 20px' }}>
-      <h1 className="h1" style={{ marginBottom: 8 }}>
+  return (
+    <div className="container section" style={{ paddingTop: 28 }}>
+      <h1 className="h1" style={{ marginBottom: 6 }}>
         Your journeys & refund status
       </h1>
       <p className="sub">We’re watching your tickets and filing Delay Repay when eligible.</p>
-    </div>
-  );
 
-  const Card = ({ children }: { children: React.ReactNode }) => (
-    <div className="container" style={{ maxWidth: 1120, padding: '12px 20px 48px' }}>
-      <div className="card">
-        {children}
-      </div>
-    </div>
-  );
+      {loading && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <p className="small">Loading your dashboard…</p>
+        </div>
+      )}
 
-  if (loading) {
-    return (
-      <>
-        <Title />
-        <Card>
-          <div className="badge">Loading</div>
-          <h3 style={{ margin: '10px 0 6px', color: 'var(--fg-navy)' }}>Checking your account…</h3>
-          <p className="small">Hold tight, just a sec.</p>
-        </Card>
-      </>
-    );
-  }
-
-  // Not signed in at all → nudge to home to start
-  if (!me || me.authed === false) {
-    return (
-      <>
-        <Title />
-        <Card>
-          <div className="badge">Setup</div>
-          <h3 style={{ margin: '10px 0 6px', color: 'var(--fg-navy)' }}>Sign in to view your dashboard</h3>
-          <p className="small">Start from the home page to connect your Gmail and come back here.</p>
-          <div className="ctaRow" style={{ marginTop: 14 }}>
-            <Link href="/" className="btn btnPrimary">Go to home</Link>
-          </div>
-        </Card>
-      </>
-    );
-  }
-
-  const gmailConnected = Boolean(me.profile?.gmail_connected);
-
-  // Signed in but Gmail not connected yet
-  if (!gmailConnected) {
-    return (
-      <>
-        <Title />
-        <Card>
-          <div className="badge">Setup</div>
-          <h3 style={{ margin: '10px 0 6px', color: 'var(--fg-navy)' }}>Finish connecting Gmail</h3>
-          <p className="small">
+      {!loading && me && !me.authenticated && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <span className="badge" style={{ marginBottom: 8 }}>Setup</span>
+          <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>
+            Finish connecting Gmail
+          </h3>
+          <p className="small" style={{ marginBottom: 12 }}>
             Connect your Gmail (read-only) so we can detect e-tickets and file Delay Repay.
           </p>
-          <div className="ctaRow" style={{ marginTop: 14 }}>
-            <ConnectGmailButton label="Connect Gmail (1–click)" next="/dashboard" />
-          </div>
-        </Card>
-      </>
-    );
-  }
 
-  // Fully connected — show the “live” empty state for now
-  return (
-    <>
-      <Title />
-      <Card>
-        <div className="badge" style={{ background:'#ecf8f2', color:'var(--fg-green)' }}>Live</div>
-        <h3 style={{ margin: '10px 0 6px', color: 'var(--fg-navy)' }}>Setup complete</h3>
-        <p className="small">
-          We’ll populate this list as we detect your e-tickets. Check back after your next booking.
-        </p>
-        {/* You can render real trips here later */}
-      </Card>
-    </>
+          {/* Sends them to landing where the 1-click button lives */}
+          <Link href="/?connect=1" className="btn btnPrimary">
+            Connect Gmail (1–click)
+          </Link>
+        </div>
+      )}
+
+      {!loading && me && me.authenticated && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <span className="badge" style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}>
+            Live
+          </span>
+          <h3 style={{ margin: "4px 0 8px", color: "var(--fg-navy)" }}>
+            Welcome{me.email ? `, ${me.email}` : ""}.
+          </h3>
+          <p className="small">
+            We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.
+          </p>
+
+          {summary?.ok && (
+            <p className="small" style={{ marginTop: 8 }}>
+              Claims in system: <strong>{summary.claims ?? 0}</strong>
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
