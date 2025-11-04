@@ -4,11 +4,6 @@ import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createBrowserClient } from '@supabase/ssr';
 
-// Make sure this route never gets statically prerendered
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
-export const fetchCache = 'force-no-store';
-
 function ExchangeStep() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -29,8 +24,10 @@ function ExchangeStep() {
           process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
         );
 
-        // Exchange the PKCE code for a session and persist cookies
-        const { error } = await supabase.auth.exchangeCodeForSession(window.location.href);
+        const { error } = await supabase.auth.exchangeCodeForSession(
+          window.location.href
+        );
+
         if (error) {
           console.error(error);
           setMsg('Sign-in failed. Redirecting…');
@@ -38,7 +35,6 @@ function ExchangeStep() {
           return;
         }
 
-        // Success → Go to dashboard
         router.replace('/dashboard');
       } catch (e) {
         console.error(e);
