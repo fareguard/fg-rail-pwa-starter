@@ -1,10 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createBrowserClient } from '@supabase/ssr';
 
-export default function AuthCallback() {
+// Make sure this route never gets statically prerendered
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const fetchCache = 'force-no-store';
+
+function ExchangeStep() {
   const router = useRouter();
   const sp = useSearchParams();
   const [msg, setMsg] = useState('Finalising sign-in…');
@@ -14,7 +19,7 @@ export default function AuthCallback() {
       try {
         const code = sp.get('code');
         if (!code) {
-          setMsg('Missing auth code. Redirecting…');
+          setMsg('No auth code found. Redirecting…');
           router.replace('/dashboard');
           return;
         }
@@ -24,7 +29,7 @@ export default function AuthCallback() {
           process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
         );
 
-        // Exchanges the `code` for a session and stores cookies
+        // Exchange the PKCE code for a session and persist cookies
         const { error } = await supabase.auth.exchangeCodeForSession(window.location.href);
         if (error) {
           console.error(error);
@@ -33,21 +38,27 @@ export default function AuthCallback() {
           return;
         }
 
-        // Success → go to dashboard
+        // Success → Go to dashboard
         router.replace('/dashboard');
       } catch (e) {
         console.error(e);
         router.replace('/?auth_error=1');
       }
     };
-    run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
+    run();
+  }, [router, sp]);
+
+  return <p>{msg}</p>;
+}
+
+export default function AuthCallbackPage() {
   return (
     <div style={{ padding: 24 }}>
       <h1>Connecting…</h1>
-      <p>{msg}</p>
+      <Suspense fallback={<p>Preparing…</p>}>
+        <ExchangeStep />
+      </Suspense>
     </div>
   );
 }
