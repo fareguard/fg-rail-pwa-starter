@@ -1,32 +1,35 @@
 // app/api/me/route.ts
-import { noStoreJson, getSupabaseServer } from '@/lib/supabase';
+import { NextResponse } from "next/server";
+import { getSupabaseServer } from "@/lib/supabase-server";
 
-export const dynamic = 'force-dynamic';
-export const revalidate = false as const;
-export const fetchCache = 'force-no-store';
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
+
+function jsonNoStore(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: { "cache-control": "no-store, no-cache, must-revalidate, max-age=0" },
+  });
+}
 
 export async function GET() {
   try {
     const supabase = getSupabaseServer();
-    const { data: { user }, error } = await supabase.auth.getUser();
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser();
 
-    if (error) return noStoreJson({ authenticated: false, error: error.message }, 200);
-    if (!user) return noStoreJson({ authenticated: false }, 200);
+    if (error) return jsonNoStore({ authenticated: false, error: error.message });
+    if (!user) return jsonNoStore({ authenticated: false });
 
-    // Optional: fetch a profile row if you want to gate on it
-    // const { data: profile } = await supabase
-    //   .from('profiles')
-    //   .select('user_id, user_email')
-    //   .eq('user_id', user.id)
-    //   .maybeSingle();
-
-    return noStoreJson({
+    return jsonNoStore({
       authenticated: true,
       email: user.email,
       userId: user.id,
-      // profileExists: !!profile,
     });
   } catch (e: any) {
-    return noStoreJson({ authenticated: false, error: String(e?.message || e) }, 200);
+    return jsonNoStore({ authenticated: false, error: String(e?.message || e) });
   }
 }
