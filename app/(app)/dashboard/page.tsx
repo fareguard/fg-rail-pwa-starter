@@ -1,8 +1,6 @@
 'use client';
 
-import useSWR from 'swr';
-
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
+import { useEffect, useState } from 'react';
 
 type Trip = {
   id: string;
@@ -18,15 +16,33 @@ type Trip = {
   created_at: string | null;
 };
 
-export default function DashboardClient() {
-  const { data: me } = useSWR<{ email: string | null }>('/api/me', fetcher);
-  const { data: tripsData } = useSWR<{ trips: Trip[] }>(
-    me?.email ? '/api/trips' : null,
-    fetcher
-  );
+export default function Dashboard() {
+  const [email, setEmail] = useState<string | null | undefined>(undefined);
+  const [trips, setTrips] = useState<Trip[] | null>(null);
 
-  const email = me?.email ?? null;
-  const trips = tripsData?.trips ?? [];
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const me = await fetch('/api/me', { cache: 'no-store' }).then(r => r.json());
+        if (!alive) return;
+        setEmail(me?.email ?? null);
+
+        if (me?.email) {
+          const t = await fetch('/api/trips', { cache: 'no-store' }).then(r => r.json());
+          if (!alive) return;
+          setTrips(t?.trips ?? []);
+        } else {
+          setTrips([]);
+        }
+      } catch {
+        if (!alive) return;
+        setEmail(null);
+        setTrips([]);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   const header = (
     <div style={{ padding: '24px 24px 0' }}>
@@ -39,6 +55,17 @@ export default function DashboardClient() {
     </div>
   );
 
+  // Loading
+  if (email === undefined) {
+    return (
+      <div style={{ padding: 24 }}>
+        {header}
+        <p style={{ color: '#5b6b80', marginTop: 16 }}>Loading…</p>
+      </div>
+    );
+  }
+
+  // Not connected
   if (!email) {
     return (
       <div style={{ padding: 24 }}>
@@ -69,8 +96,7 @@ export default function DashboardClient() {
 
           <h3 style={{ margin: '10px 0 8px' }}>Finish connecting Gmail</h3>
           <p style={{ color: '#5b6b80', marginTop: 6 }}>
-            Connect your Gmail (read-only) so we can detect e-tickets and file Delay Repay
-            for eligible delays.
+            Connect your Gmail (read-only) so we can detect e-tickets and file Delay Repay.
           </p>
 
           <a
@@ -95,6 +121,7 @@ export default function DashboardClient() {
     );
   }
 
+  // Connected
   return (
     <div style={{ padding: 24 }}>
       {header}
@@ -125,24 +152,20 @@ export default function DashboardClient() {
 
         <h3 style={{ margin: '10px 0 8px' }}>Setup complete</h3>
         <p style={{ color: '#5b6b80', marginTop: 6 }}>
-          We’ll populate this list as we detect your e-tickets. Check back after your
-          next booking.
+          We’ll populate this list as we detect your e-tickets. Check back after your next
+          booking.
         </p>
       </div>
 
-      {/* Trips list */}
-      {trips.length > 0 && (
+      {trips && trips.length > 0 && (
         <div style={{ display: 'grid', gap: 14, marginTop: 16 }}>
           {trips.map((t) => {
-            const title = [t.origin, '→', t.destination]
-              .filter(Boolean)
-              .join(' ')
-              .trim();
+            const title = [t.origin, '→', t.destination].filter(Boolean).join(' ').trim();
+            const lower = (t.status || '').toLowerCase();
             const badge =
-              (t.status || '').toLowerCase().includes('pending') ||
-              (t.status || '').toLowerCase().includes('queued')
+              lower.includes('pending') || lower.includes('queued')
                 ? { label: 'Pending', bg: '#fff7e6', color: '#b36b00', border: '#ffe1b3' }
-                : (t.status || '').toLowerCase().includes('submitted')
+                : lower.includes('submitted')
                 ? { label: 'Submitted', bg: '#ecf8f2', color: '#18A05E', border: '#d6f0e4' }
                 : { label: t.status || '—', bg: '#f5f8fb', color: '#0F2A43', border: '#e6eef7' };
 
