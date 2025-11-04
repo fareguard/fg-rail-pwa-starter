@@ -16,11 +16,10 @@ export default function ConnectGmailButton({ label = 'Connect Gmail (1–click)'
     await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        // After Google, come back to the dashboard
-        redirectTo: `${origin}/dashboard`,
+        // 👇 after Google → come back to our callback page
+        redirectTo: `${origin}/auth/callback`,
         scopes: 'openid email profile https://www.googleapis.com/auth/gmail.readonly',
         queryParams: {
-          // ensures we can refresh in future (safer; Google may ignore for some projects)
           access_type: 'offline',
           prompt: 'consent',
         },
@@ -29,11 +28,7 @@ export default function ConnectGmailButton({ label = 'Connect Gmail (1–click)'
   }
 
   return (
-    <button
-      onClick={handleClick}
-      className={className ?? 'btn btnPrimary'}
-      type="button"
-    >
+    <button onClick={handleClick} className={className ?? 'btn btnPrimary'} type="button">
       {label}
     </button>
   );
