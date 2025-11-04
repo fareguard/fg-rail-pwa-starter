@@ -1,15 +1,13 @@
+// app/(app)/dashboard/summary/route.ts
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin } from "@/lib/supabase-admin"; // ⬅️ correct helper
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
-  const s = getSupabaseAdmin();
-  const [{ count: trips }, { count: eligible }, { count: pending }] = await Promise.all([
-    s.from("trips").select("*", { count: "exact", head: true }),
-    s.from("trips").select("*", { count: "exact", head: true }).eq("eligible", true),
-    s.from("claims").select("*", { count: "exact", head: true }).eq("status", "pending"),
-  ]);
-  return NextResponse.json({ ok:true, trips, eligible, pending });
+  const db = getSupabaseAdmin();
+  const { count, error } = await db.from("claims").select("*", { count: "exact", head: true });
+  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  return NextResponse.json({ ok: true, claims: count ?? 0 });
 }
