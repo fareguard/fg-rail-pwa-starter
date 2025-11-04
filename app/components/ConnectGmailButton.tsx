@@ -1,35 +1,49 @@
 'use client';
 
-import { createBrowserClient } from '@supabase/ssr';
+import { getSupabaseBrowser } from '@/lib/supabase';
+import { useState, useCallback } from 'react';
 
-type Props = { label?: string; className?: string };
+export default function ConnectGmailButton({
+  label = 'Connect Gmail (1–click)',
+  next = '/dashboard',
+  className = 'btn btnPrimary',
+}: {
+  label?: string;
+  next?: string;         // where to land after OAuth
+  className?: string;
+}) {
+  const [busy, setBusy] = useState(false);
 
-export default function ConnectGmailButton({ label = 'Connect Gmail (1–click)', className }: Props) {
-  async function handleClick() {
-    const supabase = createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
+  const onClick = useCallback(async () => {
+    try {
+      setBusy(true);
+      const supabase = getSupabaseBrowser();
+      const origin =
+        typeof window !== 'undefined' ? window.location.origin : process.env.NEXT_PUBLIC_SITE_URL || '';
 
-    const origin = window.location.origin;
+      // Always bounce through our callback and then to `next`
+      const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
-    await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        // 👇 after Google → come back to our callback page
-        redirectTo: `${origin}/auth/callback`,
-        scopes: 'openid email profile https://www.googleapis.com/auth/gmail.readonly',
-        queryParams: {
-          access_type: 'offline',
-          prompt: 'consent',
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo,
+          queryParams: {
+            // limit to Gmail scope for e-tickets; safe defaults
+            access_type: 'offline',
+            prompt: 'consent',
+          },
         },
-      },
-    });
-  }
+      });
+    } catch (e) {
+      console.error(e);
+      setBusy(false);
+    }
+  }, [next]);
 
   return (
-    <button onClick={handleClick} className={className ?? 'btn btnPrimary'} type="button">
-      {label}
+    <button onClick={onClick} className={className} disabled={busy}>
+      {busy ? 'Opening Google…' : label}
     </button>
   );
 }
