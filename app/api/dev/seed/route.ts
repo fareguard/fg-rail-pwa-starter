@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { parseEmail } from "@/lib/parsers";
 
 export const dynamic = "force-dynamic";
