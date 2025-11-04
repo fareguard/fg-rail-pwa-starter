@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { createBrowserClient } from '@supabase/ssr';
+import ConnectGmailButton from '@/app/components/ConnectGmailButton';
 
 type Trip = {
   id: string;
@@ -20,28 +22,48 @@ export default function Dashboard() {
   const [email, setEmail] = useState<string | null | undefined>(undefined);
   const [trips, setTrips] = useState<Trip[] | null>(null);
 
+  async function loadMeAndTrips() {
+    try {
+      const me = await fetch('/api/me', { cache: 'no-store' }).then(r => r.json());
+      setEmail(me?.email ?? null);
+
+      if (me?.email) {
+        const t = await fetch('/api/trips', { cache: 'no-store' }).then(r => r.json());
+        setTrips(t?.trips ?? []);
+      } else {
+        setTrips([]);
+      }
+    } catch {
+      setEmail(null);
+      setTrips([]);
+    }
+  }
+
   useEffect(() => {
     let alive = true;
     (async () => {
-      try {
-        const me = await fetch('/api/me', { cache: 'no-store' }).then(r => r.json());
-        if (!alive) return;
-        setEmail(me?.email ?? null);
-
-        if (me?.email) {
-          const t = await fetch('/api/trips', { cache: 'no-store' }).then(r => r.json());
-          if (!alive) return;
-          setTrips(t?.trips ?? []);
-        } else {
-          setTrips([]);
-        }
-      } catch {
-        if (!alive) return;
-        setEmail(null);
-        setTrips([]);
-      }
+      await loadMeAndTrips();
     })();
-    return () => { alive = false; };
+
+    // Refresh when auth state changes (after Google redirect)
+    const supabase = createBrowserClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      if (!alive) return;
+      loadMeAndTrips();
+    });
+
+    // Also refresh when tab gains focus
+    const onFocus = () => loadMeAndTrips();
+    window.addEventListener('focus', onFocus);
+
+    return () => {
+      alive = false;
+      sub.subscription.unsubscribe();
+      window.removeEventListener('focus', onFocus);
+    };
   }, []);
 
   const header = (
@@ -55,7 +77,7 @@ export default function Dashboard() {
     </div>
   );
 
-  // Loading
+  // Loading state
   if (email === undefined) {
     return (
       <div style={{ padding: 24 }}>
@@ -65,7 +87,7 @@ export default function Dashboard() {
     );
   }
 
-  // Not connected
+  // Not connected → show real Connect button (no redirect back to landing)
   if (!email) {
     return (
       <div style={{ padding: 24 }}>
@@ -99,23 +121,7 @@ export default function Dashboard() {
             Connect your Gmail (read-only) so we can detect e-tickets and file Delay Repay.
           </p>
 
-          <a
-            href="/"
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '12px 16px',
-              borderRadius: 10,
-              fontWeight: 700,
-              background: '#0F2A43',
-              color: 'white',
-              textDecoration: 'none',
-              marginTop: 12,
-            }}
-          >
-            Connect Gmail (1-click)
-          </a>
+          <ConnectGmailButton />
         </div>
       </div>
     );
