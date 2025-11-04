@@ -1,14 +1,15 @@
-// app/dashboard/page.tsx
+// app/(app)/dashboard/page.tsx
 'use client';
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 
-// Make 100% sure Next does NOT try to prerender/ISR this page
+// ✅ Force this route to be fully dynamic (no prerender/ISR)
 export const dynamic = 'force-dynamic';
-export const revalidate = false as const; // must be number or false (not an object)
-export const fetchCache = 'force-no-store'; // belt & braces to avoid caching
+export const revalidate = false as const; // must be a number or false — not an object
+export const fetchCache = 'force-no-store';
+export const dynamicParams = true;
 
 function DashboardInner() {
   const search = useSearchParams();
@@ -20,10 +21,11 @@ function DashboardInner() {
     if (connectedParam === 'gmail') setConnected(true);
   }, [connectedParam]);
 
+  // Demo data just for UI — you can delete this later
   const trips = [
-    { id: 'T-1', title: 'Wolverhampton → Birmingham', status: 'queued', eta: '10 Nov', potential: '£8–£20' },
-    { id: 'T-2', title: 'Birmingham → London Euston', status: 'not_delayed', eta: '—', potential: '—' },
-    { id: 'T-3', title: 'London Euston → Birmingham', status: 'delayed_34', eta: 'Processed', potential: '£12.40' },
+    { id: 'T-1', title: 'Wolverhampton → Birmingham', status: 'queued', date: '10 Nov', potential: '£8–£20' },
+    { id: 'T-2', title: 'Birmingham → London Euston', status: 'not_delayed', date: '—', potential: '—' },
+    { id: 'T-3', title: 'London Euston → Birmingham', status: 'delayed_34', date: 'Processed', potential: '£12.40' },
   ];
 
   return (
@@ -80,7 +82,7 @@ function DashboardInner() {
                 <span className="badge" style={chipStyle}>{chipText}</span>
                 <ul className="list">
                   <li><span className="dot" /><span><strong>Potential:</strong> {t.potential}</span></li>
-                  <li><span className="dot" /><span><strong>ETA:</strong> {t.eta}</span></li>
+                  <li><span className="dot" /><span><strong>Date:</strong> {t.date}</span></li>
                 </ul>
               </div>
             );
