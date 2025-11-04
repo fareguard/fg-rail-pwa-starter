@@ -1,6 +1,6 @@
 'use client';
 
-import { getSupabaseBrowser } from '@/lib/supabase';
+import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { useState, useCallback } from 'react';
 
 export default function ConnectGmailButton({
@@ -9,7 +9,7 @@ export default function ConnectGmailButton({
   className = 'btn btnPrimary',
 }: {
   label?: string;
-  next?: string;         // where to land after OAuth
+  next?: string;
   className?: string;
 }) {
   const [busy, setBusy] = useState(false);
@@ -19,9 +19,10 @@ export default function ConnectGmailButton({
       setBusy(true);
       const supabase = getSupabaseBrowser();
       const origin =
-        typeof window !== 'undefined' ? window.location.origin : process.env.NEXT_PUBLIC_SITE_URL || '';
+        typeof window !== 'undefined'
+          ? window.location.origin
+          : process.env.NEXT_PUBLIC_SITE_URL || '';
 
-      // Always bounce through our callback and then to `next`
       const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
       await supabase.auth.signInWithOAuth({
@@ -29,7 +30,6 @@ export default function ConnectGmailButton({
         options: {
           redirectTo,
           queryParams: {
-            // limit to Gmail scope for e-tickets; safe defaults
             access_type: 'offline',
             prompt: 'consent',
           },
