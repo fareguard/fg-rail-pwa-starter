@@ -1,44 +1,53 @@
 'use client';
+
 import { useEffect, useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
-import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { createBrowserClient } from '@supabase/ssr';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-export default function OAuthCallback() {
-  const [status, setStatus] = useState<'working'|'ok'|'err'>('working');
-  const [msg, setMsg] = useState<string>('Connecting…');
+export default function AuthCallback() {
+  const router = useRouter();
+  const sp = useSearchParams();
+  const [msg, setMsg] = useState('Finalising sign-in…');
 
   useEffect(() => {
-    (async () => {
+    const run = async () => {
       try {
-        const { data, error } = await supabase.auth.exchangeCodeForSession(window.location.href);
-        if (error) throw error;
-        setStatus('ok');
-        setMsg('Connected! Redirecting…');
-        // Send them back to dashboard/home
-        setTimeout(() => { window.location.href = '/dashboard'; }, 800);
-      } catch (e: any) {
-        setStatus('err');
-        setMsg(e?.message || 'Sign-in failed');
+        const code = sp.get('code');
+        if (!code) {
+          setMsg('Missing auth code. Redirecting…');
+          router.replace('/dashboard');
+          return;
+        }
+
+        const supabase = createBrowserClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+        );
+
+        // Exchanges the `code` for a session and stores cookies
+        const { error } = await supabase.auth.exchangeCodeForSession(window.location.href);
+        if (error) {
+          console.error(error);
+          setMsg('Sign-in failed. Redirecting…');
+          router.replace('/?auth_error=1');
+          return;
+        }
+
+        // Success → go to dashboard
+        router.replace('/dashboard');
+      } catch (e) {
+        console.error(e);
+        router.replace('/?auth_error=1');
       }
-    })();
+    };
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
-    <main className="mx-auto max-w-md p-6">
-      <h1 className="text-xl font-semibold mb-2">Google Sign-in</h1>
-      <p className={status === 'err' ? 'text-red-600' : 'text-gray-700'}>
-        {msg}
-      </p>
-      {status === 'err' && (
-        <p className="mt-4">
-          <Link className="text-blue-600 underline" href="/">Go back</Link>
-        </p>
-      )}
-    </main>
+    <div style={{ padding: 24 }}>
+      <h1>Connecting…</h1>
+      <p>{msg}</p>
+    </div>
   );
 }
