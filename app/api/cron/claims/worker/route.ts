@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { submitClaimByProvider } from "@/lib/providers";
 
 export const dynamic = "force-dynamic";
@@ -9,7 +9,6 @@ export const runtime = "nodejs";
 const ALLOW_PLAYWRIGHT = process.env.PLAYWRIGHT_ENABLED === "true";
 
 async function jsonError(status: number, msg: string, extra?: any) {
-  // also log to server logs for easier debugging
   console.error("[worker:error]", msg, extra || "");
   return NextResponse.json({ ok: false, status, error: msg, extra }, { status });
 }
@@ -25,7 +24,6 @@ export async function GET() {
     });
   }
 
-  // Grab ONE queued item to avoid stampede
   const { data: queueItems, error } = await db
     .from("claim_queue")
     .select("id, claim_id, provider, status, payload, attempts, created_at")
@@ -38,7 +36,6 @@ export async function GET() {
 
   const q = queueItems[0];
 
-  // mark processing + increment attempts safely
   const { error: up1 } = await db
     .from("claim_queue")
     .update({
@@ -50,7 +47,6 @@ export async function GET() {
   if (up1) return jsonError(500, "DB update -> processing failed", up1);
 
   try {
-    // submit via provider router (Playwright under the hood)
     const result: any = await submitClaimByProvider(q.provider, q.payload || {});
     console.log("[worker:submit]", q.id, q.provider, result?.ok);
 
@@ -66,7 +62,6 @@ export async function GET() {
       return NextResponse.json({ ok: true, processed: 1, result });
     }
 
-    // mark queue + claim as submitted
     const { error: upQ } = await db
       .from("claim_queue")
       .update({
