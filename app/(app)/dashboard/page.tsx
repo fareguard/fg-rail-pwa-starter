@@ -1,13 +1,14 @@
-// app/(app)/dashboard/page.tsx
+// app/dashboard/page.tsx
 'use client';
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 
-// Force this page to be dynamic and NEVER prerender/ISR
+// Make 100% sure Next does NOT try to prerender/ISR this page
 export const dynamic = 'force-dynamic';
-export const revalidate = false as const; // number or false ONLY (not an object)
+export const revalidate = false as const; // must be number or false (not an object)
+export const fetchCache = 'force-no-store'; // belt & braces to avoid caching
 
 function DashboardInner() {
   const search = useSearchParams();
