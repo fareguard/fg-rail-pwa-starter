@@ -4,6 +4,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import ConnectGmailButton from "@/app/components/ConnectGmailButton";
+import TripsLive from "@/app/components/TripsLive"; // ✅ added import
 
 type Me = {
   authenticated: boolean;
@@ -120,6 +121,9 @@ export default function DashboardPage() {
               Claims in system: <strong>{summary.claims ?? 0}</strong>
             </p>
           )}
+
+          {/* 👇 Added TripsLive under the authenticated card */}
+          <TripsLive />
         </div>
       )}
     </div>
