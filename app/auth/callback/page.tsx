@@ -1,50 +1,50 @@
 // app/auth/callback/page.tsx
-"use client";
+'use client';
 
-import { useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { getSupabaseBrowser } from "@/lib/supabase-browser";
+import { useEffect, useState } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { getSupabaseBrowser } from '@/lib/supabase-browser';
 
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+const SITE = process.env.NEXT_PUBLIC_SITE_URL || 'https://www.fareguard.co.uk';
 
-export default function SupabaseCallback() {
+export default function OAuthCallbackPage() {
+  const sp = useSearchParams();
   const router = useRouter();
-  const search = useSearchParams();
-  const [msg, setMsg] = useState("Finishing sign in…");
+  const [msg, setMsg] = useState('Finishing sign-in…');
 
   useEffect(() => {
     (async () => {
       try {
-        const supabase = getSupabaseBrowser();
-
-        // Handle Supabase OAuth result in the URL:
-        const href = window.location.href;
-        const { data, error } = await supabase.auth.exchangeCodeForSession(href);
-
-        if (error) {
-          console.error("exchangeCodeForSession error:", error);
-          setMsg("Sign in failed. Please try again.");
-          // small delay so the message is visible
-          setTimeout(() => router.replace("/?connect=1"), 1000);
+        const code = sp.get('code');
+        const next = sp.get('next') || '/dashboard';
+        if (!code) {
+          setMsg('No auth code found.');
+          // send them somewhere useful
+          router.replace('/dashboard');
           return;
         }
 
-        // Go to the intended page (defaults to dashboard)
-        const next = search.get("next") || "/dashboard";
-        router.replace(next);
+        const supabase = getSupabaseBrowser();
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) {
+          console.error('exchangeCodeForSession error:', error);
+          setMsg('Sign-in failed. Please try again.');
+          return;
+        }
+
+        // Hard redirect to canonical host so cookies are read on that host
+        window.location.assign(`${SITE}${next}`);
       } catch (e) {
         console.error(e);
-        setMsg("Unexpected error. Please try again.");
-        setTimeout(() => router.replace("/?connect=1"), 1000);
+        setMsg('Something went wrong. Please try again.');
       }
     })();
-  }, [router, search]);
+  }, [sp, router]);
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1 style={{ margin: 0, fontSize: 20 }}>Connecting…</h1>
-      <p>{msg}</p>
+    <div className="container" style={{ padding: '40px 0' }}>
+      <h1 className="h1">Signing you in…</h1>
+      <p className="sub">{msg}</p>
     </div>
   );
 }
