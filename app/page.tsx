@@ -2,6 +2,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import ConnectGmailButton from "./components/ConnectGmailButton";
+import AutoConnect from "./components/AutoConnect";
 
 const operators = [
   "Avanti West Coast","Great Western Railway","West Midlands Trains","Northern",
@@ -11,6 +12,9 @@ const operators = [
 export default function Home() {
   return (
     <>
+      {/* auto-open Google when ?connect=1 is present */}
+      <AutoConnect />
+
       {/* NAV */}
       <div className="nav">
         <div className="container navInner">
