@@ -1,60 +1,50 @@
-'use client';
+// app/auth/callback/page.tsx
+"use client";
 
-import { Suspense, useEffect, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { createBrowserClient } from '@supabase/ssr';
+import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { getSupabaseBrowser } from "@/lib/supabase-browser";
 
-function ExchangeStep() {
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+export default function SupabaseCallback() {
   const router = useRouter();
-  const sp = useSearchParams();
-  const [msg, setMsg] = useState('Finalising sign-in…');
+  const search = useSearchParams();
+  const [msg, setMsg] = useState("Finishing sign in…");
 
   useEffect(() => {
-    const run = async () => {
+    (async () => {
       try {
-        const code = sp.get('code');
-        if (!code) {
-          setMsg('No auth code found. Redirecting…');
-          router.replace('/dashboard');
-          return;
-        }
+        const supabase = getSupabaseBrowser();
 
-        const supabase = createBrowserClient(
-          process.env.NEXT_PUBLIC_SUPABASE_URL!,
-          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-        );
-
-        const { error } = await supabase.auth.exchangeCodeForSession(
-          window.location.href
-        );
+        // Handle Supabase OAuth result in the URL:
+        const href = window.location.href;
+        const { data, error } = await supabase.auth.exchangeCodeForSession(href);
 
         if (error) {
-          console.error(error);
-          setMsg('Sign-in failed. Redirecting…');
-          router.replace('/?auth_error=1');
+          console.error("exchangeCodeForSession error:", error);
+          setMsg("Sign in failed. Please try again.");
+          // small delay so the message is visible
+          setTimeout(() => router.replace("/?connect=1"), 1000);
           return;
         }
 
-        router.replace('/dashboard');
+        // Go to the intended page (defaults to dashboard)
+        const next = search.get("next") || "/dashboard";
+        router.replace(next);
       } catch (e) {
         console.error(e);
-        router.replace('/?auth_error=1');
+        setMsg("Unexpected error. Please try again.");
+        setTimeout(() => router.replace("/?connect=1"), 1000);
       }
-    };
+    })();
+  }, [router, search]);
 
-    run();
-  }, [router, sp]);
-
-  return <p>{msg}</p>;
-}
-
-export default function AuthCallbackPage() {
   return (
     <div style={{ padding: 24 }}>
-      <h1>Connecting…</h1>
-      <Suspense fallback={<p>Preparing…</p>}>
-        <ExchangeStep />
-      </Suspense>
+      <h1 style={{ margin: 0, fontSize: 20 }}>Connecting…</h1>
+      <p>{msg}</p>
     </div>
   );
 }
