@@ -29,6 +29,12 @@ export async function GET(req: Request) {
       return NextResponse.redirect(new URL(next, SITE));
     }
 
+    // fire-and-forget ingestion kick (no await)
+    fetch(`${process.env.NEXT_PUBLIC_SITE_URL || ''}/api/ingest/kickoff`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    }).catch(() => {});
+
     // Success: redirect to canonical host + desired page
     return NextResponse.redirect(new URL(next, SITE));
   } catch (e: any) {
