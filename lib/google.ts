@@ -1,39 +1,45 @@
-import { SupabaseClient } from "@supabase/supabase-js";
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
+// lib/parsers.ts
+export type ParsedTrip = {
+  retailer?: string;
+  operator?: string;
+  booking_ref?: string;
+  origin?: string;
+  destination?: string;
+  depart_planned?: string; // ISO
+  arrive_planned?: string; // ISO
+};
 
-export async function getFreshAccessToken(
-  supa: SupabaseClient,
-  row: { id: string; access_token: string | null; refresh_token: string | null; expires_at: string | null }
-): Promise<string> {
-  let { access_token, refresh_token, expires_at } = row;
+// SUPER-simple parser: handles Trainline / Avanti style text
+export function parseEmail(subject: string, body: string): ParsedTrip | null {
+  const text = `${subject}\n${body}`.replace(/\r/g, "");
+  if (!/ticket|e-?ticket/i.test(text)) return null;
 
-  const expMs = expires_at ? new Date(expires_at).getTime() : 0;
-  const aboutToExpire = !access_token || Date.now() > (expMs - 60_000);
+  const p: ParsedTrip = {};
+  if (/trainline/i.test(text)) p.retailer = "trainline";
+  if (/avanti/i.test(text)) p.operator = "Avanti West Coast";
 
-  if (aboutToExpire) {
-    if (!refresh_token) throw new Error("No refresh_token to renew Gmail access.");
-    const res = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        refresh_token,
-        grant_type: "refresh_token",
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error("Refresh failed: " + JSON.stringify(data));
+  const ref = text.match(/\b([A-Z0-9]{6,8})\b.*(Booking|Reference)/i)?.[1]
+           || text.match(/Booking\s+reference[:\s]+([A-Z0-9\-]+)/i)?.[1];
+  if (ref) p.booking_ref = ref;
 
-    access_token = data.access_token;
-    const newExpires = new Date(Date.now() + (data.expires_in ?? 3600) * 1000).toISOString();
-
-    await supa.from("oauth_staging").update({
-      access_token,
-      expires_at: newExpires
-    }).eq("id", row.id);
+  const leg = text.match(/From\s+(.+?)\s+to\s+(.+?)\b/i);
+  if (leg) {
+    p.origin = leg[1].trim();
+    p.destination = leg[2].trim();
   }
 
-  return access_token!;
+  const dep = text.match(/Depart[^\d]*(\d{1,2}:\d{2}).*?(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}\s+\w+\s+\d{4})/i);
+  const arr = text.match(/Arriv[ea][^\d]*(\d{1,2}:\d{2}).*?(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}\s+\w+\s+\d{4})/i);
+
+  function toIso(time: string, date: string) {
+    const d = new Date(`${date.replace(/\./g,"")} ${time}`);
+    return isNaN(+d) ? undefined : d.toISOString();
+  }
+
+  if (dep) p.depart_planned = toIso(dep[1], dep[2]);
+  if (arr) p.arrive_planned = toIso(arr[1], arr[2]);
+
+  // must have at least origin,destination or booking_ref
+  if (!p.booking_ref && !(p.origin && p.destination)) return null;
+  return p;
 }
