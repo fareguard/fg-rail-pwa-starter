@@ -1,12 +1,13 @@
-'use client';
+// app/components/ConnectGmailButton.tsx
+"use client";
 
-import { getSupabaseBrowser } from '@/lib/supabase-browser';
-import { useState, useCallback } from 'react';
+import { getSupabaseBrowser } from "@/lib/supabase-browser";
+import { useState, useCallback } from "react";
 
 export default function ConnectGmailButton({
-  label = 'Connect Gmail (1–click)',
-  next = '/dashboard',
-  className = 'btn btnPrimary',
+  label = "Connect Gmail (1–click)",
+  next = "/dashboard",
+  className = "btn btnPrimary",
 }: {
   label?: string;
   next?: string;
@@ -18,21 +19,23 @@ export default function ConnectGmailButton({
     try {
       setBusy(true);
       const supabase = getSupabaseBrowser();
-      const origin =
-        typeof window !== 'undefined'
-          ? window.location.origin
-          : process.env.NEXT_PUBLIC_SITE_URL || '';
 
-      const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
+      const origin =
+        typeof window !== "undefined"
+          ? window.location.origin
+          : process.env.NEXT_PUBLIC_SITE_URL || "";
+
+      const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent(
+        next
+      )}`;
 
       await supabase.auth.signInWithOAuth({
-        provider: 'google',
+        provider: "google",
         options: {
           redirectTo,
-          queryParams: {
-            access_type: 'offline',
-            prompt: 'consent',
-          },
+          // keep Gmail readonly + offline
+          scopes: "openid email https://www.googleapis.com/auth/gmail.readonly",
+          queryParams: { access_type: "offline", prompt: "consent" },
         },
       });
     } catch (e) {
@@ -43,7 +46,7 @@ export default function ConnectGmailButton({
 
   return (
     <button onClick={onClick} className={className} disabled={busy}>
-      {busy ? 'Opening Google…' : label}
+      {busy ? "Opening Google…" : label}
     </button>
   );
 }
