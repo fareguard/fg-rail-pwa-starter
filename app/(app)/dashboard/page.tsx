@@ -1,8 +1,9 @@
 // app/(app)/dashboard/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import ConnectGmailButton from "@/app/components/ConnectGmailButton";
 
 type Me = {
   authenticated: boolean;
@@ -16,33 +17,55 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState<{ ok: boolean; claims?: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // one place to (re)load data
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      // never cache user state
+      const r = await fetch("/api/me", { cache: "no-store" });
+      const j: Me = await r.json();
+      setMe(j);
+
+      // lightweight sanity metric (also no-store)
+      const s = await fetch("/dashboard/summary", { cache: "no-store" });
+      const sj = await s.json();
+      setSummary(sj);
+    } catch (e: any) {
+      setMe({ authenticated: false, error: String(e?.message || e) });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // initial load
   useEffect(() => {
     let alive = true;
-
     (async () => {
-      try {
-        // never cache user state
-        const r = await fetch("/api/me", { cache: "no-store" });
-        const j: Me = await r.json();
-        if (!alive) return;
-        setMe(j);
-
-        // lightweight sanity metric (also no-store)
-        const s = await fetch("/dashboard/summary", { cache: "no-store" });
-        const sj = await s.json();
-        if (!alive) return;
-        setSummary(sj);
-      } catch (e: any) {
-        if (alive) setMe({ authenticated: false, error: String(e?.message || e) });
-      } finally {
-        if (alive) setLoading(false);
-      }
+      if (!alive) return;
+      await load();
     })();
-
     return () => {
       alive = false;
     };
-  }, []);
+  }, [load]);
+
+  // 🔁 auto-refresh after OAuth completes (from /auth/callback/signing-in)
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "fg-auth-ok") {
+        // cookie session is set; re-pull server state
+        load();
+      }
+    };
+    const onFocus = () => load();
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [load]);
 
   return (
     <div className="container section" style={{ paddingTop: 28 }}>
@@ -67,16 +90,22 @@ export default function DashboardPage() {
             Connect your Gmail (read-only) so we can detect e-tickets and file Delay Repay.
           </p>
 
-          {/* Sends them to landing where the 1-click button lives */}
-          <Link href="/?connect=1" className="btn btnPrimary">
-            Connect Gmail (1–click)
-          </Link>
+          {/* ✅ 1-click connect here (redirects to /auth/callback/signing-in and bounces back) */}
+          <ConnectGmailButton label="Connect Gmail (1–click)" className="btn btnPrimary" next="/dashboard" />
+
+          {/* Optional: keep a fallback link just in case */}
+          <p className="small" style={{ marginTop: 10 }}>
+            Having trouble? <Link href="/?connect=1">Try from the homepage</Link>.
+          </p>
         </div>
       )}
 
       {!loading && me && me.authenticated && (
         <div className="card" style={{ marginTop: 16 }}>
-          <span className="badge" style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}>
+          <span
+            className="badge"
+            style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}
+          >
             Live
           </span>
           <h3 style={{ margin: "4px 0 8px", color: "var(--fg-navy)" }}>
