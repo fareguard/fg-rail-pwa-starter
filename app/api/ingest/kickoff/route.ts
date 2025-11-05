@@ -8,7 +8,16 @@ export const revalidate = 0;
 export const runtime = "nodejs";
 export const fetchCache = "force-no-store";
 
-export async function POST() {
+export async function POST(req: Request) {
+  // 🔒 Guard: reject unauthorized CRON requests
+  const auth = req.headers.get("authorization");
+  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
   try {
     const supa = getSupabaseServer();
     const {
@@ -49,5 +58,5 @@ export async function POST() {
 
 export async function GET() {
   // Allow quick testing via GET as well.
-  return POST();
+  return POST(new Request(""));
 }
