@@ -1,50 +1,29 @@
-// app/auth/callback/page.tsx
-'use client';
+"use client";
 
-import { useEffect, useState } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
-import { getSupabaseBrowser } from '@/lib/supabase-browser';
+import { useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
-const SITE = process.env.NEXT_PUBLIC_SITE_URL || 'https://www.fareguard.co.uk';
-
-export default function OAuthCallbackPage() {
-  const sp = useSearchParams();
+export default function SigningInPage() {
   const router = useRouter();
-  const [msg, setMsg] = useState('Finishing sign-in…');
+  const params = useSearchParams();
+  const next = params.get("next") || "/dashboard";
 
   useEffect(() => {
-    (async () => {
-      try {
-        const code = sp.get('code');
-        const next = sp.get('next') || '/dashboard';
-        if (!code) {
-          setMsg('No auth code found.');
-          // send them somewhere useful
-          router.replace('/dashboard');
-          return;
-        }
+    // Let other tabs/pages know auth completed
+    try { localStorage.setItem("fg-auth-ok", String(Date.now())); } catch {}
 
-        const supabase = getSupabaseBrowser();
-        const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (error) {
-          console.error('exchangeCodeForSession error:', error);
-          setMsg('Sign-in failed. Please try again.');
-          return;
-        }
-
-        // Hard redirect to canonical host so cookies are read on that host
-        window.location.assign(`${SITE}${next}`);
-      } catch (e) {
-        console.error(e);
-        setMsg('Something went wrong. Please try again.');
-      }
-    })();
-  }, [sp, router]);
+    // Small delay ensures the storage event fires & cookies settle
+    const t = setTimeout(() => router.replace(next), 500);
+    return () => clearTimeout(t);
+  }, [next, router]);
 
   return (
-    <div className="container" style={{ padding: '40px 0' }}>
+    <main className="container" style={{ padding: "64px 16px" }}>
       <h1 className="h1">Signing you in…</h1>
-      <p className="sub">{msg}</p>
-    </div>
+      <p className="sub">One moment while we complete your setup.</p>
+      <p className="small" style={{ marginTop: 12 }}>
+        If nothing happens, <a href={next}>continue to your dashboard</a>.
+      </p>
+    </main>
   );
 }
