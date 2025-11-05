@@ -9,9 +9,13 @@ export const runtime = "nodejs";
 export const fetchCache = "force-no-store";
 
 export async function POST(req: Request) {
+  // ✅ Logging so we know cron fired
+  console.log("[CRON] Ingest kickoff running...");
+
   // 🔒 Guard: reject unauthorized CRON requests
   const auth = req.headers.get("authorization");
   if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+    console.warn("[CRON] Unauthorized request");
     return NextResponse.json(
       { ok: false, error: "Unauthorized" },
       { status: 401 }
@@ -43,6 +47,9 @@ export async function POST(req: Request) {
 
     // 🚀 TODO: Hook your real ingest here.
     // e.g. enqueue a job or call your gmail ingest routes.
+    console.log("[CRON] Starting Gmail ingest...");
+    // ...run Supabase + Gmail sync tasks...
+
     // For now we return ok:true so the UI can show "Started scan".
     return NextResponse.json(
       { ok: true, message: "Ingest kicked off for user." },
