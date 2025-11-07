@@ -1,6 +1,6 @@
+// app/components/ConnectGmailButton.tsx
 "use client";
 
-import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { useState, useCallback } from "react";
 
 export default function ConnectGmailButton({
@@ -17,26 +17,16 @@ export default function ConnectGmailButton({
   const onClick = useCallback(async () => {
     try {
       setBusy(true);
-      const supabase = getSupabaseBrowser();
-
       const origin =
         typeof window !== "undefined"
           ? window.location.origin
           : process.env.NEXT_PUBLIC_SITE_URL || "";
 
-      // ⬇️ Point to the signing-in page (no conflict with route.ts)
-      const redirectTo = `${origin}/auth/callback/signing-in?next=${encodeURIComponent(
+      // Hit our Google OAuth starter (this issues refresh_token properly)
+      const url = `${origin}/api/auth/google/start?next=${encodeURIComponent(
         next
       )}`;
-
-      await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          redirectTo,
-          scopes: "openid email https://www.googleapis.com/auth/gmail.readonly",
-          queryParams: { access_type: "offline", prompt: "consent" },
-        },
-      });
+      window.location.href = url;
     } catch (e) {
       console.error(e);
       setBusy(false);
