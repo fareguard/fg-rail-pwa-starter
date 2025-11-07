@@ -40,7 +40,7 @@ export async function GET() {
     if (!data?.length) return NextResponse.json({ ok:false, error:"No Gmail connected" }, { status:400 });
 
     const row: any = data[0];
-    const accessToken = await getFreshAccessToken(supa, row);
+    const accessToken = await getFreshAccessToken(row.user_email);
     const user_email: string = row.user_email;
 
     const q = `in:anywhere (subject:"ticket" OR subject:"booking" OR from:trainline.com OR from:lner.co.uk OR from:avantiwestcoast.co.uk OR from:gwr.com) newer_than:2y`;
@@ -82,7 +82,7 @@ export async function GET() {
       if (!rawErr) saved++;
 
       // parse → trips (only if we have enough to be useful)
-const parsed = parseEmail(body, headers.from, headers.subject);
+      const parsed = parseEmail(body, headers.from, headers.subject);
       if (parsed.origin || parsed.destination || parsed.booking_ref) {
         const { error: tripErr } = await supa.from("trips").insert({
           user_email,
