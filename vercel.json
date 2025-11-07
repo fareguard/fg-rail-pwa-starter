@@ -1,16 +1,6 @@
 {
   "crons": [
-    {
-      "path": "/api/ingest/kickoff",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/ingest",
-      "schedule": "*/15 * * * *"
-    },
-    {
-      "path": "/api/cron/claims/worker",
-      "schedule": "*/30 * * * *"
-    }
+    { "path": "/api/ingest/kickoff", "schedule": "*/15 * * * *" },
+    { "path": "/api/cron/claims/worker", "schedule": "*/30 * * * *" }
   ]
 }
