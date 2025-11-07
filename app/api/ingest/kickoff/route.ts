@@ -1,69 +1,46 @@
 // app/api/ingest/kickoff/route.ts
 import { NextResponse } from "next/server";
-import { getSupabaseServer } from "@/lib/supabase-server";
-import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
 export const runtime = "nodejs";
-export const fetchCache = "force-no-store";
+export const dynamic = "force-dynamic";
 
-export async function POST(req: Request) {
-  // ✅ Logging so we know cron fired
-  console.log("[CRON] Ingest kickoff running...");
+function withAuthHeaders(init?: RequestInit) {
+  const secret = process.env.CRON_SECRET || "";
+  return {
+    ...(init || {}),
+    headers: {
+      ...(init?.headers || {}),
+      Authorization: `Bearer ${secret}`
+    },
+    // Never cache internal fan-out
+    cache: "no-store" as const
+  };
+}
 
-  // 🔒 Guard: reject unauthorized CRON requests
-  const auth = req.headers.get("authorization");
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
-    console.warn("[CRON] Unauthorized request");
-    return NextResponse.json(
-      { ok: false, error: "Unauthorized" },
-      { status: 401 }
-    );
-  }
-
+export async function GET(req: Request) {
   try {
-    const supa = getSupabaseServer();
-    const {
-      data: { user },
-      error: authErr,
-    } = await supa.auth.getUser();
+    const base = process.env.NEXT_PUBLIC_SITE_URL || new URL(req.url).origin;
 
-    if (authErr || !user?.email || !user?.id) {
-      return NextResponse.json(
-        { ok: false, error: "not_authenticated" },
-        { status: 401, headers: { "Cache-Control": "no-store" } }
-      );
-    }
+    // Kick the previous “ingest” worker you had on a cron
+    const ingestUrl = new URL("/api/cron/ingest", base).toString();
 
-    // Ensure a profiles row exists (helps joins elsewhere)
-    const admin = getSupabaseAdmin();
-    await admin
-      .from("profiles")
-      .upsert(
-        { user_id: user.id, user_email: user.email },
-        { onConflict: "user_email" }
-      );
+    // You can add other light tasks here in parallel if you want
+    const [ingestRes] = await Promise.all([
+      fetch(ingestUrl, withAuthHeaders())
+      // , fetch(new URL("/api/whatever", base), withAuthHeaders())
+    ]);
 
-    // 🚀 TODO: Hook your real ingest here.
-    // e.g. enqueue a job or call your gmail ingest routes.
-    console.log("[CRON] Starting Gmail ingest...");
-    // ...run Supabase + Gmail sync tasks...
+    const ingestOk = ingestRes.ok;
 
-    // For now we return ok:true so the UI can show "Started scan".
-    return NextResponse.json(
-      { ok: true, message: "Ingest kicked off for user." },
-      { headers: { "Cache-Control": "no-store" } }
-    );
+    return NextResponse.json({ ok: true, ingestOk });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: String(e?.message || e) },
-      { status: 500, headers: { "Cache-Control": "no-store" } }
+      { ok: false, error: e?.message || String(e) },
+      { status: 500 }
     );
   }
 }
 
-export async function GET() {
-  // Allow quick testing via GET as well.
-  return POST(new Request(""));
+export async function POST(req: Request) {
+  return GET(req);
 }
