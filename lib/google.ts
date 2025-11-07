@@ -1,108 +1,88 @@
 // lib/google.ts
-// Server-only helpers for Google OAuth tokens
+import { getSupabaseAdmin } from "@/lib/supabase";
 
-import { getSupabaseAdmin } from "./supabase-admin";
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-
-type TokenRow = {
+type OAuthRow = {
   id: string;
-  user_email: string;
   provider: string;
+  user_email: string;
   access_token: string | null;
   refresh_token: string | null;
   expires_at: number | null; // unix seconds
-  created_at?: string;
+  scope?: string | null;
+  token_type?: string | null;
 };
 
-function isExpired(expires_at: number | null | undefined) {
-  if (!expires_at) return true;
-  // refresh 60s early to be safe
-  const now = Math.floor(Date.now() / 1000);
-  return now >= expires_at - 60;
-}
-
-/**
- * Returns a fresh Google access token for the given email.
- * Reads `oauth_staging` (provider='google'), refreshes if needed, updates row, and returns token.
- */
-export async function getFreshAccessToken(userEmail: string): Promise<string> {
-  if (!userEmail) throw new Error("userEmail required");
-
-  const CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
-  const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
-  if (!CLIENT_ID || !CLIENT_SECRET) {
-    throw new Error("Missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET env vars");
-  }
-
-  const db = getSupabaseAdmin();
-
-  // Get the most recent token row for this user
-  const { data: row, error } = await db
-    .from("oauth_staging")
-    .select("*")
-    .eq("provider", "google")
-    .eq("user_email", userEmail)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle<TokenRow>();
-
-  if (error) throw new Error(`supabase select failed: ${error.message}`);
-  if (!row) throw new Error(`No Google OAuth row for ${userEmail}`);
-  if (!row.access_token && !row.refresh_token) {
-    throw new Error("No access/refresh token stored");
-  }
-
-  // If access token still valid, return it
-  if (row.access_token && !isExpired(row.expires_at)) {
-    return row.access_token;
-  }
-
-  // Need a refresh token to get a fresh access token
-  if (!row.refresh_token) {
-    throw new Error("Missing refresh_token; re-connect Google");
-  }
-
-  // Refresh
-  const body = new URLSearchParams({
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET,
-    grant_type: "refresh_token",
-    refresh_token: row.refresh_token,
-  });
-
-  const res = await fetch(GOOGLE_TOKEN_URL, {
+async function refreshWithGoogle(refresh_token: string) {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
+    body: new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token,
+      grant_type: "refresh_token",
+    }),
   });
 
   const json = await res.json();
-  if (!res.ok || !json.access_token) {
-    throw new Error(
-      `Google refresh failed: ${res.status} ${JSON.stringify(json)}`
-    );
+  if (!res.ok) {
+    throw new Error(`Google refresh failed: ${res.status} ${JSON.stringify(json)}`);
+  }
+  return json;
+}
+
+export async function getFreshAccessToken(user_email: string): Promise<string> {
+  const supa = getSupabaseAdmin();
+
+  // Pull latest row for this email
+  const { data, error } = await supa
+    .from("oauth_staging")
+    .select("*")
+    .eq("provider", "google")
+    .eq("user_email", user_email)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error || !data?.length) {
+    throw new Error("No Google OAuth tokens found for this email");
   }
 
-  const newAccess = json.access_token as string;
-  const expiresIn = typeof json.expires_in === "number" ? json.expires_in : 3600;
-  const newExpiresAt = Math.floor(Date.now() / 1000) + expiresIn;
+  const row = data[0] as OAuthRow;
 
-  // Persist the new token values
-  const { error: upErr } = await db
+  const now = Math.floor(Date.now() / 1000);
+  // If valid and not near expiry (30s buffer), use it
+  if (row.access_token && row.expires_at && row.expires_at > now + 30) {
+    return row.access_token;
+  }
+
+  if (!row.refresh_token) {
+    throw new Error("Missing refresh_token; re-connect Gmail with consent");
+  }
+
+  // Try refresh
+  const refreshed = await refreshWithGoogle(row.refresh_token);
+
+  const newAccess = refreshed.access_token as string | undefined;
+  const newExpiresIn = typeof refreshed.expires_in === "number" ? refreshed.expires_in : null;
+  const newExpiresAt = newExpiresIn ? now + newExpiresIn : null;
+
+  // NOTE: Google may rotate refresh_token and return a new one.
+  const rotatedRefresh = (refreshed.refresh_token as string | undefined) ?? row.refresh_token;
+
+  await supa
     .from("oauth_staging")
     .update({
-      access_token: newAccess,
-      // keep same refresh_token unless Google returns a new one
-      refresh_token: (json.refresh_token as string | null) ?? row.refresh_token,
+      access_token: newAccess ?? row.access_token,
+      refresh_token: rotatedRefresh,
       expires_at: newExpiresAt,
+      scope: refreshed.scope ?? row.scope ?? null,
+      token_type: refreshed.token_type ?? row.token_type ?? "Bearer",
     })
-    .eq("id", row.id);
+    .eq("id", (row as any).id);
 
-  if (upErr) {
-    // Not fatal for returning the token, but log for visibility
-    console.error("Failed to update oauth_staging:", upErr);
-  }
-
+  if (!newAccess) throw new Error("Refresh returned no access_token");
   return newAccess;
 }
