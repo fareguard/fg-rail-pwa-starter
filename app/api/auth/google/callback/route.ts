@@ -4,18 +4,20 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI!; // must match OAuth client
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI!;
+
+// keep in one place so UI + DB match
+const OAUTH_SCOPE =
+  "openid email https://www.googleapis.com/auth/gmail.readonly";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   try {
-    const u = new URL(req.url);
-    const code = u.searchParams.get("code");
-    const state = u.searchParams.get("state") || "";
-    const next = new URLSearchParams(state).get("next") || "/dashboard";
-
+    const { searchParams } = new URL(req.url);
+    const code = searchParams.get("code");
+    const next = searchParams.get("next") || "/dashboard";
     if (!code) {
       return NextResponse.json({ ok: false, error: "Missing code" }, { status: 400 });
     }
@@ -36,13 +38,10 @@ export async function GET(req: Request) {
 
     if (!tokenRes.ok || !tokens.access_token) {
       console.error("Token exchange failed:", tokens);
-      return NextResponse.json(
-        { ok: false, error: "Token exchange failed", details: tokens },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Token exchange failed", details: tokens }, { status: 400 });
     }
 
-    // 2) Fetch user’s email
+    // 2) Fetch user's email
     const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
@@ -50,41 +49,39 @@ export async function GET(req: Request) {
     const email = me?.email as string | undefined;
 
     if (!email) {
-      return NextResponse.json({ ok: false, error: "No email from Google" }, { status: 400 });
+      console.error("No email from Google:", me);
+      return NextResponse.json({ ok: false, error: "No email returned from Google" }, { status: 400 });
     }
 
-    // 3) Upsert into oauth_staging (so reconnects replace old/invalid tokens)
-    const supa = getSupabaseAdmin();
-
-    // Optional: ensure table has a unique constraint on (provider, user_email) for true upsert
-    // Otherwise this still works as a best-effort dedupe.
-    await supa
-      .from("oauth_staging")
-      .delete()
-      .eq("provider", "google")
-      .eq("user_email", email);
-
+    // 3) Compute expires_at (unix seconds)
     const expiresAt =
       typeof tokens.expires_in === "number"
         ? Math.floor(Date.now() / 1000) + tokens.expires_in
         : null;
 
-    const { error: insErr } = await supa.from("oauth_staging").insert({
-      provider: "google",
-      user_email: email,
-      access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token ?? null, // may be null if Google didn’t send one
-      expires_at: expiresAt,
-      scope: tokens.scope || null,
-      token_type: tokens.token_type || "Bearer",
-    });
+    const supa = getSupabaseAdmin();
 
-    if (insErr) {
-      console.error("Supabase insert error:", insErr);
-      return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
+    // 4) Upsert the credentials (store scope too)
+    const { error } = await supa
+      .from("oauth_staging")
+      .upsert(
+        {
+          user_email: email,
+          provider: "google",
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token ?? null,
+          expires_at: expiresAt,
+          scope: OAUTH_SCOPE,
+        },
+        { onConflict: "user_email,provider" } as any
+      );
+
+    if (error) {
+      console.error("Supabase upsert error:", error);
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    // 4) Return to your app
+    // 5) Back to dashboard (or next)
     return NextResponse.redirect(new URL(next, req.url));
   } catch (e: any) {
     console.error("Callback crash:", e);
