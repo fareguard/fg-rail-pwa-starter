@@ -97,3 +97,7 @@ button{ font: inherit; }
 .dot{ width:8px; height:8px; border-radius:999px; background: var(--fg-green); margin-top:9px; }
 
 .footer{ border-top:1px solid #eef1f5; padding:20px 0; color: var(--fg-muted); font-size: 14px; }
+
+/* Spinner */
+@keyframes rg-spin { to { transform: rotate(360deg); } }
+.refreshIcon.busy { animation: rg-spin .9s linear infinite; }
