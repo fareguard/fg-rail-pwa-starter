@@ -60,6 +60,19 @@ export default function TripsLive({
     };
   }, [pollMs]);
 
+  // listen for manual refresh events
+  useEffect(() => {
+    const onRefresh = () => {
+      // your refetch logic here
+      // since we're not using SWR in this file, call load() directly
+      void load();
+      // @ts-ignore
+      window.__TRIPS_REFRESHED = true;
+    };
+    window.addEventListener("trips:refresh", onRefresh);
+    return () => window.removeEventListener("trips:refresh", onRefresh);
+  }, []);
+
   if (loading) {
     return (
       <div className="card" style={{ marginTop: 16 }}>
