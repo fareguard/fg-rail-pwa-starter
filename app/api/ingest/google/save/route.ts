@@ -1,7 +1,7 @@
 // app/api/ingest/google/save/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { parseEmail } from "@/lib/parsers";
+import { parseEmail, Trip } from "@/lib/parsers";
 import { getFreshAccessToken } from "@/lib/google";
 
 export const dynamic = "force-dynamic";
@@ -9,14 +9,12 @@ export const runtime = "nodejs";
 
 type GmailMessage = {
   id: string;
-  threadId: string;
   payload?: any;
   snippet?: string;
 };
 
 function b64ToUtf8(b64: string) {
-  // Gmail uses URL-safe base64
-  const s = b64.replace(/-/g, "+").replace(/_/g, "/");
+  const s = (b64 || "").replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(s, "base64").toString("utf-8");
 }
 
@@ -25,15 +23,14 @@ function decodePart(part: any): string {
   return b64ToUtf8(String(part.body.data));
 }
 
-// extract readable text from gmail payload (prefers text/plain, falls back to text/html stripped)
+// Prefer text/plain, else strip html
 function extractBody(payload: any): string {
   if (!payload) return "";
 
-  const mime = payload.mimeType || "";
-  if (mime.startsWith("text/plain")) return decodePart(payload);
-  if (mime.startsWith("text/html")) {
+  const mt = payload.mimeType || "";
+  if (mt.startsWith("text/plain")) return decodePart(payload);
+  if (mt.startsWith("text/html")) {
     const html = decodePart(payload);
-    // strip styles + tags → readable text
     return html
       .replace(/<style[\s\S]*?<\/style>/gi, "")
       .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -41,14 +38,15 @@ function extractBody(payload: any): string {
       .replace(/\s{2,}/g, " ")
       .trim();
   }
-  // walk nested parts, prefer plain then html
+
   let plain = "";
   let html = "";
   for (const p of payload.parts || []) {
-    const t = extractBody(p);
-    if (!t) continue;
-    if ((p.mimeType || "").startsWith("text/plain") && !plain) plain = t;
-    if ((p.mimeType || "").startsWith("text/html") && !html) html = t;
+    const mt2 = p?.mimeType || "";
+    const text = extractBody(p);
+    if (!text) continue;
+    if (mt2.startsWith("text/plain") && !plain) plain = text;
+    if (mt2.startsWith("text/html") && !html) html = text;
   }
   return plain || html || "";
 }
@@ -69,37 +67,27 @@ async function fetchJson(url: string, accessToken: string) {
   return r.json();
 }
 
-/**
- * Query strategy:
- * - restrict to likely senders/subjects to keep quota low but broad enough
- * - 24 months window
- */
-const SEARCH_QUERY =
-  [
-    'in:anywhere',
-    '(',
-    'subject:"ticket"',
-    'OR subject:"e-ticket"',
-    'OR subject:"booking"',
-    'OR from:trainline.com',
-    'OR from:avantiwestcoast.co.uk',
-    'OR from:gwr.com',
-    'OR from:lner.co.uk',
-    'OR from:northernrailway.co.uk',
-    'OR from:thameslinkrailway.com',
-    'OR from:scotrail.co.uk',
-    'OR from:tpexpress.co.uk',
-    'OR from:wmtrains.co.uk',
-    'OR from:trainpal.co.uk',
-    ')',
-    'newer_than:2y',
-  ].join(' ');
+// Broad but safe search (24 months)
+const SEARCH_QUERY = [
+  "in:anywhere",
+  "(",
+  'subject:"ticket"',
+  'OR subject:"e-ticket"',
+  'OR subject:"booking"',
+  "OR from:trainline.com",
+  "OR from:trainpal.co.uk",
+  "OR from:avantiwestcoast.co.uk",
+  "OR from:gwr.com",
+  "OR from:lner.co.uk",
+  "OR from:northernrailway.co.uk",
+  "OR from:thameslinkrailway.com",
+  "OR from:scotrail.co.uk",
+  "OR from:tpexpress.co.uk",
+  "OR from:wmtrains.co.uk",
+  ")",
+  "newer_than:2y",
+].join(" ");
 
-/**
- * Dedupe key for trips:
- * We’ll check existing rows by (user_email, booking_ref, depart_planned, origin, destination)
- * to avoid dupes without requiring a DB unique index right now.
- */
 async function tripExists(
   supa: ReturnType<typeof getSupabaseAdmin>,
   args: {
@@ -130,7 +118,7 @@ export async function GET() {
   try {
     const supa = getSupabaseAdmin();
 
-    // Get last connected Google account (you can scope per-user later)
+    // Use the most recent connected Google account
     const { data: oauthRows, error: oErr } = await supa
       .from("oauth_staging")
       .select("*")
@@ -146,11 +134,10 @@ export async function GET() {
     const user_email: string = oauthRows[0].user_email;
     const accessToken = await getFreshAccessToken(user_email);
 
-    // ---- 1) list messages (paginate a few pages defensively) ----
-    let pageToken: string | undefined = undefined;
-    const messageIds: string[] = [];
-    const MAX_PAGES = 3;
-    for (let i = 0; i < MAX_PAGES; i++) {
+    // 1) list messages (up to a few pages)
+    let pageToken: string | undefined;
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
       const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
       url.searchParams.set("q", SEARCH_QUERY);
       url.searchParams.set("maxResults", "50");
@@ -158,32 +145,29 @@ export async function GET() {
 
       const list = await fetchJson(url.toString(), accessToken);
       if (Array.isArray(list.messages)) {
-        for (const m of list.messages) {
-          if (m?.id) messageIds.push(m.id);
-        }
+        for (const m of list.messages) if (m?.id) ids.push(m.id);
       }
       pageToken = list.nextPageToken;
       if (!pageToken) break;
     }
 
-    if (!messageIds.length) {
-      return NextResponse.json({ ok: true, saved: 0, trips: 0, scanned: 0 });
+    if (!ids.length) {
+      return NextResponse.json({ ok: true, saved: 0, trips: 0, scanned: 0, user_email });
     }
 
-    // ---- 2) hydrate, store raw_emails, parse → trips ----
+    // 2) hydrate + upsert + parse
     let savedRaw = 0;
     let savedTrips = 0;
     let scanned = 0;
 
-    for (const id of messageIds) {
+    for (const id of ids) {
       scanned++;
-      // fetch full message
+
       let msg: GmailMessage | null = null;
       try {
         const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
         msg = await fetchJson(url, accessToken);
-      } catch (e) {
-        // skip if fetch fails
+      } catch {
         continue;
       }
       if (!msg) continue;
@@ -193,7 +177,7 @@ export async function GET() {
       const body = extractBody(msg.payload);
       const snippet = msg.snippet || "";
 
-      // upsert raw email (dedupe by provider + message_id)
+      // raw_emails (dedupe on provider+message_id)
       const { error: rawErr } = await supa
         .from("raw_emails")
         .upsert(
@@ -210,24 +194,24 @@ export async function GET() {
         );
       if (!rawErr) savedRaw++;
 
-      // parse → candidate trip
-      const parsed = parseEmail(body, from, subject);
-
-      // minimal sanity: require at least an origin/destination or a booking ref
+      // → trip candidate
+      const parsed: Trip = parseEmail(body, from, subject);
       const hasMinimum =
         !!(parsed.origin && parsed.destination) || !!parsed.booking_ref;
 
       if (!hasMinimum) continue;
 
-      // dedupe guard
-      const exists = await tripExists(supa, {
-        user_email,
-        booking_ref: parsed.booking_ref,
-        depart_planned: parsed.depart_planned,
-        origin: parsed.origin ?? null,
-        destination: parsed.destination ?? null,
-      });
-      if (exists) continue;
+      if (
+        await tripExists(supa, {
+          user_email,
+          booking_ref: parsed.booking_ref,
+          depart_planned: parsed.depart_planned,
+          origin: parsed.origin ?? null,
+          destination: parsed.destination ?? null,
+        })
+      ) {
+        continue;
+      }
 
       const { error: tripErr } = await supa.from("trips").insert({
         user_email,
