@@ -5,6 +5,7 @@ import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import ConnectGmailButton from "@/app/components/ConnectGmailButton";
 import TripsLive from "@/app/components/TripsLive"; // ✅ added import
+import RefreshIconButton from "@/app/components/RefreshIconButton";
 
 type Me = {
   authenticated: boolean;
@@ -70,9 +71,12 @@ export default function DashboardPage() {
 
   return (
     <div className="container section" style={{ paddingTop: 28 }}>
-      <h1 className="h1" style={{ marginBottom: 6 }}>
-        Your journeys & refund status
-      </h1>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <h1 className="h1" style={{ marginBottom: 6, flex: "1 1 auto" }}>
+          Your journeys & refund status
+        </h1>
+        <RefreshIconButton />
+      </div>
       <p className="sub">We’re watching your tickets and filing Delay Repay when eligible.</p>
 
       {loading && (
