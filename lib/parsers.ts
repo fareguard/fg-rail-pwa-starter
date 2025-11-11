@@ -1,6 +1,6 @@
 // lib/parsers.ts
-// Robust UK rail e-ticket parser with a confidence score.
-// We add operators/retailers over time. Keep this file simple.
+// Parse UK rail ticket emails into structured trip info.
+// Conservative rules: only return a trip when the message really looks like a ticket/booking.
 
 export type Trip = {
   retailer?: string | null;
@@ -10,7 +10,6 @@ export type Trip = {
   booking_ref?: string | null;
   depart_planned?: string | null;
   arrive_planned?: string | null;
-  confidence?: number; // 0..1
 };
 
 const MONTHS = [
@@ -18,104 +17,136 @@ const MONTHS = [
   "july","august","september","october","november","december",
 ];
 
-const STATION_WORD = /[A-Z][a-zA-Z'&.\- ]{2,}/;
-
-// very common UK retailers/operators (extend over time)
-const OPERATOR_HINTS: Array<[RegExp, string]> = [
-  [/Avanti West Coast/i, "Avanti West Coast"],
-  [/(Great Western Railway|GWR)/i, "Great Western Railway"],
-  [/(West Midlands (Railway|Trains)|WMR)/i, "West Midlands Trains"],
-  [/(London North Eastern Railway|LNER)/i, "LNER"],
-  [/ScotRail/i, "ScotRail"],
-  [/TransPennine/i, "TransPennine Express"],
-  [/Thameslink/i, "Thameslink"],
-  [/Southern Railway/i, "Southern"],
-  [/Southeastern/i, "Southeastern"],
-  [/Northern(?:\sRail)?/i, "Northern"],
+const OPERATOR_NAMES = [
+  "Avanti West Coast","Great Western Railway","West Midlands Railway","West Midlands Trains",
+  "London Northwestern Railway","LNER","Northern","ScotRail","TransPennine Express",
+  "Thameslink","Southern","Southeastern","Chiltern Railways","CrossCountry",
+  "South Western Railway","Greater Anglia","c2c","Transport for Wales","Merseyrail"
 ];
 
-const RETAILER_HINTS: Array<[RegExp, string]> = [
-  [/trainline\.com/i, "Trainline"],
-  [/trainpal/i, "TrainPal"],
+const RETAILER_HINTS: Array<[RegExp,string]> = [
+  [/thetrainline|trainline/i, "Trainline"],
+  [/trainpal|mytrainpal|trip\.com/i, "TrainPal"],
+  [/avantiwestcoast/i, "Avanti West Coast"],
+  [/gwr\.com/i, "Great Western Railway"],
+  [/lner/i, "LNER"],
+  [/northernrailway/i, "Northern"],
+  [/wmtrains|lnwrailway/i, "West Midlands Trains"],
+  [/chilternrailways/i, "Chiltern Railways"],
 ];
 
-function monthIndex(name: string) {
-  const i = MONTHS.indexOf(name.toLowerCase());
-  return i < 0 ? null : i + 1;
+const BLACKLIST_SUBJECT = [
+  /newsletter|offer|sale|voucher|discount/i,
+  /survey|feedback/i,
+  /support ticket|customer service|verify account|account verification/i,
+  /welcome\b/i,
+];
+
+const TICKETY_SUBJECT = [
+  /e-?ticket|eticket/i,
+  /your (?:train )?ticket/i,
+  /booking (?:is )?confirmed|booking confirmation/i,
+  /reservation/i
+];
+
+export function isLikelyTicketEmail(
+  subject: string,
+  from: string,
+  body: string
+): boolean {
+  if (BLACKLIST_SUBJECT.some(rx => rx.test(subject))) return false;
+
+  const positive =
+    TICKETY_SUBJECT.some(rx => rx.test(subject)) ||
+    /\b(e-?ticket|booking reference|PNR)\b/i.test(body);
+
+  // Allow-list senders to reduce false positives
+  const senderOk = [
+    "trainline.com","thetrainline.com","trainpal.co.uk","mytrainpal.com","trainpal.com","trip.com",
+    "avantiwestcoast.co.uk","gwr.com","lner.co.uk","northernrailway.co.uk","thameslinkrailway.com",
+    "scotrail.co.uk","tpexpress.co.uk","wmtrains.co.uk","lnwrailway.co.uk","chilternrailways.co.uk",
+    "trainsplit.com","greateranglia.co.uk","c2c-online.co.uk","southernrailway.com",
+    "southeasternrailway.co.uk","crosscountrytrains.co.uk","swrailway.com","tfwrail.wales","merseyrail.org",
+  ].some(dom => from.toLowerCase().includes(dom));
+
+  return positive && senderOk;
 }
 
-function toISO(y: number, m1: number|null, d: number, time?: string|null) {
-  if (!m1 || !time) return null;
+// ---------- helpers ----------
+function toISOFromDateTime(day: number, monthIndex1to12: number, year: number, time?: string | null) {
+  if (!time) return null;
   const [hh, mm] = time.split(":").map(Number);
-  return new Date(Date.UTC(y, m1 - 1, d, hh, mm)).toISOString();
+  return new Date(Date.UTC(year, monthIndex1to12 - 1, day, hh, mm)).toISOString();
 }
 
-function detectOperator(text: string): string | null {
-  for (const [re, name] of OPERATOR_HINTS) if (re.test(text)) return name;
+function pickOperator(text: string): string | null {
+  for (const name of OPERATOR_NAMES) {
+    if (new RegExp(name.replace(/\s+/g, "\\s+"), "i").test(text)) return name;
+  }
   return null;
 }
 
-function detectRetailer(text: string, sender?: string, subject?: string): string | null {
-  for (const [re, name] of RETAILER_HINTS)
-    if (re.test(sender || "") || re.test(text) || re.test(subject || "")) return name;
+function guessRetailer(sender?: string, subject?: string, text?: string): string | null {
+  const source = `${sender || ""} ${subject || ""} ${text || ""}`;
+  for (const [rx, label] of RETAILER_HINTS) if (rx.test(source)) return label;
   return null;
 }
 
-// Generic UK rail parse (works for Trainline, operators, etc.)
-function parseGenericUK(text: string, sender?: string, subject?: string): Trip {
+// ---------- specific-ish patterns (but safe across retailers) ----------
+function parseCommon(text: string, sender?: string, subject?: string): Trip {
   const t = text.replace(/\r/g, "");
 
-  // booking ref — many UK retailers use 6–12 alnum or digits
-  const booking_ref =
-    t.match(/\b(Booking\s*reference|Reference)\s*[:\- ]+([A-Z0-9]{6,12})\b/i)?.[2] ??
-    t.match(/\b([A-Z0-9]{6,12})\b(?=[^\n]{0,40}(reference|booking))/i)?.[1] ??
+  // booking ref: letters or digits 6–12 (quite common)
+  const ref =
+    t.match(/\b(?:Booking\s*reference|Reference)\s*[:\-]?\s*([A-Z0-9]{6,12}|\d{6,12})\b/i)?.[1] ??
     null;
 
-  // origin / destination — simple “X to Y” heuristic
+  // origin / destination
   const od =
-    t.match(new RegExp(String.raw`\b(${STATION_WORD.source})\s+to\s+(${STATION_WORD.source})\b`));
+    t.match(/\b([A-Z][A-Za-z &]+)\s+to\s+([A-Z][A-Za-z &]+)\b/) ??
+    t.match(/From[:\s]+([A-Z][A-Za-z &]+)\s+to[:\s]+([A-Z][A-Za-z &]+)/i);
   const origin = od?.[1]?.trim() ?? null;
   const destination = od?.[2]?.trim() ?? null;
 
-  // datetime
-  const date =
-    t.match(/\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i);
+  // operator + retailer guesses
+  const operator = pickOperator(t);
+  const retailer = guessRetailer(sender, subject, t) || operator;
+
+  // date/time
+  const date = t.match(
+    /\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i
+  );
   const depTime =
     t.match(/Depart(?:ure)?\s*[:\-]?\s*(\d{1,2}:\d{2})/i)?.[1] ??
-    t.match(/(\d{1,2}:\d{2})\s*(?:Departs|Depart)/i)?.[1] ??
-    null;
+    t.match(/(\d{1,2}:\d{2})\s*(?:Depart|Departs)/i)?.[1] ?? null;
   const arrTime =
     t.match(/Arriv(?:al|e)\s*[:\-]?\s*(\d{1,2}:\d{2})/i)?.[1] ??
-    t.match(/(\d{1,2}:\d{2})\s*(?:Arrive|Arrival)/i)?.[1] ??
-    null;
+    t.match(/(\d{1,2}:\d{2})\s*(?:Arrive|Arrival)/i)?.[1] ?? null;
 
   let depart_planned: string | null = null;
   let arrive_planned: string | null = null;
   if (date) {
     const day = parseInt(date[1], 10);
-    const m = monthIndex(date[2]);
+    const monthIndex = MONTHS.indexOf(date[2].toLowerCase()) + 1;
     const year = parseInt(date[3], 10);
-    depart_planned = toISO(year, m, day, depTime);
-    arrive_planned = toISO(year, m, day, arrTime);
+    depart_planned = toISOFromDateTime(day, monthIndex, year, depTime);
+    arrive_planned = toISOFromDateTime(day, monthIndex, year, arrTime);
   }
 
-  // operator & retailer hints
-  const operator = detectOperator(t);
-  const retailer = detectRetailer(t, sender, subject) || operator;
-
-  // confidence: require multiple independent signals to be “ticket”
-  let score = 0;
-  if (booking_ref) score += 0.35;
-  if (origin && destination) score += 0.35;
-  if (depart_planned) score += 0.20;
-  if (operator || retailer) score += 0.10;
-  score = Math.min(1, score);
-
-  return { retailer, operator, origin, destination, booking_ref, depart_planned, arrive_planned, confidence: score };
+  return { retailer, operator, origin, destination, booking_ref: ref, depart_planned, arrive_planned };
 }
 
-// public API
+// ---------- master ----------
 export function parseEmail(rawText: string, sender?: string, subject?: string): Trip {
   const text = (rawText || "").replace(/\r/g, "");
-  return parseGenericUK(text, sender, subject);
+
+  // If it doesn't look like a ticket, bail early.
+  if (!isLikelyTicketEmail(subject || "", sender || "", text)) return {};
+
+  // Single generic parser works across Trainline / TrainPal / Operators
+  const trip = parseCommon(text, sender, subject);
+
+  // Minimal sanity: require at least booking_ref OR (origin+destination)
+  if (!(trip.booking_ref || (trip.origin && trip.destination))) return {};
+  return trip;
 }
