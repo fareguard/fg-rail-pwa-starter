@@ -7,14 +7,10 @@ import { getFreshAccessToken } from "@/lib/google";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-type GmailMessage = {
-  id: string;
-  payload?: any;
-  snippet?: string;
-};
+type GmailMessage = { id: string; payload?: any; snippet?: string };
 
 function b64ToUtf8(b64: string) {
-  const s = (b64 || "").replace(/-/g, "+").replace(/_/g, "/");
+  const s = b64.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(s, "base64").toString("utf-8");
 }
 
@@ -23,13 +19,11 @@ function decodePart(part: any): string {
   return b64ToUtf8(String(part.body.data));
 }
 
-// Prefer text/plain, else strip html
 function extractBody(payload: any): string {
   if (!payload) return "";
-
-  const mt = payload.mimeType || "";
-  if (mt.startsWith("text/plain")) return decodePart(payload);
-  if (mt.startsWith("text/html")) {
+  const mime = payload.mimeType || "";
+  if (mime.startsWith("text/plain")) return decodePart(payload);
+  if (mime.startsWith("text/html")) {
     const html = decodePart(payload);
     return html
       .replace(/<style[\s\S]*?<\/style>/gi, "")
@@ -38,36 +32,30 @@ function extractBody(payload: any): string {
       .replace(/\s{2,}/g, " ")
       .trim();
   }
-
-  let plain = "";
-  let html = "";
+  let plain = "", html = "";
   for (const p of payload.parts || []) {
-    const mt2 = p?.mimeType || "";
-    const text = extractBody(p);
-    if (!text) continue;
-    if (mt2.startsWith("text/plain") && !plain) plain = text;
-    if (mt2.startsWith("text/html") && !html) html = text;
+    const t = extractBody(p);
+    if (!t) continue;
+    if ((p.mimeType || "").startsWith("text/plain") && !plain) plain = t;
+    if ((p.mimeType || "").startsWith("text/html") && !html) html = t;
   }
   return plain || html || "";
 }
 
 function headerValue(payload: any, name: string): string | undefined {
-  const h = (payload?.headers || []).find(
-    (x: any) => String(x.name).toLowerCase() === name.toLowerCase()
-  );
-  return h?.value;
+  return (payload?.headers || []).find((x: any) =>
+    String(x.name).toLowerCase() === name.toLowerCase()
+  )?.value;
 }
 
 async function fetchJson(url: string, accessToken: string) {
   const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!r.ok) {
-    const txt = await r.text();
-    throw new Error(`Gmail API ${r.status}: ${txt}`);
-  }
+  if (!r.ok) throw new Error(`Gmail API ${r.status}: ${await r.text()}`);
   return r.json();
 }
 
-// Broad but safe search (24 months)
+// Broader positive terms + a few negatives to kill obvious noise.
+// (We can keep tuning this list as we see false positives.)
 const SEARCH_QUERY = [
   "in:anywhere",
   "(",
@@ -75,7 +63,6 @@ const SEARCH_QUERY = [
   'OR subject:"e-ticket"',
   'OR subject:"booking"',
   "OR from:trainline.com",
-  "OR from:trainpal.co.uk",
   "OR from:avantiwestcoast.co.uk",
   "OR from:gwr.com",
   "OR from:lner.co.uk",
@@ -84,23 +71,20 @@ const SEARCH_QUERY = [
   "OR from:scotrail.co.uk",
   "OR from:tpexpress.co.uk",
   "OR from:wmtrains.co.uk",
+  "OR from:trainpal.co.uk",
   ")",
+  "-from:roblox.com",
+  "-subject:survey",
+  "-subject:voucher",
   "newer_than:2y",
 ].join(" ");
 
 async function tripExists(
   supa: ReturnType<typeof getSupabaseAdmin>,
-  args: {
-    user_email: string;
-    booking_ref?: string | null;
-    depart_planned?: string | null;
-    origin?: string | null;
-    destination?: string | null;
-  }
+  args: { user_email: string; booking_ref?: string|null; depart_planned?: string|null; origin?: string|null; destination?: string|null }
 ) {
   const { user_email, booking_ref, depart_planned, origin, destination } = args;
   if (!booking_ref || !depart_planned) return false;
-
   const { data } = await supa
     .from("trips")
     .select("id")
@@ -110,7 +94,6 @@ async function tripExists(
     .eq("origin", origin ?? null)
     .eq("destination", destination ?? null)
     .limit(1);
-
   return !!(data && data.length);
 }
 
@@ -118,58 +101,44 @@ export async function GET() {
   try {
     const supa = getSupabaseAdmin();
 
-    // Use the most recent connected Google account
     const { data: oauthRows, error: oErr } = await supa
       .from("oauth_staging")
       .select("*")
       .eq("provider", "google")
       .order("created_at", { ascending: false })
       .limit(1);
-
     if (oErr) throw oErr;
-    if (!oauthRows?.length) {
-      return NextResponse.json({ ok: false, error: "No Gmail connected" }, { status: 400 });
-    }
+    if (!oauthRows?.length) return NextResponse.json({ ok:false, error:"No Gmail connected" }, { status:400 });
 
     const user_email: string = oauthRows[0].user_email;
     const accessToken = await getFreshAccessToken(user_email);
 
-    // 1) list messages (up to a few pages)
+    // 1) list messages (few pages)
     let pageToken: string | undefined;
-    const ids: string[] = [];
+    const messageIds: string[] = [];
     for (let i = 0; i < 3; i++) {
       const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
       url.searchParams.set("q", SEARCH_QUERY);
       url.searchParams.set("maxResults", "50");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
-
       const list = await fetchJson(url.toString(), accessToken);
-      if (Array.isArray(list.messages)) {
-        for (const m of list.messages) if (m?.id) ids.push(m.id);
-      }
+      if (Array.isArray(list.messages)) for (const m of list.messages) if (m?.id) messageIds.push(m.id);
       pageToken = list.nextPageToken;
       if (!pageToken) break;
     }
 
-    if (!ids.length) {
-      return NextResponse.json({ ok: true, saved: 0, trips: 0, scanned: 0, user_email });
-    }
+    if (!messageIds.length) return NextResponse.json({ ok:true, saved:0, trips:0, scanned:0, user_email });
 
-    // 2) hydrate + upsert + parse
-    let savedRaw = 0;
-    let savedTrips = 0;
-    let scanned = 0;
+    // 2) hydrate, upsert raw_emails, parse, insert strong trips
+    let savedRaw = 0, savedTrips = 0, scanned = 0;
 
-    for (const id of ids) {
+    for (const id of messageIds) {
       scanned++;
-
       let msg: GmailMessage | null = null;
       try {
         const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
         msg = await fetchJson(url, accessToken);
-      } catch {
-        continue;
-      }
+      } catch { continue; }
       if (!msg) continue;
 
       const subject = headerValue(msg.payload, "Subject") || "";
@@ -177,41 +146,29 @@ export async function GET() {
       const body = extractBody(msg.payload);
       const snippet = msg.snippet || "";
 
-      // raw_emails (dedupe on provider+message_id)
-      const { error: rawErr } = await supa
-        .from("raw_emails")
-        .upsert(
-          {
-            provider: "google",
-            user_email,
-            message_id: id,
-            subject,
-            sender: from,
-            snippet,
-            body_plain: body || null,
-          },
-          { onConflict: "provider,message_id" } as any
-        );
+      // raw_emails
+      const { error: rawErr } = await supa.from("raw_emails").upsert(
+        { provider:"google", user_email, message_id:id, subject, sender:from, snippet, body_plain: body || null },
+        { onConflict: "provider,message_id" } as any
+      );
       if (!rawErr) savedRaw++;
 
-      // → trip candidate
+      // parse & score
       const parsed: Trip = parseEmail(body, from, subject);
-      const hasMinimum =
-        !!(parsed.origin && parsed.destination) || !!parsed.booking_ref;
+      const confidence = parsed.confidence ?? 0;
 
-      if (!hasMinimum) continue;
+      // Only strong candidates become trips right now
+      const strong = confidence >= 0.7;
+      if (!strong) continue;
 
-      if (
-        await tripExists(supa, {
-          user_email,
-          booking_ref: parsed.booking_ref,
-          depart_planned: parsed.depart_planned,
-          origin: parsed.origin ?? null,
-          destination: parsed.destination ?? null,
-        })
-      ) {
-        continue;
-      }
+      const dedupe = await tripExists(supa, {
+        user_email,
+        booking_ref: parsed.booking_ref ?? null,
+        depart_planned: parsed.depart_planned ?? null,
+        origin: parsed.origin ?? null,
+        destination: parsed.destination ?? null,
+      });
+      if (dedupe) continue;
 
       const { error: tripErr } = await supa.from("trips").insert({
         user_email,
@@ -222,20 +179,15 @@ export async function GET() {
         destination: parsed.destination ?? null,
         depart_planned: parsed.depart_planned ?? null,
         arrive_planned: parsed.arrive_planned ?? null,
+        is_ticket: true,
         pnr_json: parsed as any,
       });
       if (!tripErr) savedTrips++;
     }
 
-    return NextResponse.json({
-      ok: true,
-      saved: savedRaw,
-      trips: savedTrips,
-      scanned,
-      user_email,
-    });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+    return NextResponse.json({ ok:true, saved: savedRaw, trips: savedTrips, scanned, user_email });
+  } catch (e:any) {
+    return NextResponse.json({ ok:false, error: e?.message || String(e) }, { status:500 });
   }
 }
 
