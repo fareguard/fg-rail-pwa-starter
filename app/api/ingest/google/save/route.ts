@@ -189,6 +189,14 @@ export async function GET() {
       if (isLikelyMarketing(subject, body)) continue;
 
       const parsed: Trip = parseEmail(body, from, subject);
+
+      const looksLikeTicket =
+        !!parsed.booking_ref &&
+        (!!parsed.depart_planned || !!parsed.arrive_planned) &&
+        /(e-?ticket|your (?:e-)?tickets|booking number|coach|seat|platform)/i.test(
+          `${subject} ${body}`
+        );
+
       const hasMinimum =
         !!(parsed.origin && parsed.destination) || !!parsed.booking_ref;
       if (!hasMinimum) continue;
@@ -211,6 +219,7 @@ export async function GET() {
         destination: parsed.destination ?? null,
         depart_planned: parsed.depart_planned ?? null,
         arrive_planned: parsed.arrive_planned ?? null,
+        is_ticket: looksLikeTicket,
         pnr_json: parsed as any,
       });
       if (!tripErr) savedTrips++;
