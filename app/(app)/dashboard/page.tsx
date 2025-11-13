@@ -4,7 +4,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import ConnectGmailButton from "@/app/components/ConnectGmailButton";
-import TripsLive from "@/app/components/TripsLive"; // ✅ added import
+import TripsLive from "@/components/TripsLive"; // ✅ added import
 import RefreshIconButton from "@/app/components/RefreshIconButton";
 
 type Me = {
@@ -106,29 +106,31 @@ export default function DashboardPage() {
       )}
 
       {!loading && me && me.authenticated && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <span
-            className="badge"
-            style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}
-          >
-            Live
-          </span>
-          <h3 style={{ margin: "4px 0 8px", color: "var(--fg-navy)" }}>
-            Welcome{me.email ? `, ${me.email}` : ""}.
-          </h3>
-          <p className="small">
-            We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.
-          </p>
-
-          {summary?.ok && (
-            <p className="small" style={{ marginTop: 8 }}>
-              Claims in system: <strong>{summary.claims ?? 0}</strong>
+        <>
+          <div className="card" style={{ marginTop: 16 }}>
+            <span
+              className="badge"
+              style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}
+            >
+              Live
+            </span>
+            <h3 style={{ margin: "4px 0 8px", color: "var(--fg-navy)" }}>
+              Welcome{me.email ? `, ${me.email}` : ""}.
+            </h3>
+            <p className="small">
+              We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.
             </p>
-          )}
+
+            {summary?.ok && (
+              <p className="small" style={{ marginTop: 8 }}>
+                Claims in system: <strong>{summary.claims ?? 0}</strong>
+              </p>
+            )}
+          </div>
 
           {/* 👇 Added TripsLive under the authenticated card */}
           <TripsLive />
-        </div>
+        </>
       )}
     </div>
   );
