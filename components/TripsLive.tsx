@@ -134,9 +134,9 @@ function TripCard({ trip }: { trip: Trip }) {
   const isEticket = true;
 
   return (
-    <li className="rounded-2xl border border-slate-100 bg-white px-4 py-3 shadow-sm shadow-slate-100/60">
+    <li className="list-none rounded-2xl border border-slate-100 bg-white px-4 py-4 shadow-sm shadow-slate-100/80">
       <div className="flex items-start gap-3">
-        <div className="flex-1 space-y-1">
+        <div className="flex-1 space-y-2">
           {/* Pills row */}
           <div className="flex flex-wrap items-center gap-2">
             {trip.operator && (
