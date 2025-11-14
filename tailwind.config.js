@@ -1,20 +1,25 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
+  content: [
+    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
   theme: {
     extend: {
-  colors: {
-    brand: {
-      primary: "#10b981",      // emerald green
-      primaryDark: "#059669",  // darker emerald
-      text: "#1e293b",         // navy/slate-800
-      muted: "#64748b",        // slate-500
-      bg: "#ffffff",           // white
-      surface: "#f8fafc",      // off-white
-      border: "#e2e8f0"        // slate-200
-    }
-  }
-}
+      colors: {
+        brand: {
+          primary: "#10b981",
+          primaryDark: "#059669",
+          text: "#1e293b",
+          muted: "#64748b",
+          bg: "#ffffff",
+          surface: "#f8fafc",
+          border: "#e2e8f0",
+        },
+      },
+    },
   },
-  plugins: []
+  plugins: [],
 };
