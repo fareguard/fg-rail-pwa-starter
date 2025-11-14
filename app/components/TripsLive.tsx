@@ -1,118 +1,134 @@
-// app/components/TripsLive.tsx
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import TripCard from "./TripCard";
+import useSWR from "swr";
 
-type Trip = Parameters<typeof TripCard>[0]["t"];
+type Trip = {
+  id: string;
+  origin: string | null;
+  destination: string | null;
+  operator: string | null;
+  retailer: string | null;
+  booking_ref: string | null;
+  depart_planned: string | null;
+  arrive_planned: string | null;
+  status?: string | null;
+  is_ticket?: boolean | null;
+};
 
-type ListResp =
-  | { ok: true; authenticated: boolean; trips: Trip[] }
-  | { ok: false; error?: string; trips: Trip[] };
+type TripsResponse = {
+  ok: boolean;
+  authenticated: boolean;
+  trips: Trip[];
+  error?: string;
+};
 
-export default function TripsLive({
-  pollMs = 8000,
-}: {
-  pollMs?: number;
-}) {
-  const [loading, setLoading] = useState(true);
-  const [trips, setTrips] = useState<Trip[]>([]);
-  const [authed, setAuthed] = useState<boolean>(false);
-  const timer = useRef<number | null>(null);
+const fetcher = (url: string) => fetch(url, { cache: "no-store" }).then((r) => r.json());
 
-  const load = async () => {
-    try {
-      setLoading(true);
-      const r = await fetch("/api/trips/list", { cache: "no-store" });
-      const j: ListResp = await r.json();
-      if ("authenticated" in j) setAuthed(j.authenticated);
-      if (j.ok) setTrips(j.trips || []);
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  };
+function formatDepart(ts: string | null) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+  const day = d.toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+  const time = d.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${day} · ${time}`;
+}
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      if (!alive) return;
-      await load();
-    })();
+export default function TripsLive() {
+  const { data, error, isLoading } = useSWR<TripsResponse>("/api/trips/list", fetcher, {
+    refreshInterval: 15_000, // auto-refresh every 15s
+  });
 
-    // poll
-    timer.current = window.setInterval(load, pollMs);
-    return () => {
-      alive = false;
-      if (timer.current) window.clearInterval(timer.current);
-    };
-  }, [pollMs]);
-
-  // listen for manual refresh events
-  useEffect(() => {
-    const onRefresh = () => {
-      // since we're not using SWR in this file, call load() directly
-      void load();
-      // @ts-ignore
-      window.__TRIPS_REFRESHED = true;
-    };
-    window.addEventListener("trips:refresh", onRefresh);
-    return () => window.removeEventListener("trips:refresh", onRefresh);
-  }, []);
-
-  if (!authed && !loading) {
+  if (error) {
     return (
-      <div className="card" style={{ marginTop: 16 }}>
-        <p className="small">Connect Gmail to see your journeys here.</p>
+      <div className="card" style={{ marginTop: 12 }}>
+        <p className="small">Couldn’t load journeys right now. Please try again in a moment.</p>
+      </div>
+    );
+  }
+
+  if (!data || isLoading) {
+    return (
+      <div className="card" style={{ marginTop: 12 }}>
+        <p className="small">Scanning your Gmail for e-tickets…</p>
+      </div>
+    );
+  }
+
+  if (!data.authenticated) {
+    // dashboard page already shows the “connect Gmail” card, so stay silent here
+    return null;
+  }
+
+  if (!data.trips || data.trips.length === 0) {
+    return (
+      <div className="card" style={{ marginTop: 12 }}>
+        <p className="small">
+          No journeys detected yet. As soon as we see rail e-tickets in Gmail, they’ll appear here.
+        </p>
       </div>
     );
   }
 
   return (
-    <div style={{ marginTop: 16 }}>
-      {/* refresh icon button (spins while loading) */}
-      <button
-        aria-label="Refresh"
-        onClick={load}
-        className="btnIcon"
-        style={{
-          position: "absolute",
-          right: 24,
-          top: 24,
-          width: 36,
-          height: 36,
-          borderRadius: 999,
-          background: "var(--fg-navy)",
-          color: "#fff",
-        }}
-      >
-        <span
-          style={{
-            display: "inline-block",
-            transition: "transform 0.6s",
-            transform: loading ? "rotate(360deg)" : "none",
-          }}
-        >
-          ↻
-        </span>
-      </button>
+    <>
+      {data.trips.map((t) => {
+        const opLabel = t.operator || "Unknown operator";
+        const retailer = t.retailer || null;
+        const ref = t.booking_ref || "";
+        const title =
+          t.origin && t.destination
+            ? `${t.origin} → ${t.destination}`
+            : t.booking_ref
+            ? `Booking ${t.booking_ref}`
+            : "Rail journey";
 
-      {loading && (
-        <div className="card">
-          <p className="small">Loading trips…</p>
-        </div>
-      )}
+        return (
+          <div key={t.id} className="card" style={{ marginTop: 12 }}>
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: 8,
+                marginBottom: 6,
+              }}
+            >
+              <span className="badge badgeSoft">
+                {opLabel}
+              </span>
+              {retailer && (
+                <span className="badge" style={{ background: "#eef3ff", color: "var(--fg-navy)" }}>
+                  {retailer}
+                </span>
+              )}
+              {t.is_ticket && (
+                <span className="badge" style={{ background: "#ecf8f2", color: "var(--fg-green)" }}>
+                  E-ticket
+                </span>
+              )}
+            </div>
 
-      {!loading && !trips.length && authed && (
-        <div className="card">
-          <p className="small">No tickets yet. New trips will appear here automatically.</p>
-        </div>
-      )}
+            <div style={{ fontWeight: 500, color: "var(--fg-navy)", marginBottom: 4 }}>{title}</div>
 
-      {!loading &&
-        authed &&
-        trips.map((t) => <TripCard key={t.id} t={t} />)}
-    </div>
+            {ref && (
+              <p className="small" style={{ marginBottom: 2 }}>
+                Ref: <strong>{ref}</strong>
+              </p>
+            )}
+
+            <p className="small" style={{ marginBottom: 0 }}>
+              Departs: {formatDepart(t.depart_planned)}
+            </p>
+          </div>
+        );
+      })}
+    </>
   );
 }
