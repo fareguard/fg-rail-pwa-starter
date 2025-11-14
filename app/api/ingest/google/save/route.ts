@@ -1,7 +1,7 @@
 // app/api/ingest/google/save/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { parseEmail, isLikelyMarketing, Trip } from "@/lib/parsers";
+import { parseEmail, Trip } from "@/lib/parsers";
 import { getFreshAccessToken } from "@/lib/google";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +24,7 @@ function decodePart(part: any): string {
   return b64ToUtf8(String(part.body.data));
 }
 
+// extract readable text from gmail payload (prefers text/plain, falls back to stripped HTML)
 function extractBody(payload: any): string {
   if (!payload) return "";
 
@@ -38,6 +39,7 @@ function extractBody(payload: any): string {
       .replace(/\s{2,}/g, " ")
       .trim();
   }
+
   let plain = "";
   let html = "";
   for (const p of payload.parts || []) {
@@ -49,7 +51,7 @@ function extractBody(payload: any): string {
   return plain || html || "";
 }
 
-function headerValue(payload: any, name: string) {
+function headerValue(payload: any, name: string): string | undefined {
   const h = (payload?.headers || []).find(
     (x: any) => String(x.name).toLowerCase() === name.toLowerCase()
   );
@@ -65,15 +67,12 @@ async function fetchJson(url: string, accessToken: string) {
   return r.json();
 }
 
-/**
- * We bias the Gmail search to strong “ticket” signals AND filter TrainPal marketing.
- * Gmail supports negative filters.
- */
 const SEARCH_QUERY = [
   "in:anywhere",
   "(",
-  // positive signals
-  'subject:"e-ticket" OR subject:"eticket" OR subject:"your tickets have been issued" OR subject:"booking confirmation" OR subject:"your ticket"',
+  'subject:"ticket"',
+  'OR subject:"e-ticket"',
+  'OR subject:"booking"',
   "OR from:trainline.com",
   "OR from:avantiwestcoast.co.uk",
   "OR from:gwr.com",
@@ -85,11 +84,10 @@ const SEARCH_QUERY = [
   "OR from:wmtrains.co.uk",
   "OR from:mytrainpal.com",
   ")",
-  // negatives to drop common marketing/surveys
-  "-subject:(survey OR discount OR voucher OR \"How was your trip\" OR \"Welcome Back\" OR \"exclusive\" OR \"verify account\" OR \"account verification\")",
   "newer_than:2y",
 ].join(" ");
 
+// Dedupe key for trips
 async function tripExists(
   supa: ReturnType<typeof getSupabaseAdmin>,
   args: {
@@ -102,6 +100,7 @@ async function tripExists(
 ) {
   const { user_email, booking_ref, depart_planned, origin, destination } = args;
   if (!booking_ref || !depart_planned) return false;
+
   const { data } = await supa
     .from("trips")
     .select("id")
@@ -111,6 +110,7 @@ async function tripExists(
     .eq("origin", origin ?? null)
     .eq("destination", destination ?? null)
     .limit(1);
+
   return !!(data && data.length);
 }
 
@@ -133,25 +133,37 @@ export async function GET() {
     const user_email: string = oauthRows[0].user_email;
     const accessToken = await getFreshAccessToken(user_email);
 
-    // 1) list messages (few pages)
-    let pageToken: string | undefined;
-    const ids: string[] = [];
-    for (let i = 0; i < 3; i++) {
+    // ---- 1) list messages ----
+    let pageToken: string | undefined = undefined;
+    const messageIds: string[] = [];
+    const MAX_PAGES = 3;
+
+    for (let i = 0; i < MAX_PAGES; i++) {
       const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
       url.searchParams.set("q", SEARCH_QUERY);
       url.searchParams.set("maxResults", "50");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
+
       const list = await fetchJson(url.toString(), accessToken);
-      (list.messages || []).forEach((m: any) => m?.id && ids.push(m.id));
-      if (!list.nextPageToken) break;
+      if (Array.isArray(list.messages)) {
+        for (const m of list.messages) {
+          if (m?.id) messageIds.push(m.id);
+        }
+      }
       pageToken = list.nextPageToken;
+      if (!pageToken) break;
     }
 
+    if (!messageIds.length) {
+      return NextResponse.json({ ok: true, saved: 0, trips: 0, scanned: 0 });
+    }
+
+    // ---- 2) hydrate, store raw_emails, parse → trips ----
     let savedRaw = 0;
     let savedTrips = 0;
     let scanned = 0;
 
-    for (const id of ids) {
+    for (const id of messageIds) {
       scanned++;
 
       let msg: GmailMessage | null = null;
@@ -168,7 +180,7 @@ export async function GET() {
       const body = extractBody(msg.payload);
       const snippet = msg.snippet || "";
 
-      // Always upsert raw (useful for debugging)
+      // raw_emails upsert
       const { error: rawErr } = await supa
         .from("raw_emails")
         .upsert(
@@ -185,26 +197,20 @@ export async function GET() {
         );
       if (!rawErr) savedRaw++;
 
-      // Skip obvious marketing / non-ticket emails
-      if (isLikelyMarketing(subject, body)) continue;
-
+      // parse → candidate trip
       const parsed: Trip = parseEmail(body, from, subject);
 
-      const looksLikeTicket =
-        !!parsed.booking_ref &&
-        (!!parsed.depart_planned || !!parsed.arrive_planned) &&
-        /(e-?ticket|your (?:e-)?tickets|booking number|coach|seat|platform)/i.test(
-          `${subject} ${body}`
-        );
+      // Only treat as a ticket if flagged AND has sensible core fields
+      const isTicket =
+        parsed.is_ticket === true &&
+        !!(parsed.origin && parsed.destination && parsed.depart_planned);
 
-      const hasMinimum =
-        !!(parsed.origin && parsed.destination) || !!parsed.booking_ref;
-      if (!hasMinimum) continue;
+      if (!isTicket) continue;
 
       const exists = await tripExists(supa, {
         user_email,
-        booking_ref: parsed.booking_ref ?? null,
-        depart_planned: parsed.depart_planned ?? null,
+        booking_ref: parsed.booking_ref,
+        depart_planned: parsed.depart_planned,
         origin: parsed.origin ?? null,
         destination: parsed.destination ?? null,
       });
@@ -219,13 +225,20 @@ export async function GET() {
         destination: parsed.destination ?? null,
         depart_planned: parsed.depart_planned ?? null,
         arrive_planned: parsed.arrive_planned ?? null,
-        is_ticket: looksLikeTicket,
+        is_ticket: true,
         pnr_json: parsed as any,
       });
+
       if (!tripErr) savedTrips++;
     }
 
-    return NextResponse.json({ ok: true, saved: savedRaw, trips: savedTrips, scanned, user_email });
+    return NextResponse.json({
+      ok: true,
+      saved: savedRaw,
+      trips: savedTrips,
+      scanned,
+      user_email,
+    });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }
