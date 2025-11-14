@@ -1,8 +1,7 @@
-// components/TripsLive.tsx
 "use client";
 
+import { useMemo } from "react";
 import useSWR from "swr";
-import clsx from "clsx";
 
 type Trip = {
   id: string;
@@ -25,101 +24,195 @@ type TripsResponse = {
   error?: string;
 };
 
-const fetcher = (url: string) =>
-  fetch(url).then<TripsResponse>((r) => r.json());
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Simple brand colour map for operator chips
-const operatorBrandStyles: Record<
-  string,
-  { bg: string; text: string }
-> = {
-  "Avanti West Coast": { bg: "#003D4C", text: "#FFFFFF" }, // dark teal
-  Northern: { bg: "#171C8F", text: "#FFFFFF" },
-  "West Midlands Trains": { bg: "#ff8200", text: "#000000" },
-  "London Northwestern Railway": { bg: "#006747", text: "#FFFFFF" },
-  "Great Western Railway": { bg: "#004736", text: "#FFFFFF" },
-  LNER: { bg: "#9d2235", text: "#FFFFFF" },
-};
+// --- small helpers ---------------------------------------------------------
 
-function formatDepart(dateIso: string | null) {
-  if (!dateIso) return "—";
-  const d = new Date(dateIso);
-  if (Number.isNaN(d.getTime())) return "—";
+function formatDepart(trip: Trip) {
+  if (!trip.depart_planned) return "Departs: —";
 
-  // e.g. Fri, 16 Apr · 18:45
-  const day = d.toLocaleDateString("en-GB", {
+  const d = new Date(trip.depart_planned);
+  const date = d.toLocaleDateString("en-GB", {
     weekday: "short",
-    day: "2-digit",
+    day: "numeric",
     month: "short",
   });
   const time = d.toLocaleTimeString("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
   });
-  return `${day} · ${time}`;
+
+  return `Departs: ${date} · ${time}`;
 }
 
-function Pill({
-  children,
-  brand,
-}: {
-  children: React.ReactNode;
-  brand?: string | null;
-}) {
-  const brandStyle =
-    brand && operatorBrandStyles[brand]
-      ? operatorBrandStyles[brand]
-      : null;
+// Try to pull a sensible “X → Y” route from messy text
+function cleanRoute(raw: string) {
+  if (!raw) return "";
+
+  let s = raw.replace(/\s+/g, " ").trim();
+
+  // If there is a “Something → Something” near the end, keep just that
+  const m = s.match(/([A-Za-z][A-Za-z\s]+?→\s*[A-Za-z][A-Za-z\s]+)$/);
+  if (m) s = m[1].trim();
+
+  // Strip common Avanti marketing noise
+  s = s.replace(
+    /^Your booking is confirmed.*?Avanti West Coast\s*/i,
+    ""
+  );
+  s = s.replace(/^Welcome to Avanti West Coast\s*/i, "");
+  s = s.replace(/\s+on$/i, ""); // “... Stations on” → “... Stations”
+
+  if (s.length > 90) s = s.slice(0, 90) + "…";
+  return s;
+}
+
+function buildTitle(trip: Trip): string {
+  const combined = [trip.origin, trip.destination]
+    .filter(Boolean)
+    .join(" → ");
+
+  if (combined) return cleanRoute(combined);
+
+  if (trip.booking_ref) return `Booking ref ${trip.booking_ref}`;
+
+  return "Train journey";
+}
+
+// Simple “clsx”-style helper without dependency
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+// Operator brand colours (rough but good enough for now)
+function operatorBadgeClass(operator?: string | null) {
+  const base =
+    "inline-flex items-center rounded-full px-3 py-1 text-xs font-medium";
+
+  if (!operator) return base + " bg-slate-100 text-slate-700";
+
+  switch (operator) {
+    case "Avanti West Coast":
+      // dark teal / graphite
+      return base + " bg-[#003C57] text-white";
+    case "Northern":
+      return base + " bg-[#1A3668] text-white";
+    case "West Midlands Trains":
+    case "West Midlands Railway":
+      return base + " bg-[#ff8200] text-white";
+    case "London Northwestern Railway":
+      return base + " bg-[#007A53] text-white";
+    case "ScotRail":
+      return base + " bg-[#003366] text-white";
+    default:
+      return base + " bg-slate-100 text-slate-700";
+  }
+}
+
+function retailerBadgeClass(retailer?: string | null) {
+  const base =
+    "inline-flex items-center rounded-full px-3 py-1 text-xs font-medium";
+  if (!retailer) return base + " bg-slate-100 text-slate-700";
+
+  if (/trainpal/i.test(retailer)) {
+    return base + " bg-[#ff6a00]/10 text-[#ff6a00]";
+  }
+  if (/trainline/i.test(retailer)) {
+    return base + " bg-emerald-50 text-emerald-700";
+  }
+  return base + " bg-slate-100 text-slate-700";
+}
+
+// ---------------------------------------------------------------------------
+
+function TripCard({ trip }: { trip: Trip }) {
+  const title = useMemo(() => buildTitle(trip), [trip]);
+  const departLabel = useMemo(() => formatDepart(trip), [trip]);
+
+  // For now everything we ingest is effectively an e-ticket
+  const isEticket = true;
 
   return (
-    <span
-      className={clsx(
-        "inline-flex items-center rounded-full px-3 py-1 text-xs font-medium",
-        !brandStyle && "bg-slate-100 text-slate-700"
-      )}
-      style={
-        brandStyle
-          ? { backgroundColor: brandStyle.bg, color: brandStyle.text }
-          : undefined
-      }
-    >
-      {children}
-    </span>
+    <li className="rounded-2xl border border-slate-100 bg-white px-4 py-3 shadow-sm shadow-slate-100/60">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 space-y-1">
+          {/* Pills row */}
+          <div className="flex flex-wrap items-center gap-2">
+            {trip.operator && (
+              <span className={operatorBadgeClass(trip.operator)}>
+                {trip.operator}
+              </span>
+            )}
+
+            {trip.retailer && (
+              <span className={retailerBadgeClass(trip.retailer)}>
+                {trip.retailer}
+              </span>
+            )}
+
+            {isEticket && (
+              <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
+                E-ticket
+              </span>
+            )}
+          </div>
+
+          {/* Title / route */}
+          <p className="text-sm font-medium text-slate-900 md:text-base">
+            {title}
+          </p>
+
+          {/* Depart info */}
+          <p className="text-xs text-slate-500 md:text-sm">{departLabel}</p>
+        </div>
+
+        {/* Status dot (for now all “live” / ok) */}
+        <div className="mt-1 flex items-center">
+          <span
+            className={cx(
+              "inline-flex h-2.5 w-2.5 rounded-full",
+              trip.status === "submitted" || trip.status === "queued"
+                ? "bg-amber-400"
+                : "bg-emerald-400"
+            )}
+          />
+        </div>
+      </div>
+    </li>
   );
 }
 
+// ---------------------------------------------------------------------------
+
 export default function TripsLive() {
-  const { data, error, isLoading } = useSWR("/api/trips/list", fetcher, {
-    revalidateOnFocus: true,
-  });
+  const { data, error, isValidating } = useSWR<TripsResponse>(
+    "/api/trips/list",
+    fetcher,
+    {
+      refreshInterval: 60_000, // 60s passive refresh
+    }
+  );
 
   if (error) {
     return (
-      <p className="text-sm text-red-600">
-        Failed to load journeys. Please try refreshing.
+      <p className="mt-4 text-sm text-red-600">
+        We couldn&apos;t load your journeys right now.
       </p>
     );
   }
 
-  if (isLoading || !data) {
+  if (!data) {
     return (
-      <p className="text-sm text-slate-500">
+      <p className="mt-4 text-sm text-slate-500">
         Loading your journeys…
-      </p>
-    );
-  }
-
-  if (!data.ok) {
-    return (
-      <p className="text-sm text-red-600">
-        {data.error || "Something went wrong loading your journeys."}
       </p>
     );
   }
 
   if (!data.authenticated) {
     return (
-      <p className="text-sm text-slate-500">
+      <p className="mt-4 text-sm text-slate-500">
         Sign in to see your journeys.
       </p>
     );
@@ -127,56 +220,26 @@ export default function TripsLive() {
 
   if (!data.trips.length) {
     return (
-      <p className="text-sm text-slate-500">
-        No journeys found yet. We’ll show them here as soon as we spot
-        tickets in your email.
+      <p className="mt-4 text-sm text-slate-500">
+        No journeys detected yet. We&apos;ll add them here as soon as
+        your e-tickets arrive.
       </p>
     );
   }
 
   return (
-    <div className="space-y-4">
-      {data.trips.map((trip) => {
-        const title =
-          trip.origin && trip.destination
-            ? `${trip.origin} → ${trip.destination}`
-            : trip.booking_ref
-            ? `Booking reference ${trip.booking_ref}`
-            : "Rail journey";
+    <div className="mt-4 space-y-2">
+      {isValidating && (
+        <p className="text-[11px] uppercase tracking-wide text-slate-400">
+          Updating from Gmail…
+        </p>
+      )}
 
-        const departLabel = formatDepart(trip.depart_planned);
-
-        return (
-          <div
-            key={trip.id}
-            className="rounded-2xl border border-slate-100 bg-white px-5 py-4 shadow-sm"
-          >
-            {/* Top row: pills */}
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              {trip.operator && (
-                <Pill brand={trip.operator}>{trip.operator}</Pill>
-              )}
-
-              {trip.retailer &&
-                trip.retailer !== trip.operator && (
-                  <Pill>{trip.retailer}</Pill>
-                )}
-
-              {trip.is_ticket && <Pill>E-ticket</Pill>}
-            </div>
-
-            {/* Title */}
-            <h3 className="text-sm font-semibold text-slate-900">
-              {title}
-            </h3>
-
-            {/* Meta */}
-            <p className="mt-1 text-xs text-slate-500">
-              Departs: {departLabel}
-            </p>
-          </div>
-        );
-      })}
+      <ul className="space-y-3">
+        {data.trips.map((trip) => (
+          <TripCard key={trip.id} trip={trip} />
+        ))}
+      </ul>
     </div>
   );
 }
