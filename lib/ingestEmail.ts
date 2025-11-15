@@ -3,14 +3,21 @@
 import openai from "@/lib/openai";
 import type { ParsedTicketResult, ParseTrainEmailOutput } from "./trainEmailFilter";
 
-type IngestEmailArgs = {
+// ------------------------------------------------------
+// Updated type – NOW ACCEPTS id (optional)
+// ------------------------------------------------------
+export type IngestEmailArgs = {
+  id?: string;               // <---- FIX: allow id here
   subject: string;
   from: string;
   bodyHtml?: string | null;
   bodyText?: string | null;
 };
 
+// ------------------------------------------------------
+
 export async function ingestEmail({
+  id,
   subject,
   from,
   bodyHtml,
@@ -32,7 +39,10 @@ export async function ingestEmail({
       {
         role: "user",
         content: [
-          { type: "input_text", text: `From: ${from}\nSubject: ${subject}\n\n${body}` },
+          {
+            type: "input_text",
+            text: `Email-ID: ${id ?? "n/a"}\nFrom: ${from}\nSubject: ${subject}\n\n${body}`,
+          },
         ],
       },
     ],
@@ -65,7 +75,10 @@ export async function ingestEmail({
     (completion.output[0].content[0] as any)
       .parsed as ParseTrainEmailOutput;
 
-  // 1) If the model says "not a ticket" – bin it
+  // ------------------------------------------------------
+  // 1) AI says NOT a ticket
+  // ------------------------------------------------------
+
   if (!parsed.is_ticket) {
     return {
       is_ticket: false,
@@ -73,8 +86,10 @@ export async function ingestEmail({
     };
   }
 
-  // 2) Hard gate for required fields (OPTION B)
-  //    If ANY of these are missing/empty, we treat the email as NOT a ticket.
+  // ------------------------------------------------------
+  // 2) Hard required fields (OPTION B)
+  // ------------------------------------------------------
+
   const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
@@ -93,7 +108,10 @@ export async function ingestEmail({
     };
   }
 
-  // 3) If we get here, we know we have a *fully usable* ticket
+  // ------------------------------------------------------
+  // 3) Looks good → usable ticket
+  // ------------------------------------------------------
+
   return {
     is_ticket: true,
     provider: parsed.provider!,
