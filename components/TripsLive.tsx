@@ -89,6 +89,33 @@ function TripCard({ trip }: { trip: Trip }) {
       ? "#fbbf24" // amber
       : "#22c55e"; // green
 
+  const operator = (trip.operator || "").trim();
+  const retailer = (trip.retailer || "").trim();
+  const isSameBrand =
+    operator &&
+    retailer &&
+    operator.toLowerCase() === retailer.toLowerCase();
+
+  // Operator pill style (brand-aware)
+  let operatorBadgeStyle: any = {
+    background: "#ecf2f8",
+    color: "var(--fg-navy)",
+  };
+
+  if (operator === "Avanti West Coast") {
+    // Avanti teal-ish background, white text
+    operatorBadgeStyle = {
+      background: "#003C57",
+      color: "#ffffff",
+    };
+  }
+
+  // Retailer pill style (generic, only shown if different from operator)
+  const retailerBadgeStyle: any = {
+    background: "#f4f4f5",
+    color: "#444",
+  };
+
   return (
     <li
       className="card"
@@ -117,27 +144,15 @@ function TripCard({ trip }: { trip: Trip }) {
               marginBottom: 6,
             }}
           >
-            {trip.operator && (
-              <span
-                className="badge"
-                style={{
-                  background: "#ecf2f8",
-                  color: "var(--fg-navy)",
-                }}
-              >
-                {trip.operator}
+            {operator && (
+              <span className="badge" style={operatorBadgeStyle}>
+                {operator}
               </span>
             )}
 
-            {trip.retailer && (
-              <span
-                className="badge"
-                style={{
-                  background: "#f4f4f5",
-                  color: "#444",
-                }}
-              >
-                {trip.retailer}
+            {!isSameBrand && retailer && (
+              <span className="badge" style={retailerBadgeStyle}>
+                {retailer}
               </span>
             )}
 
