@@ -1,6 +1,5 @@
 // lib/parsers.ts
 // Parses rail ticket emails into structured trip info.
-// Keep this file simple + robust. We'll extend operators over time.
 
 export type Trip = {
   retailer?: string | null;
@@ -10,10 +9,26 @@ export type Trip = {
   booking_ref?: string | null;
   depart_planned?: string | null;
   arrive_planned?: string | null;
-  is_ticket?: boolean; // <-- key flag: only "true" means we treat as a real ticket
+  is_ticket?: boolean; // <-- only "true" means real ticket
 };
 
 // ---- Helpers ----
+
+const MONTH_MAP: Record<string, number> = {
+  january: 1, jan: 1,
+  february: 2, feb: 2,
+  march: 3, mar: 3,
+  april: 4, apr: 4,
+  may: 5,
+  june: 6, jun: 6,
+  july: 7, jul: 7,
+  august: 8, aug: 8,
+  september: 9, sep: 9, sept: 9,
+  october: 10, oct: 10,
+  november: 11, nov: 11,
+  december: 12, dec: 12,
+};
+
 function toISOFromDateTime(
   day: number,
   monthIndex1to12: number,
@@ -22,26 +37,55 @@ function toISOFromDateTime(
 ) {
   if (!time) return null;
   const [hh, mm] = time.split(":").map(Number);
-  // Use UTC to avoid TZ ambiguity in storage
   return new Date(Date.UTC(year, monthIndex1to12 - 1, day, hh, mm)).toISOString();
 }
 
-const MONTHS = [
-  "january",
-  "february",
-  "march",
-  "april",
-  "may",
-  "june",
-  "july",
-  "august",
-  "september",
-  "october",
-  "november",
-  "december",
-];
+// Very forgiving date matcher for things like:
+//  - 30 August 2025
+//  - 30 Aug 2025
+//  - Sat, 30 Aug 2025
+//  - Sat, Aug 30, 2025
+function findDateParts(text: string): { day: number; monthIndex: number; year: number } | null {
+  const t = text.replace(/\r/g, "");
 
-// Normalise “station-ish” text – strip Avanti boilerplate etc.
+  // 1) 30 August 2025 / 30 Aug 2025
+  let m =
+    t.match(
+      /\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(20\d{2})\b/i
+    );
+  if (m) {
+    const day = parseInt(m[1], 10);
+    const monthIndex = MONTH_MAP[m[2].toLowerCase()];
+    const year = parseInt(m[3], 10);
+    if (monthIndex) return { day, monthIndex, year };
+  }
+
+  // 2) Sat, 30 Aug 2025
+  m = t.match(
+    /\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(20\d{2})\b/i
+  );
+  if (m) {
+    const day = parseInt(m[1], 10);
+    const monthIndex = MONTH_MAP[m[2].toLowerCase()];
+    const year = parseInt(m[3], 10);
+    if (monthIndex) return { day, monthIndex, year };
+  }
+
+  // 3) Sat, Aug 30, 2025
+  m = t.match(
+    /\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2}),\s*(20\d{2})\b/i
+  );
+  if (m) {
+    const monthIndex = MONTH_MAP[m[1].toLowerCase()];
+    const day = parseInt(m[2], 10);
+    const year = parseInt(m[3], 10);
+    if (monthIndex) return { day, monthIndex, year };
+  }
+
+  return null;
+}
+
+// Normalise station-ish text (strip obvious boilerplate)
 function cleanStationName(name: string | null): string | null {
   if (!name) return null;
   let s = name;
@@ -57,22 +101,20 @@ function cleanStationName(name: string | null): string | null {
   return s || null;
 }
 
-// Small helper so we only call something a "ticket" if it looks like a real journey
+// Only call something a "ticket" if it looks like a real journey
 function computeIsTicket(trip: Trip): boolean {
   return !!(trip.origin && trip.destination && trip.depart_planned);
 }
 
 // ---- Avanti West Coast ----
+
 function parseAvantiEmail(text: string): Trip {
   const t = text.replace(/\r/g, "");
 
-  // booking ref (letters or digits 6–12)
   const refMatch = t.match(/Booking reference:\s*([A-Z0-9]{6,12}|\d{6,12})/i);
   const booking_ref = refMatch?.[1]?.trim() ?? null;
 
-  // origin/destination:
-  //  - find ALL "... X to Y ..." patterns
-  //  - take the *last* one (closest to the actual ticket summary)
+  // All "X to Y" pairs, take the last one (closest to ticket summary)
   const odMatches = Array.from(
     t.matchAll(
       /\b([A-Z][A-Za-z\s&]+?)\s+to\s+([A-Z][A-Za-z\s&]+?)\s*(?:£|\n|$)/g
@@ -87,14 +129,10 @@ function parseAvantiEmail(text: string): Trip {
     destination = cleanStationName(last[2]?.trim() ?? null);
   }
 
-  // operator
   const operator = /Avanti West Coast/i.test(t) ? "Avanti West Coast" : null;
   const retailer = operator;
 
-  // date/time
-  const dateMatch = t.match(
-    /\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i
-  );
+  const dateParts = findDateParts(t);
   const depTime =
     t.match(/Depart(?:ure)?\s*[:\-]?\s*(\d{1,2}:\d{2})/i)?.[1] ??
     t.match(/\b(\d{1,2}:\d{2})\b(?=[^\n]{0,40}Depart)/i)?.[1] ??
@@ -106,12 +144,19 @@ function parseAvantiEmail(text: string): Trip {
 
   let depart_planned: string | null = null;
   let arrive_planned: string | null = null;
-  if (dateMatch) {
-    const day = parseInt(dateMatch[1], 10);
-    const monthIndex = MONTHS.indexOf(dateMatch[2].toLowerCase()) + 1;
-    const year = parseInt(dateMatch[3], 10);
-    depart_planned = toISOFromDateTime(year, monthIndex, day, depTime);
-    arrive_planned = toISOFromDateTime(year, monthIndex, day, arrTime);
+  if (dateParts) {
+    depart_planned = toISOFromDateTime(
+      dateParts.day,
+      dateParts.monthIndex,
+      dateParts.year,
+      depTime
+    );
+    arrive_planned = toISOFromDateTime(
+      dateParts.day,
+      dateParts.monthIndex,
+      dateParts.year,
+      arrTime
+    );
   }
 
   const trip: Trip = {
@@ -128,31 +173,25 @@ function parseAvantiEmail(text: string): Trip {
 }
 
 // ---- Trainline / TrainPal / generic UK retailers ----
+
 function parseTrainlineLike(text: string, sender?: string, subject?: string): Trip {
   const t = text.replace(/\r/g, "");
 
-  // Booking reference patterns often shown as "Booking number" or "Booking reference"
   const ref =
     t.match(/Booking (?:number|reference)[:\s]+([A-Z0-9]{6,20}|\d{6,20})/i)?.[1] ??
     t.match(/Reference[:\s]+([A-Z0-9]{6,20}|\d{6,20})/i)?.[1] ??
     null;
 
-  // Origin / destination:
-  //  - X to Y
-  //  - X -> Y
-  //  - X - Y / X – Y
+  // Origin / destination: X to Y / X -> Y / X - Y / X → Y / X ↔ Y
   const od =
     t.match(
-      /\b([A-Z][a-zA-Z\s&]+?)\s+(?:to|->|-|–|—|→)\s+([A-Z][a-zA-Z\s&]+?)\b/
+      /\b([A-Z][a-zA-Z\s&]+?)\s+(?:to|->|-|–|—|→|↔)\s+([A-Z][a-zA-Z\s&]+?)\b/
     ) ??
-    t.match(
-      /From[:\s]+([A-Z][a-zA-Z\s&]+)\s+to[:\s]+([A-Z][a-zA-Z\s&]+)/i
-    );
+    t.match(/From[:\s]+([A-Z][a-zA-Z\s&]+)\s+to[:\s]+([A-Z][a-zA-Z\s&]+)/i);
 
   const origin = cleanStationName(od?.[1]?.trim() ?? null);
   const destination = cleanStationName(od?.[2]?.trim() ?? null);
 
-  // Operator detection (a few common ones)
   const operator =
     (/Avanti West Coast/i.test(t) && "Avanti West Coast") ||
     (/Great Western Railway|GWR/i.test(t) && "Great Western Railway") ||
@@ -167,7 +206,6 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
     (/Chiltern Railways/i.test(t) && "Chiltern Railways") ||
     null;
 
-  // Retailer guess from sender/subject
   const retailer =
     (sender?.includes("trainline.com") && "Trainline") ||
     (sender?.includes("mytrainpal.com") && "TrainPal") ||
@@ -176,12 +214,8 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
     operator ||
     null;
 
-  // Date + time (quite generic; works for most booking emails)
-  const date = t.match(
-    /\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i
-  );
+  const date = findDateParts(t);
 
-  // Try to find two times near each other (e.g. "13:21 ... 14:56")
   const timeMatches = Array.from(t.matchAll(/\b(\d{1,2}:\d{2})\b/g)).map(
     (m) => m[1]
   );
@@ -191,11 +225,18 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
   let depart_planned: string | null = null;
   let arrive_planned: string | null = null;
   if (date) {
-    const day = parseInt(date[1], 10);
-    const monthIndex = MONTHS.indexOf(date[2].toLowerCase()) + 1;
-    const year = parseInt(date[3], 10);
-    depart_planned = toISOFromDateTime(year, monthIndex, day, depTime);
-    arrive_planned = toISOFromDateTime(year, monthIndex, day, arrTime);
+    depart_planned = toISOFromDateTime(
+      date.day,
+      date.monthIndex,
+      date.year,
+      depTime
+    );
+    arrive_planned = toISOFromDateTime(
+      date.day,
+      date.monthIndex,
+      date.year,
+      arrTime
+    );
   }
 
   const trip: Trip = {
@@ -211,11 +252,12 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
   return trip;
 }
 
-// ---- Fallback generic (used mainly so we don’t completely miss weird formats) ----
+// ---- Fallback generic ----
+
 function parseGeneric(text: string): Trip {
   const t = text.replace(/\r/g, "");
   const od = t.match(
-    /\b([A-Z][a-zA-Z\s&]+)\s+(?:to|->|-|–|—|→)\s+([A-Z][a-zA-Z\s&]+)\b/
+    /\b([A-Z][a-zA-Z\s&]+)\s+(?:to|->|-|–|—|→|↔)\s+([A-Z][a-zA-Z\s&]+)\b/
   );
   const ref = t.match(/\b([A-Z0-9]{6,12})\b/); // very loose
   const trip: Trip = {
@@ -223,12 +265,12 @@ function parseGeneric(text: string): Trip {
     destination: cleanStationName(od?.[2]?.trim() ?? null),
     booking_ref: ref?.[1] ?? null,
   };
-  // GENERIC PARSER NEVER MARKS AS TICKET – we only use it as fallback signal
-  trip.is_ticket = false;
+  trip.is_ticket = false; // generic never marks as ticket
   return trip;
 }
 
 // ---- Master parser ----
+
 export function parseEmail(
   rawText: string,
   sender?: string,
@@ -256,6 +298,6 @@ export function parseEmail(
     if (tl.origin || tl.destination || tl.booking_ref) return tl;
   }
 
-  // 3) Generic fallback – never marked as ticket on its own
+  // 3) Generic fallback – signal only, never a true ticket
   return parseGeneric(text);
 }
