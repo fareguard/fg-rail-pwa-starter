@@ -121,9 +121,8 @@ function buildSearchQuery() {
   return `in:anywhere (${fromParts} OR ${subjectParts}) newer_than:2y`;
 }
 
-// ---- Trip existence check (real dedupe) ----------------------------
+// ---- Trip existence check -------------------------
 
-// Dedupe key for trips
 async function tripExists(
   supa: ReturnType<typeof getSupabaseAdmin>,
   args: {
@@ -207,7 +206,6 @@ export async function GET() {
 
     const user_email: string = oauthRows[0].user_email;
     const accessToken = await getFreshAccessToken(user_email);
-
     const SEARCH_QUERY = buildSearchQuery();
 
     // ---- 2) list messages matching our query ----
@@ -242,7 +240,7 @@ export async function GET() {
       });
     }
 
-    // ---- 3) hydrate, store raw_emails, parse → trips ----
+    // ---- 3) hydrate, store raw_emails, parse → trips (with upsert) ----
     let savedRaw = 0;
     let newTrips = 0;
     let scanned = 0;
@@ -290,7 +288,7 @@ export async function GET() {
 
       if (!isTicket) continue;
 
-      // hard dedupe: if this journey already exists, skip insert
+      // stats: check if this journey is already in trips
       const existedBefore = await tripExists(supa, {
         user_email,
         booking_ref: parsed.booking_ref,
@@ -300,11 +298,7 @@ export async function GET() {
         operator: parsed.operator ?? null,
       });
 
-      if (existedBefore) {
-        continue;
-      }
-
-      const { error: tripErr } = await supa.from("trips").insert({
+      const tripRow = {
         user_email,
         retailer: parsed.retailer ?? null,
         operator: parsed.operator ?? null,
@@ -314,10 +308,19 @@ export async function GET() {
         depart_planned: parsed.depart_planned ?? null,
         arrive_planned: parsed.arrive_planned ?? null,
         is_ticket: true,
+        source: "gmail" as const,
         pnr_json: parsed as any,
-      });
+      };
 
-      if (!tripErr) {
+      // upsert with the same unique key we added in the DB
+      const { error: tripErr } = await supa
+        .from("trips")
+        .upsert(tripRow, {
+          onConflict:
+            "user_email,booking_ref,depart_planned,origin,destination",
+        });
+
+      if (!tripErr && !existedBefore) {
         newTrips++;
       }
     }
