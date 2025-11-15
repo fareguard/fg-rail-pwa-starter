@@ -105,8 +105,8 @@ function TripCard({ trip }: { trip: Trip }) {
   if (operator === "Avanti West Coast") {
     // Avanti teal-ish background, white text
     operatorBadgeStyle = {
-      background: "#003C57",
-      color: "#ffffff",
+      background: "#004F59",
+      color: "#FF6600",
     };
   }
 
