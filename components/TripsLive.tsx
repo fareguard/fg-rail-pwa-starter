@@ -106,7 +106,7 @@ function TripCard({ trip }: { trip: Trip }) {
   operatorBadgeStyle = {
     background: "rgb(0, 128, 138)",         // perfect luminance for contrast + harmony
     border: "1.5px solid rgb(0, 70, 80)",   // defined but never heavy
-    color: "#FFA41C",                       // ideal readable/warm Avanti orange
+    color: "#FF4713",                       // ideal readable/warm Avanti orange
     borderRadius: "9999px",
     padding: "3px 11px",                    // slight width -> better breathing room
     fontWeight: 600,
