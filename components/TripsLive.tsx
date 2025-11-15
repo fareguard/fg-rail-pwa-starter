@@ -46,24 +46,46 @@ function formatDepart(trip: Trip) {
   return `Departs: ${date} · ${time}`;
 }
 
+const OPERATOR_PREFIXES = [
+  "Avanti West Coast",
+  "West Midlands Railway",
+  "West Midlands Trains",
+  "London Northwestern Railway",
+  "Great Western Railway",
+  "Northern",
+  "ScotRail",
+  "TransPennine Express",
+  "Thameslink",
+];
+
 /**
  * Take a noisy text blob like:
  * "Your booking is confirmed Thank you for booking with Avanti West Coast Wolverhampton"
- * and pull out the likely station from the end, e.g. "Wolverhampton".
+ * or "Avanti West Coast Wolverhampton"
+ * and pull out the likely station, e.g. "Wolverhampton".
  */
 function extractStation(raw: string): string {
   if (!raw) return "";
 
   // Grab the last 1–4 capitalised “words” at the end of the string
   // Examples:
-  // "... Avanti West Coast Wolverhampton"      -> "Wolverhampton"
+  // "... Avanti West Coast Wolverhampton"      -> "Avanti West Coast Wolverhampton"
   // "... service from London Euston"           -> "London Euston"
   // "... calling at Birmingham New Street"     -> "Birmingham New Street"
   const match = raw.match(
     /([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/
   );
 
-  const station = (match?.[1] || raw).trim();
+  let station = (match?.[1] || raw).trim();
+
+  // If station begins with a known operator name, strip that prefix:
+  // "Avanti West Coast Wolverhampton" -> "Wolverhampton"
+  for (const op of OPERATOR_PREFIXES) {
+    if (station.startsWith(op + " ")) {
+      station = station.slice(op.length).trim();
+      break;
+    }
+  }
 
   // Strip obvious boilerplate if it somehow stuck to the front
   return station
@@ -124,7 +146,7 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "Avanti West Coast") {
     operatorBadgeStyle = {
-      background: "rgb(0, 128, 138)", // your custom Avanti teal
+      background: "rgb(0, 128, 138)", // custom Avanti teal
       border: "1px solid rgb(0, 70, 80)",
       color: "#FFFFFF",
       borderRadius: "9999px",
