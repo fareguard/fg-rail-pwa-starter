@@ -103,15 +103,16 @@ function TripCard({ trip }: { trip: Trip }) {
   };
 
   if (operator === "Avanti West Coast") {
+  const avantiBase = "rgb(0, 79, 89)";        // Avanti deep teal
+
   operatorBadgeStyle = {
-    background: "rgba(0, 79, 89, 0.18)",     // brand teal, but airy
-    color: "#E86F10",                         // softer Avanti orange
+    background: "rgba(0, 79, 89, 0.30)",      // brand teal at 30% opacity
+    border: "1px solid rgba(0, 63, 72, 0.55)",// deeper teal, sharper structure
+    color: "#FF7A00",                         // Avanti orange, readable
     borderRadius: "9999px",
-    padding: "2px 9px",
-    fontSize: "0.75rem",
+    padding: "3px 10px",
     fontWeight: 600,
-    letterSpacing: "0.01em",
-    boxShadow: "0 0 0 1px rgba(0,0,0,0.04)",   // super-soft edge
+    fontSize: "0.78rem",
   };
 }
 
