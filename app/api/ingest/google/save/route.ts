@@ -78,7 +78,7 @@ export async function GET() {
       );
     }
 
-    const user_email: string = oauthRows[0].user_email;
+    const { user_email, user_id: userId } = oauthRows[0] as any;
     const accessToken = await getFreshAccessToken(user_email);
 
     // 2) Gmail search query (broad, but rail-leaning)
@@ -172,44 +172,28 @@ export async function GET() {
         continue;
       }
 
-      const origin =
-        parsed.origin ??
-        parsed.from_station ??
-        parsed.origin_station ??
-        null;
-
-      const destination =
-        parsed.destination ??
-        parsed.to_station ??
-        parsed.destination_station ??
-        null;
-
-      const depart_planned =
-        parsed.depart_planned ?? parsed.outbound_departure ?? null;
-
-      const arrive_planned =
-        parsed.arrive_planned ?? parsed.return_arrival ?? null;
-
       // ---- Insert into trips ----
-      const { error: tripErr } = await supa.from("trips").upsert(
-        {
-          user_email,
-          retailer: parsed.provider,
-          operator: parsed.provider,
-          booking_ref: parsed.booking_ref,
-          origin,
-          destination,
-          depart_planned,
-          arrive_planned,
-          is_ticket: true,
-          pnr_json: parsed,
-          source: "gmail",
-        },
-        {
-          onConflict:
-            "user_email,booking_ref,depart_planned,origin,destination",
-        }
-      );
+      const toInsert = {
+        user_id: userId,
+        user_email,
+        retailer: parsed.provider,
+        email_id: id,
+        operator: parsed.provider,
+        booking_ref: parsed.booking_ref,
+        origin: parsed.origin,
+        destination: parsed.destination,
+        depart_planned: parsed.depart_planned,
+        arrive_planned: parsed.arrive_planned,
+        outbound_departure: parsed.outbound_departure,
+        is_ticket: true,
+        pnr_json: parsed,
+        source: "gmail",
+      };
+
+      const { error: tripErr } = await supa.from("trips").upsert(toInsert, {
+        onConflict:
+          "user_email,booking_ref,depart_planned,origin,destination",
+      });
 
       if (!tripErr) {
         savedTrips++;
