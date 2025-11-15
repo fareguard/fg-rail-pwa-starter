@@ -46,15 +46,16 @@ function formatDepart(trip: Trip) {
   return `Departs: ${date} · ${time}`;
 }
 
-// Title: keep it stupid simple – just Origin → Destination when available
 function buildTitle(trip: Trip): string {
   const origin = (trip.origin || "").trim();
   const destination = (trip.destination || "").trim();
 
+  // Only use structured data
   if (origin && destination) {
     return `${origin} → ${destination}`;
   }
 
+  // Fallbacks
   if (trip.booking_ref) {
     return `Booking ref ${trip.booking_ref}`;
   }
