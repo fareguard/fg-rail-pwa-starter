@@ -1,5 +1,46 @@
 // lib/trainEmailFilter.ts
 
+export type ParseTrainEmailOutput =
+  | {
+      is_ticket: true;
+      ignore_reason?: string;
+      provider?: string;
+      booking_ref?: string;
+      origin?: string;
+      destination?: string;
+      depart_planned?: string;
+      arrive_planned?: string;
+      outbound_departure?: string;
+    }
+  | {
+      is_ticket: false;
+      ignore_reason: string;
+      provider?: string;
+      booking_ref?: string;
+      origin?: string;
+      destination?: string;
+      depart_planned?: string;
+      arrive_planned?: string;
+      outbound_departure?: string;
+    };
+
+export type ParsedTicketResult =
+  | {
+      is_ticket: true;
+      ignore_reason?: undefined;
+      provider: string;
+      booking_ref: string;
+      origin: string;
+      destination: string;
+      depart_planned: string;
+      arrive_planned: string | null;
+      outbound_departure: string;
+    }
+  | {
+      is_ticket: false;
+      ignore_reason: string;
+    };
+
 export const ALLOWED_SENDER_FRAGMENTS = [
   // Aggregators / apps
   "trainline.com",
