@@ -104,7 +104,7 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "Avanti West Coast") {
   operatorBadgeStyle = {
-    background: "rgb(0, 95, 105)",        // lighter teal
+    background: "rgb(0, 115, 125)",        // lighter teal
     border: "2px solid rgb(0, 63, 72)",   // deeper, structured teal
     color: "#FF7A00",                     // Avanti orange
     borderRadius: "9999px",
