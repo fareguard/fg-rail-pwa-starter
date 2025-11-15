@@ -58,12 +58,19 @@ function parseAvantiEmail(text: string): Trip {
   const od1 = t.match(
     /\b([A-Za-z][A-Za-z\s&]+?)\s+to\s+([A-Za-z][A-Za-z\s&]+?)\s*(?:£|\n|$)/i
   );
-  const origin = od1?.[1]?.trim() ?? null;
-  const destination = od1?.[2]?.trim() ?? null;
+  let origin = od1?.[1]?.trim() ?? null;
+  let destination = od1?.[2]?.trim() ?? null;
 
   // operator
   const operator = /Avanti West Coast/i.test(t) ? "Avanti West Coast" : null;
   const retailer = operator;
+
+  // If origin starts with the operator name, strip it off:
+  // "Avanti West Coast Wolverhampton" -> "Wolverhampton"
+  if (origin && operator && origin.startsWith(operator)) {
+    const stripped = origin.slice(operator.length).trim();
+    if (stripped) origin = stripped;
+  }
 
   // date/time
   const dateMatch = t.match(
