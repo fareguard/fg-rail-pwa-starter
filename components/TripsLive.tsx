@@ -104,20 +104,14 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "Avanti West Coast") {
   operatorBadgeStyle = {
-    // Avanti teal, but slightly lighter + a bit of transparency
-    background: "rgba(0, 79, 89, 0.82)",
-
-    // Avanti-style orange, nudged a bit brighter/softer
-    color: "#FF7F1A",
-
+    background: "rgba(0, 79, 89, 0.18)",     // brand teal, but airy
+    color: "#E86F10",                         // softer Avanti orange
     borderRadius: "9999px",
     padding: "2px 9px",
-    fontSize: "0.78rem",
+    fontSize: "0.75rem",
     fontWeight: 600,
     letterSpacing: "0.01em",
-
-    // Very light outline instead of a heavy drop shadow
-    boxShadow: "0 0 0 1px rgba(0, 0, 0, 0.04)",
+    boxShadow: "0 0 0 1px rgba(0,0,0,0.04)",   // super-soft edge
   };
 }
 
