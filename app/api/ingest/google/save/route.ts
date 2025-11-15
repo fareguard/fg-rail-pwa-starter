@@ -1,6 +1,6 @@
 // app/api/ingest/google/save/route.ts
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { parseEmail, Trip } from "@/lib/parsers";
 import { getFreshAccessToken } from "@/lib/google";
 
@@ -13,6 +13,8 @@ type GmailMessage = {
   payload?: any;
   snippet?: string;
 };
+
+// ---- Gmail helpers -------------------------------------------------
 
 function b64ToUtf8(b64: string) {
   const s = b64.replace(/-/g, "+").replace(/_/g, "/");
@@ -59,7 +61,9 @@ function headerValue(payload: any, name: string): string | undefined {
 }
 
 async function fetchJson(url: string, accessToken: string) {
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const r = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
   if (!r.ok) {
     const txt = await r.text();
     throw new Error(`Gmail API ${r.status}: ${txt}`);
@@ -67,57 +71,63 @@ async function fetchJson(url: string, accessToken: string) {
   return r.json();
 }
 
-const SEARCH_QUERY = [
-  "in:anywhere",
-  "(",
-  'subject:"ticket"',
-  'OR subject:"e-ticket"',
-  'OR subject:"booking"',
-  "OR from:trainline.com",
-  "OR from:avantiwestcoast.co.uk",
-  "OR from:gwr.com",
-  "OR from:lner.co.uk",
-  "OR from:northernrailway.co.uk",
-  "OR from:thameslinkrailway.com",
-  "OR from:scotrail.co.uk",
-  "OR from:tpexpress.co.uk",
-  "OR from:wmtrains.co.uk",
-  "OR from:mytrainpal.com",
-  ")",
-  "newer_than:2y",
-].join(" ");
+// ---- Search query (aligned with preview route) ---------------------
 
-// Dedupe key for trips
-async function tripExists(
-  supa: ReturnType<typeof getSupabaseAdmin>,
-  args: {
-    user_email: string;
-    booking_ref?: string | null;
-    depart_planned?: string | null;
-    origin?: string | null;
-    destination?: string | null;
-  }
-) {
-  const { user_email, booking_ref, depart_planned, origin, destination } = args;
-  if (!booking_ref || !depart_planned) return false;
+const RETAILERS = [
+  "trainline.com",
+  "lner.co.uk",
+  "avantiwestcoast.co.uk",
+  "gwr.com",
+  "tpexpress.co.uk",
+  "thameslinkrailway.com",
+  "scotrail.co.uk",
+  "crosscountrytrains.co.uk",
+  "northernrailway.co.uk",
+  "chilternrailways.co.uk",
+  "greateranglia.co.uk",
+  "southeasternrailway.co.uk",
+  "southwesternrailway.com",
+  "c2c-online.co.uk",
+  "splitmyfare.co.uk",
+  "railsmartr.co.uk",
+  "westmidlandsrailway.co.uk",
+  "wmtrains.co.uk",
+  "mytrainpal.com",
+  "merseyrail.org",
+  "translink.co.uk",
+  "transportforwales.wales",
+];
 
-  const { data } = await supa
-    .from("trips")
-    .select("id")
-    .eq("user_email", user_email)
-    .eq("booking_ref", booking_ref)
-    .eq("depart_planned", depart_planned)
-    .eq("origin", origin ?? null)
-    .eq("destination", destination ?? null)
-    .limit(1);
+const SUBJECT_HINTS = [
+  "eticket",
+  "e-ticket",
+  "e ticket",
+  "tickets",
+  "booking confirmation",
+  "your journey",
+  "your trip",
+  "reservation",
+  "collect",
+  "delayed",
+  "delay repay",
+];
 
-  return !!(data && data.length);
+function buildSearchQuery() {
+  const fromParts = RETAILERS.map((d) => `from:${d}`).join(" OR ");
+  const subjectParts = SUBJECT_HINTS.map(
+    (s) => `subject:"${s}"`
+  ).join(" OR ");
+  // any folder, last 2 years, include promos/updates
+  return `in:anywhere (${fromParts} OR ${subjectParts}) newer_than:2y`;
 }
+
+// --------------------------------------------------------------------
 
 export async function GET() {
   try {
     const supa = getSupabaseAdmin();
 
+    // 1) find latest connected Gmail account
     const { data: oauthRows, error: oErr } = await supa
       .from("oauth_staging")
       .select("*")
@@ -127,19 +137,26 @@ export async function GET() {
 
     if (oErr) throw oErr;
     if (!oauthRows?.length) {
-      return NextResponse.json({ ok: false, error: "No Gmail connected" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "No Gmail connected" },
+        { status: 400 }
+      );
     }
 
     const user_email: string = oauthRows[0].user_email;
     const accessToken = await getFreshAccessToken(user_email);
 
-    // ---- 1) list messages ----
+    const SEARCH_QUERY = buildSearchQuery();
+
+    // ---- 2) list messages matching our query ----
     let pageToken: string | undefined = undefined;
     const messageIds: string[] = [];
     const MAX_PAGES = 3;
 
     for (let i = 0; i < MAX_PAGES; i++) {
-      const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+      const url = new URL(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+      );
       url.searchParams.set("q", SEARCH_QUERY);
       url.searchParams.set("maxResults", "50");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
@@ -155,10 +172,15 @@ export async function GET() {
     }
 
     if (!messageIds.length) {
-      return NextResponse.json({ ok: true, saved: 0, trips: 0, scanned: 0 });
+      return NextResponse.json({
+        ok: true,
+        saved: 0,
+        trips: 0,
+        scanned: 0,
+      });
     }
 
-    // ---- 2) hydrate, store raw_emails, parse → trips ----
+    // ---- 3) hydrate, store raw_emails, parse → trips (with upsert) ----
     let savedRaw = 0;
     let savedTrips = 0;
     let scanned = 0;
@@ -180,7 +202,7 @@ export async function GET() {
       const body = extractBody(msg.payload);
       const snippet = msg.snippet || "";
 
-      // raw_emails upsert
+      // raw_emails upsert (for debugging / audit)
       const { error: rawErr } = await supa
         .from("raw_emails")
         .upsert(
@@ -200,23 +222,14 @@ export async function GET() {
       // parse → candidate trip
       const parsed: Trip = parseEmail(body, from, subject);
 
-      // Only treat as a ticket if flagged AND has sensible core fields
       const isTicket =
         parsed.is_ticket === true &&
         !!(parsed.origin && parsed.destination && parsed.depart_planned);
 
       if (!isTicket) continue;
 
-      const exists = await tripExists(supa, {
-        user_email,
-        booking_ref: parsed.booking_ref,
-        depart_planned: parsed.depart_planned,
-        origin: parsed.origin ?? null,
-        destination: parsed.destination ?? null,
-      });
-      if (exists) continue;
-
-      const { error: tripErr } = await supa.from("trips").insert({
+      // prepare row for trips
+      const tripRow = {
         user_email,
         retailer: parsed.retailer ?? null,
         operator: parsed.operator ?? null,
@@ -227,7 +240,15 @@ export async function GET() {
         arrive_planned: parsed.arrive_planned ?? null,
         is_ticket: true,
         pnr_json: parsed as any,
-      });
+      };
+
+      // upsert with the same unique key we added in the DB
+      const { error: tripErr } = await supa
+        .from("trips")
+        .upsert(tripRow, {
+          onConflict:
+            "user_email,booking_ref,depart_planned,origin,destination",
+        });
 
       if (!tripErr) savedTrips++;
     }
@@ -240,7 +261,10 @@ export async function GET() {
       user_email,
     });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: e?.message || String(e) },
+      { status: 500 }
+    );
   }
 }
 
