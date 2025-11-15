@@ -121,8 +121,9 @@ function buildSearchQuery() {
   return `in:anywhere (${fromParts} OR ${subjectParts}) newer_than:2y`;
 }
 
-// ---- Trip existence check (for stats only) -------------------------
+// ---- Trip existence check (real dedupe) ----------------------------
 
+// Dedupe key for trips
 async function tripExists(
   supa: ReturnType<typeof getSupabaseAdmin>,
   args: {
@@ -131,23 +132,51 @@ async function tripExists(
     depart_planned?: string | null;
     origin?: string | null;
     destination?: string | null;
+    operator?: string | null;
   }
 ) {
-  const { user_email, booking_ref, depart_planned, origin, destination } = args;
-  if (!booking_ref || !depart_planned) return false;
+  const {
+    user_email,
+    booking_ref,
+    depart_planned,
+    origin,
+    destination,
+    operator,
+  } = args;
 
+  if (!depart_planned) return false;
+
+  // Case 1: we *do* have a booking ref → use that as primary key
+  if (booking_ref) {
+    const { data, error } = await supa
+      .from("trips")
+      .select("id")
+      .eq("user_email", user_email)
+      .eq("booking_ref", booking_ref)
+      .eq("depart_planned", depart_planned)
+      .limit(1);
+
+    if (error) {
+      console.error("tripExists (with ref) error", error);
+      return false;
+    }
+
+    return !!(data && data.length);
+  }
+
+  // Case 2: no booking ref → fall back to “shape” of the journey
   const { data, error } = await supa
     .from("trips")
     .select("id")
     .eq("user_email", user_email)
-    .eq("booking_ref", booking_ref)
     .eq("depart_planned", depart_planned)
     .eq("origin", origin ?? null)
     .eq("destination", destination ?? null)
+    .eq("operator", operator ?? null)
     .limit(1);
 
   if (error) {
-    console.error("tripExists error", error);
+    console.error("tripExists (no ref) error", error);
     return false;
   }
 
@@ -213,7 +242,7 @@ export async function GET() {
       });
     }
 
-    // ---- 3) hydrate, store raw_emails, parse → trips (with upsert) ----
+    // ---- 3) hydrate, store raw_emails, parse → trips ----
     let savedRaw = 0;
     let newTrips = 0;
     let scanned = 0;
@@ -261,16 +290,21 @@ export async function GET() {
 
       if (!isTicket) continue;
 
-      // stats: check if this journey is already in trips
+      // hard dedupe: if this journey already exists, skip insert
       const existedBefore = await tripExists(supa, {
         user_email,
         booking_ref: parsed.booking_ref,
         depart_planned: parsed.depart_planned,
         origin: parsed.origin ?? null,
         destination: parsed.destination ?? null,
+        operator: parsed.operator ?? null,
       });
 
-      const tripRow = {
+      if (existedBefore) {
+        continue;
+      }
+
+      const { error: tripErr } = await supa.from("trips").insert({
         user_email,
         retailer: parsed.retailer ?? null,
         operator: parsed.operator ?? null,
@@ -281,17 +315,9 @@ export async function GET() {
         arrive_planned: parsed.arrive_planned ?? null,
         is_ticket: true,
         pnr_json: parsed as any,
-      };
+      });
 
-      // upsert with the same unique key we added in the DB
-      const { error: tripErr } = await supa
-        .from("trips")
-        .upsert(tripRow, {
-          onConflict:
-            "user_email,booking_ref,depart_planned,origin,destination",
-        });
-
-      if (!tripErr && !existedBefore) {
+      if (!tripErr) {
         newTrips++;
       }
     }
