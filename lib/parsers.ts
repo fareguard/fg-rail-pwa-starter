@@ -41,6 +41,22 @@ const MONTHS = [
   "december",
 ];
 
+// Normalise “station-ish” text – strip Avanti boilerplate etc.
+function cleanStationName(name: string | null): string | null {
+  if (!name) return null;
+  let s = name;
+
+  s = s.replace(
+    /Your booking is confirmed\s+Thank you for booking with Avanti West Coast/gi,
+    ""
+  );
+  s = s.replace(/Thank you for booking with Avanti West Coast/gi, "");
+  s = s.replace(/Your booking is confirmed/gi, "");
+  s = s.replace(/\s+/g, " ").trim();
+
+  return s || null;
+}
+
 // Small helper so we only call something a "ticket" if it looks like a real journey
 function computeIsTicket(trip: Trip): boolean {
   return !!(trip.origin && trip.destination && trip.depart_planned);
@@ -54,23 +70,26 @@ function parseAvantiEmail(text: string): Trip {
   const refMatch = t.match(/Booking reference:\s*([A-Z0-9]{6,12}|\d{6,12})/i);
   const booking_ref = refMatch?.[1]?.trim() ?? null;
 
-  // origin/destination (fairly generic but good enough for UK stations)
-  const od1 = t.match(
-    /\b([A-Za-z][A-Za-z\s&]+?)\s+to\s+([A-Za-z][A-Za-z\s&]+?)\s*(?:£|\n|$)/i
+  // origin/destination:
+  //  - find ALL "... X to Y ..." patterns
+  //  - take the *last* one (closest to the actual ticket summary)
+  const odMatches = Array.from(
+    t.matchAll(
+      /\b([A-Z][A-Za-z\s&]+?)\s+to\s+([A-Z][A-Za-z\s&]+?)\s*(?:£|\n|$)/g
+    )
   );
-  let origin = od1?.[1]?.trim() ?? null;
-  let destination = od1?.[2]?.trim() ?? null;
+
+  let origin: string | null = null;
+  let destination: string | null = null;
+  if (odMatches.length) {
+    const last = odMatches[odMatches.length - 1];
+    origin = cleanStationName(last[1]?.trim() ?? null);
+    destination = cleanStationName(last[2]?.trim() ?? null);
+  }
 
   // operator
   const operator = /Avanti West Coast/i.test(t) ? "Avanti West Coast" : null;
   const retailer = operator;
-
-  // If origin starts with the operator name, strip it off:
-  // "Avanti West Coast Wolverhampton" -> "Wolverhampton"
-  if (origin && operator && origin.startsWith(operator)) {
-    const stripped = origin.slice(operator.length).trim();
-    if (stripped) origin = stripped;
-  }
 
   // date/time
   const dateMatch = t.match(
@@ -118,12 +137,20 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
     t.match(/Reference[:\s]+([A-Z0-9]{6,20}|\d{6,20})/i)?.[1] ??
     null;
 
-  // Origin / destination
+  // Origin / destination:
+  //  - X to Y
+  //  - X -> Y
+  //  - X - Y / X – Y
   const od =
-    t.match(/\b([A-Z][a-zA-Z\s&]+)\s+to\s+([A-Z][a-zA-Z\s&]+)\b/) ??
-    t.match(/From[:\s]+([A-Z][a-zA-Z\s&]+)\s+to[:\s]+([A-Z][a-zA-Z\s&]+)/i);
-  const origin = od?.[1]?.trim() ?? null;
-  const destination = od?.[2]?.trim() ?? null;
+    t.match(
+      /\b([A-Z][a-zA-Z\s&]+?)\s+(?:to|->|-|–|—|→)\s+([A-Z][a-zA-Z\s&]+?)\b/
+    ) ??
+    t.match(
+      /From[:\s]+([A-Z][a-zA-Z\s&]+)\s+to[:\s]+([A-Z][a-zA-Z\s&]+)/i
+    );
+
+  const origin = cleanStationName(od?.[1]?.trim() ?? null);
+  const destination = cleanStationName(od?.[2]?.trim() ?? null);
 
   // Operator detection (a few common ones)
   const operator =
@@ -137,6 +164,7 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
     (/ScotRail/i.test(t) && "ScotRail") ||
     (/TransPennine/i.test(t) && "TransPennine Express") ||
     (/Thameslink/i.test(t) && "Thameslink") ||
+    (/Chiltern Railways/i.test(t) && "Chiltern Railways") ||
     null;
 
   // Retailer guess from sender/subject
@@ -154,7 +182,9 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
   );
 
   // Try to find two times near each other (e.g. "13:21 ... 14:56")
-  const timeMatches = Array.from(t.matchAll(/\b(\d{1,2}:\d{2})\b/g)).map(m => m[1]);
+  const timeMatches = Array.from(t.matchAll(/\b(\d{1,2}:\d{2})\b/g)).map(
+    (m) => m[1]
+  );
   const depTime = timeMatches[0] ?? null;
   const arrTime = timeMatches[1] ?? null;
 
@@ -184,11 +214,13 @@ function parseTrainlineLike(text: string, sender?: string, subject?: string): Tr
 // ---- Fallback generic (used mainly so we don’t completely miss weird formats) ----
 function parseGeneric(text: string): Trip {
   const t = text.replace(/\r/g, "");
-  const od = t.match(/\b([A-Z][a-zA-Z\s&]+)\s+to\s+([A-Z][a-zA-Z\s&]+)\b/);
+  const od = t.match(
+    /\b([A-Z][a-zA-Z\s&]+)\s+(?:to|->|-|–|—|→)\s+([A-Z][a-zA-Z\s&]+)\b/
+  );
   const ref = t.match(/\b([A-Z0-9]{6,12})\b/); // very loose
   const trip: Trip = {
-    origin: od?.[1]?.trim() ?? null,
-    destination: od?.[2]?.trim() ?? null,
+    origin: cleanStationName(od?.[1]?.trim() ?? null),
+    destination: cleanStationName(od?.[2]?.trim() ?? null),
     booking_ref: ref?.[1] ?? null,
   };
   // GENERIC PARSER NEVER MARKS AS TICKET – we only use it as fallback signal
