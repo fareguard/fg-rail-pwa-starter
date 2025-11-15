@@ -4,7 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getFreshAccessToken } from "@/lib/google";
 
 import { isTrainEmail } from "@/lib/trainEmailFilter";
-import { ingestEmail } from "@/lib/ingestEmail"; // <-- IMPORTANT
+import { ingestEmail } from "@/lib/ingestEmail";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -14,7 +14,6 @@ function b64ToUtf8(b64: string) {
   return Buffer.from(s, "base64").toString("utf-8");
 }
 
-// Extract a readable body from Gmail's MIME structure
 function decodePart(part: any): string {
   if (!part?.body?.data) return "";
   return b64ToUtf8(String(part.body.data));
@@ -63,7 +62,7 @@ export async function GET() {
   try {
     const supa = getSupabaseAdmin();
 
-    // ---- 1) Fetch connected Gmail account ----
+    // 1) Get the most recent connected Google account
     const { data: oauthRows, error: oErr } = await supa
       .from("oauth_staging")
       .select("*")
@@ -82,7 +81,7 @@ export async function GET() {
     const user_email: string = oauthRows[0].user_email;
     const accessToken = await getFreshAccessToken(user_email);
 
-    // ---- 2) Search query (broad but rail-focused) ----
+    // 2) Gmail search query (broad, but rail-leaning)
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
@@ -121,7 +120,7 @@ export async function GET() {
       });
     }
 
-    // ---- 3) Hydrate, save raw_emails, then feed into ingestEmail ----
+    // 3) Hydrate, store raw, then parse trips
     let savedRaw = 0;
     let savedTrips = 0;
     let scanned = 0;
@@ -139,7 +138,7 @@ export async function GET() {
       const body = extractBody(fullMsg.payload);
       const snippet = fullMsg.snippet || "";
 
-      // ---- Save raw ----
+      // ---- Save raw email ----
       const { error: rawErr } = await supa.from("raw_emails").upsert(
         {
           provider: "google",
@@ -155,13 +154,13 @@ export async function GET() {
 
       if (!rawErr) savedRaw++;
 
-      // ---- FILTER BEFORE PARSING ----
+      // ---- Filter non-train emails BEFORE parsing ----
       if (!isTrainEmail({ from, subject, body })) {
         continue;
       }
 
-      // ---- PARSE (using ingestEmail → parseTrainEmail) ----
-      const parsed = await ingestEmail({
+      // ---- Parse email using ingestEmail (looser typing here) ----
+      const parsed: any = await ingestEmail({
         id,
         from,
         subject,
@@ -169,21 +168,39 @@ export async function GET() {
         snippet,
       });
 
-      if (!parsed.is_ticket) {
+      if (!parsed?.is_ticket) {
         continue;
       }
 
-      // ---- INSERT TRIP ----
+      const origin =
+        parsed.origin ??
+        parsed.from_station ??
+        parsed.origin_station ??
+        null;
+
+      const destination =
+        parsed.destination ??
+        parsed.to_station ??
+        parsed.destination_station ??
+        null;
+
+      const depart_planned =
+        parsed.depart_planned ?? parsed.outbound_departure ?? null;
+
+      const arrive_planned =
+        parsed.arrive_planned ?? parsed.return_arrival ?? null;
+
+      // ---- Insert into trips ----
       const { error: tripErr } = await supa.from("trips").upsert(
         {
           user_email,
           retailer: parsed.provider,
           operator: parsed.provider,
           booking_ref: parsed.booking_ref,
-          origin: parsed.origin ?? null,
-          destination: parsed.destination ?? null,
-          depart_planned: parsed.depart_planned ?? null,
-          arrive_planned: parsed.arrive_planned ?? null,
+          origin,
+          destination,
+          depart_planned,
+          arrive_planned,
           is_ticket: true,
           pnr_json: parsed,
           source: "gmail",
