@@ -121,6 +121,39 @@ function buildSearchQuery() {
   return `in:anywhere (${fromParts} OR ${subjectParts}) newer_than:2y`;
 }
 
+// ---- Trip existence check (for stats only) -------------------------
+
+async function tripExists(
+  supa: ReturnType<typeof getSupabaseAdmin>,
+  args: {
+    user_email: string;
+    booking_ref?: string | null;
+    depart_planned?: string | null;
+    origin?: string | null;
+    destination?: string | null;
+  }
+) {
+  const { user_email, booking_ref, depart_planned, origin, destination } = args;
+  if (!booking_ref || !depart_planned) return false;
+
+  const { data, error } = await supa
+    .from("trips")
+    .select("id")
+    .eq("user_email", user_email)
+    .eq("booking_ref", booking_ref)
+    .eq("depart_planned", depart_planned)
+    .eq("origin", origin ?? null)
+    .eq("destination", destination ?? null)
+    .limit(1);
+
+  if (error) {
+    console.error("tripExists error", error);
+    return false;
+  }
+
+  return !!(data && data.length);
+}
+
 // --------------------------------------------------------------------
 
 export async function GET() {
@@ -182,7 +215,7 @@ export async function GET() {
 
     // ---- 3) hydrate, store raw_emails, parse → trips (with upsert) ----
     let savedRaw = 0;
-    let savedTrips = 0;
+    let newTrips = 0;
     let scanned = 0;
 
     for (const id of messageIds) {
@@ -228,7 +261,15 @@ export async function GET() {
 
       if (!isTicket) continue;
 
-      // prepare row for trips
+      // stats: check if this journey is already in trips
+      const existedBefore = await tripExists(supa, {
+        user_email,
+        booking_ref: parsed.booking_ref,
+        depart_planned: parsed.depart_planned,
+        origin: parsed.origin ?? null,
+        destination: parsed.destination ?? null,
+      });
+
       const tripRow = {
         user_email,
         retailer: parsed.retailer ?? null,
@@ -250,13 +291,15 @@ export async function GET() {
             "user_email,booking_ref,depart_planned,origin,destination",
         });
 
-      if (!tripErr) savedTrips++;
+      if (!tripErr && !existedBefore) {
+        newTrips++;
+      }
     }
 
     return NextResponse.json({
       ok: true,
       saved: savedRaw,
-      trips: savedTrips,
+      trips: newTrips,
       scanned,
       user_email,
     });
