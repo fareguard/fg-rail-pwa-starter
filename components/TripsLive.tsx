@@ -56,9 +56,9 @@ function extractStation(raw: string): string {
 
   // Grab the last 1–4 capitalised “words” at the end of the string
   // Examples:
-  //   "... Avanti West Coast Wolverhampton"          -> "Wolverhampton"
-  //   "... service from London Euston"               -> "London Euston"
-  //   "... calling at Birmingham New Street"         -> "Birmingham New Street"
+  // "... Avanti West Coast Wolverhampton"      -> "Wolverhampton"
+  // "... service from London Euston"           -> "London Euston"
+  // "... calling at Birmingham New Street"     -> "Birmingham New Street"
   const match = raw.match(
     /([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/
   );
@@ -79,7 +79,7 @@ function buildTitle(trip: Trip): string {
   const origin = extractStation(rawOrigin);
   const destination = rawDestination;
 
-  // Only use structured / cleaned data
+  // Use cleaned data when we have both ends
   if (origin && destination) {
     return `${origin} → ${destination}`;
   }
