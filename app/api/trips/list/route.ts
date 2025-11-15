@@ -19,6 +19,7 @@ function noStoreJson(body: any, status = 200) {
 export async function GET() {
   try {
     let email: string | null = null;
+    let viaSupabaseUser = false;
 
     // 1) Try normal Supabase auth (same as /api/me)
     try {
@@ -28,12 +29,13 @@ export async function GET() {
       } = await supa.auth.getUser();
       if (user?.email) {
         email = user.email;
+        viaSupabaseUser = true;
       }
     } catch {
       // ignore and fall back to Gmail OAuth
     }
 
-    // 2) Fallback: Gmail OAuth (same idea as /api/me)
+    // 2) Fallback: Gmail OAuth (oauth_staging) – same idea as /api/me
     if (!email) {
       const admin = getSupabaseAdmin();
       const { data } = await admin
@@ -45,6 +47,7 @@ export async function GET() {
 
       if (data && data.length) {
         email = data[0].user_email as string;
+        // NOTE: viaSupabaseUser stays false → we'll query trips via admin client
       }
     }
 
@@ -58,29 +61,66 @@ export async function GET() {
     }
 
     // 4) Load trips for this email
-    const supa = getSupabaseServer();
-    const { data, error } = await supa
-      .from("trips")
-      .select(
-        [
-          "id",
-          "origin",
-          "destination",
-          "booking_ref",
-          "operator",
-          "retailer",
-          "depart_planned",
-          "arrive_planned",
-          "status",
-          "is_ticket",
-          "created_at",
-        ].join(",")
-      )
-      .eq("user_email", email)
-      .is("is_ticket", true) // e-tickets only
-      .order("depart_planned", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(50);
+    let data: any[] | null = null;
+    let error: any = null;
+
+    if (viaSupabaseUser) {
+      // User is logged in via Supabase auth – respect RLS
+      const supa = getSupabaseServer();
+      const res = await supa
+        .from("trips")
+        .select(
+          [
+            "id",
+            "origin",
+            "destination",
+            "booking_ref",
+            "operator",
+            "retailer",
+            "depart_planned",
+            "arrive_planned",
+            "status",
+            "is_ticket",
+            "created_at",
+          ].join(",")
+        )
+        .eq("user_email", email)
+        .is("is_ticket", true)
+        .order("depart_planned", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      data = res.data;
+      error = res.error;
+    } else {
+      // Auth via Gmail OAuth only – use admin client to bypass RLS
+      const admin = getSupabaseAdmin();
+      const res = await admin
+        .from("trips")
+        .select(
+          [
+            "id",
+            "origin",
+            "destination",
+            "booking_ref",
+            "operator",
+            "retailer",
+            "depart_planned",
+            "arrive_planned",
+            "status",
+            "is_ticket",
+            "created_at",
+          ].join(",")
+        )
+        .eq("user_email", email)
+        .is("is_ticket", true)
+        .order("depart_planned", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      data = res.data;
+      error = res.error;
+    }
 
     if (error) {
       return noStoreJson(
