@@ -46,32 +46,51 @@ function formatDepart(trip: Trip) {
   return `Departs: ${date} · ${time}`;
 }
 
-// Try to pull a sensible “X → Y” route from messy text
+/**
+ * Clean up a noisy string into a neat "From → To" route.
+ * Assumes `raw` often looks like:
+ * "Your booking is confirmed Thank you for booking with Avanti West Coast Wolverhampton → Birmingham New Street..."
+ */
 function cleanRoute(raw: string) {
   if (!raw) return "";
 
+  // Normalise whitespace
   let s = raw.replace(/\s+/g, " ").trim();
 
-  const m = s.match(/([A-Za-z][A-Za-z\s]+?→\s*[A-Za-z][A-Za-z\s]+)$/);
-  if (m) s = m[1].trim();
+  // If there's an arrow, use the bit around it
+  const arrowIndex = s.lastIndexOf("→");
+  if (arrowIndex !== -1) {
+    const left = s.slice(0, arrowIndex).trim();       // everything before →
+    const right = s.slice(arrowIndex + 1).trim();     // everything after →
 
-  s = s.replace(
-    /^Your booking is confirmed.*?Avanti West Coast\s*/i,
-    ""
-  );
-  s = s.replace(/^Welcome to Avanti West Coast\s*/i, "");
-  s = s.replace(/\s+on$/i, "");
+    // Take the part of "left" after the last sentence/phrase break as the origin
+    const from =
+      left.split(/[.?!]/).pop()?.trim() || left;
+
+    // Take the part of "right" before the first sentence/phrase break as the destination
+    const to =
+      right.split(/[.?!]/)[0]?.trim() || right;
+
+    s = `${from} → ${to}`;
+  }
 
   if (s.length > 90) s = s.slice(0, 90) + "…";
   return s;
 }
 
 function buildTitle(trip: Trip): string {
-  const combined = [trip.origin, trip.destination]
-    .filter(Boolean)
-    .join(" → ");
+  const origin = (trip.origin || "").trim();
+  const destination = (trip.destination || "").trim();
 
-  if (combined) return cleanRoute(combined);
+  if (origin && destination) {
+    // If origin already looks clean (no obvious boilerplate), just join
+    if (!/your booking is confirmed/i.test(origin)) {
+      return `${origin} → ${destination}`;
+    }
+    // Otherwise, run through the cleaner to strip the email fluff
+    return cleanRoute(`${origin} → ${destination}`);
+  }
+
   if (trip.booking_ref) return `Booking ref ${trip.booking_ref}`;
   return "Train journey";
 }
@@ -102,19 +121,18 @@ function TripCard({ trip }: { trip: Trip }) {
     color: "var(--fg-navy)",
   };
 
- if (operator === "Avanti West Coast") {
-  operatorBadgeStyle = {
-    background: "rgb(0, 128, 138)",         // perfect luminance for contrast + harmony
-    border: "1px solid rgb(0, 70, 80)",   // defined but never heavy
-    color: "#FFFFFF",                       // mate its literally js white
-    borderRadius: "9999px",
-    padding: "3px 11px",                    // slight width -> better breathing room
-    fontWeight: 600,
-    fontSize: "0.8rem",                     // tiny bump = cleaner typography
-    letterSpacing: "0.003em",               // micro-tweak for legibility
-  };
-}
-
+  if (operator === "Avanti West Coast") {
+    operatorBadgeStyle = {
+      background: "rgb(0, 128, 138)",       // your custom Avanti teal
+      border: "1px solid rgb(0, 70, 80)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
 
   // Retailer pill style (generic, only shown if different from operator)
   const retailerBadgeStyle: any = {
