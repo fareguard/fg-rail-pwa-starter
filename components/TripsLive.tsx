@@ -105,7 +105,7 @@ function TripCard({ trip }: { trip: Trip }) {
  if (operator === "Avanti West Coast") {
   operatorBadgeStyle = {
     background: "rgb(0, 128, 138)",         // perfect luminance for contrast + harmony
-    border: "1.5px solid rgb(0, 70, 80)",   // defined but never heavy
+    border: "2px solid rgb(0, 70, 80)",   // defined but never heavy
     color: "#FFFFFF",                       // mate its literally js white
     borderRadius: "9999px",
     padding: "3px 11px",                    // slight width -> better breathing room
