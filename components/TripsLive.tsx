@@ -46,16 +46,49 @@ function formatDepart(trip: Trip) {
   return `Departs: ${date} · ${time}`;
 }
 
-function buildTitle(trip: Trip): string {
-  const origin = (trip.origin || "").trim();
-  const destination = (trip.destination || "").trim();
+/**
+ * Take a noisy text blob like:
+ * "Your booking is confirmed Thank you for booking with Avanti West Coast Wolverhampton"
+ * and pull out the likely station from the end, e.g. "Wolverhampton".
+ */
+function extractStation(raw: string): string {
+  if (!raw) return "";
 
-  // Only use structured data
+  // Grab the last 1–4 capitalised “words” at the end of the string
+  // Examples:
+  //   "... Avanti West Coast Wolverhampton"          -> "Wolverhampton"
+  //   "... service from London Euston"               -> "London Euston"
+  //   "... calling at Birmingham New Street"         -> "Birmingham New Street"
+  const match = raw.match(
+    /([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/
+  );
+
+  const station = (match?.[1] || raw).trim();
+
+  // Strip obvious boilerplate if it somehow stuck to the front
+  return station
+    .replace(/^Your booking is confirmed/i, "")
+    .replace(/^Thank you for booking with .*/i, "")
+    .trim();
+}
+
+function buildTitle(trip: Trip): string {
+  const rawOrigin = (trip.origin || "").trim();
+  const rawDestination = (trip.destination || "").trim();
+
+  const origin = extractStation(rawOrigin);
+  const destination = rawDestination;
+
+  // Only use structured / cleaned data
   if (origin && destination) {
     return `${origin} → ${destination}`;
   }
 
   // Fallbacks
+  if (destination) {
+    return destination;
+  }
+
   if (trip.booking_ref) {
     return `Booking ref ${trip.booking_ref}`;
   }
