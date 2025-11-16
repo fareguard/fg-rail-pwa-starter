@@ -3,18 +3,13 @@
 import openai from "@/lib/openai";
 import type { ParsedTicketResult, ParseTrainEmailOutput } from "./trainEmailFilter";
 
-// ------------------------------------------------------
-// Updated type – NOW ACCEPTS id (optional)
-// ------------------------------------------------------
 export type IngestEmailArgs = {
-  id?: string;               // <---- FIX: allow id here
+  id?: string;          // <-- added so route.ts stops erroring
   subject: string;
   from: string;
   bodyHtml?: string | null;
   bodyText?: string | null;
 };
-
-// ------------------------------------------------------
 
 export async function ingestEmail({
   id,
@@ -23,6 +18,7 @@ export async function ingestEmail({
   bodyHtml,
   bodyText,
 }: IngestEmailArgs): Promise<ParsedTicketResult> {
+
   const body = bodyText || bodyHtml || "";
 
   const completion = await openai.responses.create({
@@ -41,7 +37,7 @@ export async function ingestEmail({
         content: [
           {
             type: "input_text",
-            text: `Email-ID: ${id ?? "n/a"}\nFrom: ${from}\nSubject: ${subject}\n\n${body}`,
+            text: `Email-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\n${body}`,
           },
         ],
       },
@@ -72,13 +68,9 @@ export async function ingestEmail({
   });
 
   const parsed =
-    (completion.output[0].content[0] as any)
-      .parsed as ParseTrainEmailOutput;
+    (completion.output[0].content[0] as any).parsed as ParseTrainEmailOutput;
 
-  // ------------------------------------------------------
-  // 1) AI says NOT a ticket
-  // ------------------------------------------------------
-
+  // 1) Not a ticket → ignore
   if (!parsed.is_ticket) {
     return {
       is_ticket: false,
@@ -86,13 +78,11 @@ export async function ingestEmail({
     };
   }
 
-  // ------------------------------------------------------
-  // 2) Hard required fields (OPTION B)
-  // ------------------------------------------------------
-
+  // Helper — require non-empty strings
   const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
+  // 2) Hard gate → ALL fields required for dashboard
   const hasAllRequired =
     requiredString(parsed.provider) &&
     requiredString(parsed.booking_ref) &&
@@ -108,10 +98,7 @@ export async function ingestEmail({
     };
   }
 
-  // ------------------------------------------------------
-  // 3) Looks good → usable ticket
-  // ------------------------------------------------------
-
+  // 3) Valid usable ticket → return strong typed result
   return {
     is_ticket: true,
     provider: parsed.provider!,
