@@ -4,9 +4,15 @@ import openai from "@/lib/openai";
 import type { ParsedTicketResult, ParseTrainEmailOutput } from "./trainEmailFilter";
 
 export type IngestEmailArgs = {
-  id?: string;          // <-- added so route.ts stops erroring
+  id?: string;
   subject: string;
   from: string;
+
+  // what route.ts is passing
+  body_plain?: string | null;
+  snippet?: string | null;
+
+  // legacy / future-proof fields (safe to keep)
   bodyHtml?: string | null;
   bodyText?: string | null;
 };
@@ -15,11 +21,18 @@ export async function ingestEmail({
   id,
   subject,
   from,
+  body_plain,
+  snippet,
   bodyHtml,
   bodyText,
 }: IngestEmailArgs): Promise<ParsedTicketResult> {
-
-  const body = bodyText || bodyHtml || "";
+  // Prefer the richest text we have, but always fall back to *something*
+  const body =
+    bodyText ||
+    bodyHtml ||
+    body_plain ||
+    snippet ||
+    "";
 
   const completion = await openai.responses.create({
     model: "gpt-4.1-mini",
