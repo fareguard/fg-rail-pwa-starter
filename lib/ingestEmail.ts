@@ -34,54 +34,47 @@ export async function ingestEmail({
     snippet ||
     "";
 
+  // Ask the model to return STRICT JSON (no markdown, no prose)
   const completion = await openai.responses.create({
     model: "gpt-4.1-mini",
-    input: [
-      {
-        role: "system",
-        content:
-          "You are a strict train ticket email parser for a UK train-delay-refund app. " +
-          "Only mark is_ticket=true if this email clearly contains a UK train e-ticket or journey confirmation " +
-          "(Trainline, National Rail, Avanti, WMR, Northern, etc.). " +
-          "If it's marketing, receipts, general account stuff, or unclear, return is_ticket=false with a clear ignore_reason.",
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: `Email-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\n${body}`,
-          },
-        ],
-      },
-    ],
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "parse_train_email_output",
-        schema: {
-          type: "object",
-          properties: {
-            is_ticket: { type: "boolean" },
-            ignore_reason: { type: "string" },
-            provider: { type: "string" },
-            booking_ref: { type: "string" },
-            origin: { type: "string" },
-            destination: { type: "string" },
-            depart_planned: { type: "string" },
-            arrive_planned: { type: "string" },
-            outbound_departure: { type: "string" },
-          },
-          required: ["is_ticket"],
-          additionalProperties: true,
-        },
-        strict: true,
-      },
-    },
+    input:
+      "You are a strict train ticket email parser for a UK train-delay-refund app.\n" +
+      "Return ONLY a JSON object, no explanation, no markdown.\n" +
+      "Shape:\n" +
+      "{\n" +
+      '  "is_ticket": boolean,\n' +
+      '  "ignore_reason"?: string,\n' +
+      '  "provider"?: string,\n' +
+      '  "booking_ref"?: string,\n' +
+      '  "origin"?: string,\n' +
+      '  "destination"?: string,\n' +
+      '  "depart_planned"?: string,\n' +
+      '  "arrive_planned"?: string,\n' +
+      '  "outbound_departure"?: string\n' +
+      "}\n\n" +
+      "Only set is_ticket=true if this clearly contains a UK train e-ticket or journey confirmation " +
+      "(Trainline, National Rail, Avanti, West Midlands Railway, Northern, etc.).\n" +
+      "If it's marketing, receipts, general account stuff, or unclear, set is_ticket=false and give a clear ignore_reason.\n\n" +
+      `EMAIL METADATA:\nEmail-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\nEMAIL BODY:\n${body}`,
   });
 
-  const parsed =
-    (completion.output[0].content[0] as any).parsed as ParseTrainEmailOutput;
+  // Try to get the text output in a version-agnostic way
+  const rawText =
+    (completion as any).output_text ||
+    (completion as any).output?.[0]?.content?.[0]?.text ||
+    "";
+
+  let parsed: ParseTrainEmailOutput;
+
+  try {
+    parsed = JSON.parse(rawText) as ParseTrainEmailOutput;
+  } catch (e) {
+    // If the model somehow didn't give valid JSON, fail safely
+    return {
+      is_ticket: false,
+      ignore_reason: "model_json_parse_error",
+    };
+  }
 
   // 1) Not a ticket → ignore
   if (!parsed.is_ticket) {
@@ -95,7 +88,7 @@ export async function ingestEmail({
   const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
-  // 2) Hard gate → ALL fields required for dashboard
+  // 2) Hard gate → ALL fields required for dashboard card
   const hasAllRequired =
     requiredString(parsed.provider) &&
     requiredString(parsed.booking_ref) &&
