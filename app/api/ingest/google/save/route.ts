@@ -190,12 +190,13 @@ export async function GET() {
       }
         
       
+            // ---- Insert into trips ----
       const toInsert = {
         user_id: userId,
         user_email,
-        retailer: parsed.provider,                // TrainPal / Trainline / Avanti etc.
+        retailer: parsed.provider,                 // booking channel (TrainPal, Trainline, etc.)
         email_id: id,
-        operator: parsed.operator || parsed.provider, // <- use separate operator if present
+        operator: parsed.operator || parsed.provider, // train company actually running it
         booking_ref: parsed.booking_ref,
         origin: parsed.origin,
         destination: parsed.destination,
@@ -206,6 +207,7 @@ export async function GET() {
         pnr_json: parsed,
         source: "gmail",
       };
+
 
 
       const { error: tripErr } = await supa.from("trips").upsert(toInsert, {
