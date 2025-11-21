@@ -67,7 +67,7 @@ export async function ingestEmail({
       '  \"is_ticket\": boolean,\n' +
       '  \"ignore_reason\"?: string,\n' +
       '  \"provider\"?: string,\n' +
-      '  \"operator\"?: string,\n' + // NEW
+      '  \"operator\"?: string,\n' +
       '  \"booking_ref\"?: string,\n' +
       '  \"origin\"?: string,\n' +
       '  \"destination\"?: string,\n' +
@@ -75,16 +75,17 @@ export async function ingestEmail({
       '  \"arrive_planned\"?: string,\n' +
       '  \"outbound_departure\"?: string\n' +
       "}\n\n" +
-      "- provider = the main brand the customer bought from (e.g. 'TrainPal', 'Trainline', 'Avanti West Coast').\n" +
-      "- operator = the actual train operating company running the service.\n" +
-      "  * If provider is TrainPal or Trainline, operator is usually something like 'Avanti West Coast', 'West Midlands Railway', etc.\n" +
-      "  * If there is no separate operator mentioned, set operator = provider.\n" +
-      "- For TrainPal subjects like 'TrainPal: Booking Confirmation: Birmingham New Street ↔ London Euston',\n" +
-      "  set provider = 'TrainPal', origin = 'Birmingham New Street', destination = 'London Euston'.\n" +
+      "- provider = the retailer / booking channel (e.g. TrainPal, Trainline, Avanti, GWR).\n" +
+      "- operator = the train company actually running the service (e.g. Avanti West Coast,\n" +
+      "  West Midlands Railway, Chiltern, etc.). If the email is directly from the train\n" +
+      "  company, provider and operator will usually be the same.\n" +
+      "- For TrainPal subjects like 'TrainPal: Booking Confirmation: Birmingham New Street ↔ Cannock',\n" +
+      "  set provider = 'TrainPal' and operator to the train company shown in the ticket.\n" +
       "- booking_ref is OPTIONAL. If you can't confidently find one, leave it empty or null.\n" +
       "- depart_planned / outbound_departure should be the first departure time if you can find it,\n" +
       "  but leave them empty if unsure.\n" +
-      "- If it's marketing, receipts, general account stuff, or unclear, set is_ticket = false and give a clear ignore_reason.\n\n" +
+      "- If it's marketing, receipts, general account stuff, or unclear, set is_ticket = false\n" +
+      "  and give a clear ignore_reason.\n\n" +
       `EMAIL METADATA:\nEmail-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\nEMAIL BODY:\n${body}`,
   });
 
@@ -99,7 +100,7 @@ export async function ingestEmail({
   try {
     const jsonStr = extractJsonObject(rawText);
     parsed = JSON.parse(jsonStr) as ParseTrainEmailOutput;
-  } catch (e) {
+  } catch {
     // If the model somehow didn't give valid JSON, fail safely
     return {
       is_ticket: false,
@@ -135,11 +136,13 @@ export async function ingestEmail({
   // 3) Valid usable ticket → return strong typed result
   //    Fill in missing optional fields with safe fallbacks so types stay happy.
   const provider = parsed.provider!.trim();
-  const operator =
-    (parsed.operator && parsed.operator.trim()) || provider; // <- default to provider
-
   const origin = parsed.origin!.trim();
   const destination = parsed.destination!.trim();
+
+  const operator =
+    (parsed as any).operator && requiredString((parsed as any).operator)
+      ? String((parsed as any).operator).trim()
+      : provider; // fall back to provider if unknown
 
   const booking_ref =
     (parsed.booking_ref && parsed.booking_ref.trim()) || "UNKNOWN";
