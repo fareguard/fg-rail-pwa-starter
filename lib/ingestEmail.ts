@@ -34,7 +34,7 @@ export async function ingestEmail({
     snippet ||
     "";
 
-  // Ask the model to return STRICT JSON (no markdown, no prose)
+  // ---- Ask the model to return STRICT JSON (no markdown, no prose) ----
   const completion = await openai.responses.create({
     model: "gpt-4.1-mini",
     input:
@@ -42,19 +42,24 @@ export async function ingestEmail({
       "Return ONLY a JSON object, no explanation, no markdown.\n" +
       "Shape:\n" +
       "{\n" +
-      '  "is_ticket": boolean,\n' +
-      '  "ignore_reason"?: string,\n' +
-      '  "provider"?: string,\n' +
-      '  "booking_ref"?: string,\n' +
-      '  "origin"?: string,\n' +
-      '  "destination"?: string,\n' +
-      '  "depart_planned"?: string,\n' +
-      '  "arrive_planned"?: string,\n' +
-      '  "outbound_departure"?: string\n' +
+      '  \"is_ticket\": boolean,\n' +
+      '  \"ignore_reason\"?: string,\n' +
+      '  \"provider\"?: string,\n' +
+      '  \"booking_ref\"?: string,\n' +
+      '  \"origin\"?: string,\n' +
+      '  \"destination\"?: string,\n' +
+      '  \"depart_planned\"?: string,\n' +
+      '  \"arrive_planned\"?: string,\n' +
+      '  \"outbound_departure\"?: string\n' +
       "}\n\n" +
-      "Only set is_ticket=true if this clearly contains a UK train e-ticket or journey confirmation " +
-      "(Trainline, National Rail, Avanti, West Midlands Railway, Northern, etc.).\n" +
-      "If it's marketing, receipts, general account stuff, or unclear, set is_ticket=false and give a clear ignore_reason.\n\n" +
+      "- Only set is_ticket = true if this clearly contains a UK train e-ticket or journey confirmation\n" +
+      "  (Trainline, TrainPal, National Rail, Avanti West Coast, West Midlands Railway, Northern, etc.).\n" +
+      "- For TrainPal subjects like 'TrainPal: Booking Confirmation: Birmingham New Street ↔ Cannock',\n" +
+      "  set provider = 'TrainPal', origin = 'Birmingham New Street', destination = 'Cannock'.\n" +
+      "- booking_ref is OPTIONAL. If you can't confidently find one, leave it empty or null.\n" +
+      "- depart_planned / outbound_departure should be the first departure time if you can find it,\n" +
+      "  but leave them empty if unsure.\n" +
+      "- If it's marketing, receipts, general account stuff, or unclear, set is_ticket = false and give a clear ignore_reason.\n\n" +
       `EMAIL METADATA:\nEmail-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\nEMAIL BODY:\n${body}`,
   });
 
@@ -88,31 +93,49 @@ export async function ingestEmail({
   const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
-  // 2) Hard gate → ALL fields required for dashboard card
-  const hasAllRequired =
+  // 2) NEW: much lighter gate – we only *require* provider + origin + destination.
+  const hasBasicTrip =
     requiredString(parsed.provider) &&
-    requiredString(parsed.booking_ref) &&
     requiredString(parsed.origin) &&
-    requiredString(parsed.destination) &&
-    requiredString(parsed.depart_planned) &&
-    requiredString(parsed.outbound_departure);
+    requiredString(parsed.destination);
 
-  if (!hasAllRequired) {
+  if (!hasBasicTrip) {
     return {
       is_ticket: false,
-      ignore_reason: "missing_required_fields_for_dashboard",
+      ignore_reason: "missing_basic_fields_for_dashboard",
     };
   }
 
   // 3) Valid usable ticket → return strong typed result
+  //    Fill in missing optional fields with safe fallbacks so types stay happy.
+  const provider = parsed.provider!.trim();
+  const origin = parsed.origin!.trim();
+  const destination = parsed.destination!.trim();
+
+  const booking_ref =
+    (parsed.booking_ref && parsed.booking_ref.trim()) || "UNKNOWN";
+
+  const depart_planned =
+    (parsed.depart_planned && parsed.depart_planned.trim()) ||
+    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
+    "UNKNOWN";
+
+  const outbound_departure =
+    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
+    (parsed.depart_planned && parsed.depart_planned.trim()) ||
+    "UNKNOWN";
+
+  const arrive_planned =
+    (parsed.arrive_planned && parsed.arrive_planned.trim()) || null;
+
   return {
     is_ticket: true,
-    provider: parsed.provider!,
-    booking_ref: parsed.booking_ref!,
-    origin: parsed.origin!,
-    destination: parsed.destination!,
-    depart_planned: parsed.depart_planned!,
-    arrive_planned: parsed.arrive_planned || null,
-    outbound_departure: parsed.outbound_departure!,
+    provider,
+    booking_ref,
+    origin,
+    destination,
+    depart_planned,
+    arrive_planned,
+    outbound_departure,
   };
 }
