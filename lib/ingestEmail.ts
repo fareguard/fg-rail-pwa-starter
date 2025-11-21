@@ -1,11 +1,7 @@
 // lib/ingestEmail.ts
 
 import openai from "@/lib/openai";
-import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import type {
-  ParsedTicketResult,
-  ParseTrainEmailOutput,
-} from "./trainEmailFilter";
+import type { ParsedTicketResult, ParseTrainEmailOutput } from "./trainEmailFilter";
 
 export type IngestEmailArgs = {
   id?: string;
@@ -71,6 +67,7 @@ export async function ingestEmail({
       '  \"is_ticket\": boolean,\n' +
       '  \"ignore_reason\"?: string,\n' +
       '  \"provider\"?: string,\n' +
+      '  \"operator\"?: string,\n' + // NEW
       '  \"booking_ref\"?: string,\n' +
       '  \"origin\"?: string,\n' +
       '  \"destination\"?: string,\n' +
@@ -78,10 +75,12 @@ export async function ingestEmail({
       '  \"arrive_planned\"?: string,\n' +
       '  \"outbound_departure\"?: string\n' +
       "}\n\n" +
-      "- Only set is_ticket = true if this clearly contains a UK train e-ticket or journey confirmation\n" +
-      "  (Trainline, TrainPal, National Rail, Avanti West Coast, West Midlands Railway, Northern, etc.).\n" +
-      "- For TrainPal subjects like 'TrainPal: Booking Confirmation: Birmingham New Street ↔ Cannock',\n" +
-      "  set provider = 'TrainPal', origin = 'Birmingham New Street', destination = 'Cannock'.\n" +
+      "- provider = the main brand the customer bought from (e.g. 'TrainPal', 'Trainline', 'Avanti West Coast').\n" +
+      "- operator = the actual train operating company running the service.\n" +
+      "  * If provider is TrainPal or Trainline, operator is usually something like 'Avanti West Coast', 'West Midlands Railway', etc.\n" +
+      "  * If there is no separate operator mentioned, set operator = provider.\n" +
+      "- For TrainPal subjects like 'TrainPal: Booking Confirmation: Birmingham New Street ↔ London Euston',\n" +
+      "  set provider = 'TrainPal', origin = 'Birmingham New Street', destination = 'London Euston'.\n" +
       "- booking_ref is OPTIONAL. If you can't confidently find one, leave it empty or null.\n" +
       "- depart_planned / outbound_departure should be the first departure time if you can find it,\n" +
       "  but leave them empty if unsure.\n" +
@@ -94,21 +93,6 @@ export async function ingestEmail({
     (completion as any).output_text ||
     (completion as any).output?.[0]?.content?.[0]?.text ||
     "";
-
-  // ---- Log input/output to Supabase for debugging ----
-  try {
-    const supa = getSupabaseAdmin();
-    await supa.from("ai_email_parses").insert({
-      email_id: id || null,
-      from_addr: from,
-      subject,
-      raw_input: body,
-      raw_output: rawText,
-    });
-  } catch (e) {
-    // Don't crash the pipeline if logging fails
-    console.error("Failed to log ai_email_parses:", e);
-  }
 
   let parsed: ParseTrainEmailOutput;
 
@@ -151,6 +135,9 @@ export async function ingestEmail({
   // 3) Valid usable ticket → return strong typed result
   //    Fill in missing optional fields with safe fallbacks so types stay happy.
   const provider = parsed.provider!.trim();
+  const operator =
+    (parsed.operator && parsed.operator.trim()) || provider; // <- default to provider
+
   const origin = parsed.origin!.trim();
   const destination = parsed.destination!.trim();
 
@@ -173,6 +160,7 @@ export async function ingestEmail({
   return {
     is_ticket: true,
     provider,
+    operator,
     booking_ref,
     origin,
     destination,
