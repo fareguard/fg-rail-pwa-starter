@@ -188,13 +188,11 @@ export async function GET() {
       if (!parsed?.is_ticket) {
         continue;
       }
-
       // ---- Insert into trips ----
       const toInsert = {
         user_id: userId,
         user_email,
         retailer: parsed.provider,
-        email_id: id,
         operator: parsed.provider,
         booking_ref: parsed.booking_ref,
         origin: parsed.origin,
