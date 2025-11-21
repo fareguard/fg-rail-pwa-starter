@@ -62,7 +62,7 @@ export async function GET() {
   try {
     const supa = getSupabaseAdmin();
 
-    // 1) Get the most recent connected Google account
+    // 1) Most recent connected Google account
     const { data: oauthRows, error: oErr } = await supa
       .from("oauth_staging")
       .select("*")
@@ -81,7 +81,7 @@ export async function GET() {
     const { user_email, user_id: userId } = oauthRows[0] as any;
     const accessToken = await getFreshAccessToken(user_email);
 
-    // 2) Gmail search query (broad, but rail-leaning)
+    // 2) Gmail search query
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
@@ -117,13 +117,16 @@ export async function GET() {
         saved_raw: 0,
         saved_trips: 0,
         scanned: 0,
+        user_email,
+        trip_errors: [],
       });
     }
 
-    // 3) Hydrate, store raw, then parse trips
+    // 3) Hydrate, store raw, parse trips
     let savedRaw = 0;
     let savedTrips = 0;
     let scanned = 0;
+    const tripErrors: { email_id: string; message: string }[] = [];
 
     for (const id of messageIds) {
       scanned++;
@@ -159,28 +162,32 @@ export async function GET() {
         continue;
       }
 
-     // ---- Parse email using ingestEmail ----
-const parsed: any = await ingestEmail({
-  id,
-  from,
-  subject,
-  body_plain: body,
-  snippet,
-});
+      // ---- Call ingestEmail (LLM parser + gating) ----
+      const parsed: any = await ingestEmail({
+        id,
+        from,
+        subject,
+        body_plain: body,
+        snippet,
+      });
 
-// ---- DEBUG LOG INTO Supabase ----
-await supa.from("debug_llm_outputs").insert({
-  email_id: id,
-  from_addr: from,
-  subject,
-  raw_input: body,
-  raw_output: JSON.stringify(parsed, null, 2),
-});
+      // ---- Log into debug_llm_outputs for inspection ----
+      try {
+        await supa.from("debug_llm_outputs").insert({
+          email_id: id,
+          from_addr: from,
+          subject,
+          raw_input: body || snippet || "",
+          raw_output: JSON.stringify(parsed),
+        });
+      } catch {
+        // swallow debug errors
+      }
 
-// If model says it's not a ticket → skip
-if (!parsed?.is_ticket) {
-  continue;
-}
+      // If ingestEmail says "not a usable ticket", skip
+      if (!parsed?.is_ticket) {
+        continue;
+      }
 
       // ---- Insert into trips ----
       const toInsert = {
@@ -205,7 +212,12 @@ if (!parsed?.is_ticket) {
           "user_email,booking_ref,depart_planned,origin,destination",
       });
 
-      if (!tripErr) {
+      if (tripErr) {
+        tripErrors.push({
+          email_id: id,
+          message: tripErr.message ?? String(tripErr),
+        });
+      } else {
         savedTrips++;
       }
     }
@@ -216,6 +228,7 @@ if (!parsed?.is_ticket) {
       saved_trips: savedTrips,
       scanned,
       user_email,
+      trip_errors: tripErrors,
     });
   } catch (e: any) {
     return NextResponse.json(
