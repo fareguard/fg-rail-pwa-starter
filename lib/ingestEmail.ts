@@ -17,6 +17,28 @@ export type IngestEmailArgs = {
   bodyText?: string | null;
 };
 
+// Helper: strip code fences / extra text and extract the JSON object
+function extractJsonObject(raw: string): string {
+  if (!raw) throw new Error("empty_raw_text");
+
+  let text = raw.trim();
+
+  // Remove ```json / ``` fences if present
+  text = text
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    throw new Error("no_json_braces_found");
+  }
+
+  return text.slice(firstBrace, lastBrace + 1);
+}
+
 export async function ingestEmail({
   id,
   subject,
@@ -72,7 +94,8 @@ export async function ingestEmail({
   let parsed: ParseTrainEmailOutput;
 
   try {
-    parsed = JSON.parse(rawText) as ParseTrainEmailOutput;
+    const jsonStr = extractJsonObject(rawText);
+    parsed = JSON.parse(jsonStr) as ParseTrainEmailOutput;
   } catch (e) {
     // If the model somehow didn't give valid JSON, fail safely
     return {
@@ -93,7 +116,7 @@ export async function ingestEmail({
   const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
-  // 2) NEW: much lighter gate – we only *require* provider + origin + destination.
+  // 2) Lighter gate – we only *require* provider + origin + destination.
   const hasBasicTrip =
     requiredString(parsed.provider) &&
     requiredString(parsed.origin) &&
