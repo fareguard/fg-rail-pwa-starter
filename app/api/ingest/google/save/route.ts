@@ -188,22 +188,25 @@ export async function GET() {
       if (!parsed?.is_ticket) {
         continue;
       }
-            // ---- Insert into trips ----
+        
+      
       const toInsert = {
         user_id: userId,
         user_email,
-        retailer: parsed.provider,
-        operator: parsed.provider,
+        retailer: parsed.provider,                // TrainPal / Trainline / Avanti etc.
+        email_id: id,
+        operator: parsed.operator || parsed.provider, // <- use separate operator if present
         booking_ref: parsed.booking_ref,
         origin: parsed.origin,
         destination: parsed.destination,
         depart_planned: parsed.depart_planned,
         arrive_planned: parsed.arrive_planned,
-        // no outbound_departure column in trips table yet – it's still inside pnr_json
+        outbound_departure: parsed.outbound_departure,
         is_ticket: true,
         pnr_json: parsed,
         source: "gmail",
       };
+
 
       const { error: tripErr } = await supa.from("trips").upsert(toInsert, {
         onConflict:
