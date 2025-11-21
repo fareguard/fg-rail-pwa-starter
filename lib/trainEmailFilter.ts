@@ -4,7 +4,8 @@ export type ParseTrainEmailOutput =
   | {
       is_ticket: true;
       ignore_reason?: string;
-      provider?: string;
+      provider?: string;          // Trainline / TrainPal / Avanti / etc.
+      operator?: string;          // Actual TOC if different (Avanti, WMR, etc.)
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -16,6 +17,7 @@ export type ParseTrainEmailOutput =
       is_ticket: false;
       ignore_reason: string;
       provider?: string;
+      operator?: string;
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -29,6 +31,7 @@ export type ParsedTicketResult =
       is_ticket: true;
       ignore_reason?: undefined;
       provider: string;
+      operator: string;           // <- strongly typed now
       booking_ref: string;
       origin: string;
       destination: string;
