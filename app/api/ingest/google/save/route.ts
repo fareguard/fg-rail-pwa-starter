@@ -188,7 +188,7 @@ export async function GET() {
       if (!parsed?.is_ticket) {
         continue;
       }
-      // ---- Insert into trips ----
+            // ---- Insert into trips ----
       const toInsert = {
         user_id: userId,
         user_email,
@@ -199,7 +199,7 @@ export async function GET() {
         destination: parsed.destination,
         depart_planned: parsed.depart_planned,
         arrive_planned: parsed.arrive_planned,
-        outbound_departure: parsed.outbound_departure,
+        // no outbound_departure column in trips table yet – it's still inside pnr_json
         is_ticket: true,
         pnr_json: parsed,
         source: "gmail",
