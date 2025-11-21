@@ -1,7 +1,11 @@
 // lib/ingestEmail.ts
 
 import openai from "@/lib/openai";
-import type { ParsedTicketResult, ParseTrainEmailOutput } from "./trainEmailFilter";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import type {
+  ParsedTicketResult,
+  ParseTrainEmailOutput,
+} from "./trainEmailFilter";
 
 export type IngestEmailArgs = {
   id?: string;
@@ -90,6 +94,21 @@ export async function ingestEmail({
     (completion as any).output_text ||
     (completion as any).output?.[0]?.content?.[0]?.text ||
     "";
+
+  // ---- Log input/output to Supabase for debugging ----
+  try {
+    const supa = getSupabaseAdmin();
+    await supa.from("ai_email_parses").insert({
+      email_id: id || null,
+      from_addr: from,
+      subject,
+      raw_input: body,
+      raw_output: rawText,
+    });
+  } catch (e) {
+    // Don't crash the pipeline if logging fails
+    console.error("Failed to log ai_email_parses:", e);
+  }
 
   let parsed: ParseTrainEmailOutput;
 
