@@ -159,18 +159,28 @@ export async function GET() {
         continue;
       }
 
-      // ---- Parse email using ingestEmail (looser typing here) ----
-      const parsed: any = await ingestEmail({
-        id,
-        from,
-        subject,
-        body_plain: body,
-        snippet,
-      });
+     // ---- Parse email using ingestEmail ----
+const parsed: any = await ingestEmail({
+  id,
+  from,
+  subject,
+  body_plain: body,
+  snippet,
+});
 
-      if (!parsed?.is_ticket) {
-        continue;
-      }
+// ---- DEBUG LOG INTO Supabase ----
+await supa.from("debug_llm_outputs").insert({
+  email_id: id,
+  from_addr: from,
+  subject,
+  raw_input: body,
+  raw_output: JSON.stringify(parsed, null, 2),
+});
+
+// If model says it's not a ticket → skip
+if (!parsed?.is_ticket) {
+  continue;
+}
 
       // ---- Insert into trips ----
       const toInsert = {
