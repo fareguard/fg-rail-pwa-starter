@@ -131,7 +131,7 @@ export async function GET() {
 
     let pageToken: string | undefined = undefined;
     const messageIds: string[] = [];
-    const MAX_PAGES = 3;
+    const MAX_PAGES = 6;
 
     for (let i = 0; i < MAX_PAGES; i++) {
       const url = new URL(
