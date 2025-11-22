@@ -156,8 +156,8 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "CrossCountry") {
     operatorBadgeStyle = {
-      background: "rgb(202, 18, 63)", // custom XC red
-      border: "1px solid rgb(159, 40, 67)",
+      background: "rgb(159, 40, 67)", // custom XC red
+      border: "1px solid rgb(202, 18, 63)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
