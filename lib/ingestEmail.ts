@@ -39,6 +39,12 @@ function extractJsonObject(raw: string): string {
   return text.slice(firstBrace, lastBrace + 1);
 }
 
+function cleanStr(v?: string | null): string | null {
+  if (!v) return null;
+  const t = v.trim();
+  return t.length ? t : null;
+}
+
 export async function ingestEmail({
   id,
   subject,
@@ -67,7 +73,6 @@ export async function ingestEmail({
       '  \"is_ticket\": boolean,\n' +
       '  \"ignore_reason\"?: string,\n' +
       '  \"provider\"?: string,\n' +
-      '  \"operator\"?: string,\n' +
       '  \"booking_ref\"?: string,\n' +
       '  \"origin\"?: string,\n' +
       '  \"destination\"?: string,\n' +
@@ -75,17 +80,14 @@ export async function ingestEmail({
       '  \"arrive_planned\"?: string,\n' +
       '  \"outbound_departure\"?: string\n' +
       "}\n\n" +
-      "- provider = the retailer / booking channel (e.g. TrainPal, Trainline, Avanti, GWR).\n" +
-      "- operator = the train company actually running the service (e.g. Avanti West Coast,\n" +
-      "  West Midlands Railway, Chiltern, etc.). If the email is directly from the train\n" +
-      "  company, provider and operator will usually be the same.\n" +
+      "- Only set is_ticket = true if this clearly contains a UK train e-ticket or journey confirmation\n" +
+      "  (Trainline, TrainPal, National Rail, Avanti West Coast, West Midlands Railway, Northern, etc.).\n" +
       "- For TrainPal subjects like 'TrainPal: Booking Confirmation: Birmingham New Street ↔ Cannock',\n" +
-      "  set provider = 'TrainPal' and operator to the train company shown in the ticket.\n" +
+      "  set provider = the train operating company (e.g. 'West Midlands Railway'),\n" +
+      "  origin = 'Birmingham New Street', destination = 'Cannock'.\n" +
       "- booking_ref is OPTIONAL. If you can't confidently find one, leave it empty or null.\n" +
-      "- depart_planned / outbound_departure should be the first departure time if you can find it,\n" +
-      "  but leave them empty if unsure.\n" +
-      "- If it's marketing, receipts, general account stuff, or unclear, set is_ticket = false\n" +
-      "  and give a clear ignore_reason.\n\n" +
+      "- depart_planned / outbound_departure should be an ISO-like datetime if possible; if unsure, leave empty.\n" +
+      "- If it's marketing, receipts, general account stuff, or unclear, set is_ticket = false and give a clear ignore_reason.\n\n" +
       `EMAIL METADATA:\nEmail-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\nEMAIL BODY:\n${body}`,
   });
 
@@ -106,6 +108,39 @@ export async function ingestEmail({
       is_ticket: false,
       ignore_reason: "model_json_parse_error",
     };
+  }
+
+  // ------------- Heuristics / fallbacks before gating -----------------
+
+  if (parsed.is_ticket) {
+    const lowerMeta = `${from} ${subject}`.toLowerCase();
+
+    // If provider missing, infer from metadata
+    if (!parsed.provider) {
+      if (lowerMeta.includes("crosscountry")) parsed.provider = "CrossCountry";
+      else if (lowerMeta.includes("northern")) parsed.provider = "Northern";
+      else if (lowerMeta.includes("great western railway") || lowerMeta.includes("gwr"))
+        parsed.provider = "Great Western Railway";
+      else if (lowerMeta.includes("west midlands railway"))
+        parsed.provider = "West Midlands Railway";
+      else if (lowerMeta.includes("avanti")) parsed.provider = "Avanti West Coast";
+    }
+
+    // If origin/destination missing, try to parse from subject
+    // e.g. "TrainPal: Booking Confirmation: Birmingham New Street ↔ Cannock"
+    // or   "TrainPal: Booking Confirmation: London Marylebone → Solihull"
+    if (!parsed.origin || !parsed.destination) {
+      const m =
+        subject.match(/Booking Confirmation:\s*(.+?)\s*[↔→-]\s*(.+)$/i) ||
+        subject.match(/Booking:\s*(.+?)\s*[↔→-]\s*(.+)$/i);
+
+      if (m) {
+        const subjOrigin = cleanStr(m[1]);
+        const subjDest = cleanStr(m[2]);
+        if (!parsed.origin && subjOrigin) parsed.origin = subjOrigin;
+        if (!parsed.destination && subjDest) parsed.destination = subjDest;
+      }
+    }
   }
 
   // 1) Not a ticket → ignore
@@ -134,41 +169,25 @@ export async function ingestEmail({
   }
 
   // 3) Valid usable ticket → return strong typed result
-  //    Fill in missing optional fields with safe fallbacks so types stay happy.
   const provider = parsed.provider!.trim();
   const origin = parsed.origin!.trim();
   const destination = parsed.destination!.trim();
 
-  const operator =
-    (parsed as any).operator && requiredString((parsed as any).operator)
-      ? String((parsed as any).operator).trim()
-      : provider; // fall back to provider if unknown
-
-  const booking_ref =
-    (parsed.booking_ref && parsed.booking_ref.trim()) || "UNKNOWN";
-
+  const booking_ref = cleanStr(parsed.booking_ref);
   const depart_planned =
-    (parsed.depart_planned && parsed.depart_planned.trim()) ||
-    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
-    "UNKNOWN";
-
+    cleanStr(parsed.depart_planned) || cleanStr(parsed.outbound_departure);
   const outbound_departure =
-    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
-    (parsed.depart_planned && parsed.depart_planned.trim()) ||
-    "UNKNOWN";
-
-  const arrive_planned =
-    (parsed.arrive_planned && parsed.arrive_planned.trim()) || null;
+    cleanStr(parsed.outbound_departure) || cleanStr(parsed.depart_planned);
+  const arrive_planned = cleanStr(parsed.arrive_planned);
 
   return {
     is_ticket: true,
     provider,
-    operator,
     booking_ref,
     origin,
     destination,
-    depart_planned,
-    arrive_planned,
-    outbound_departure,
+    depart_planned: depart_planned || null,
+    arrive_planned: arrive_planned || null,
+    outbound_departure: outbound_departure || null,
   };
 }
