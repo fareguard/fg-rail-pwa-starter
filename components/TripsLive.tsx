@@ -48,6 +48,7 @@ function formatDepart(trip: Trip) {
 
 const OPERATOR_PREFIXES = [
   "Avanti West Coast",
+  "CrossCountry",
   "West Midlands Railway",
   "West Midlands Trains",
   "London Northwestern Railway",
@@ -144,6 +145,19 @@ function TripCard({ trip }: { trip: Trip }) {
     operatorBadgeStyle = {
       background: "rgb(0, 128, 138)", // custom Avanti teal
       border: "1px solid rgb(0, 70, 80)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
+  if (operator === "CrossCountry") {
+    operatorBadgeStyle = {
+      background: "rgb(202, 18, 63)", // custom XC red
+      border: "1px solid rgb(159, 40, 67)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
