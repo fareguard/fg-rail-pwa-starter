@@ -4,8 +4,7 @@ export type ParseTrainEmailOutput =
   | {
       is_ticket: true;
       ignore_reason?: string;
-      provider?: string;          // retailer: TrainPal / Trainline / Avanti etc
-      operator?: string;          // train company actually running the service
+      provider?: string;
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -17,7 +16,6 @@ export type ParseTrainEmailOutput =
       is_ticket: false;
       ignore_reason: string;
       provider?: string;
-      operator?: string;
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -26,18 +24,19 @@ export type ParseTrainEmailOutput =
       outbound_departure?: string;
     };
 
+// **NOTE**: allow booking_ref + timestamps to be null in the “good” branch.
+// Frontend already handles null > hides pill / shows “Departs: —”.
 export type ParsedTicketResult =
   | {
       is_ticket: true;
       ignore_reason?: undefined;
-      provider: string;            // retailer
-      operator: string;            // operator (or same as provider if unknown)
-      booking_ref: string;
+      provider: string;
+      booking_ref: string | null;
       origin: string;
       destination: string;
-      depart_planned: string;
+      depart_planned: string | null;
       arrive_planned: string | null;
-      outbound_departure: string;
+      outbound_departure: string | null;
     }
   | {
       is_ticket: false;
