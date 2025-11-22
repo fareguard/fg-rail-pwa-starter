@@ -303,6 +303,18 @@ function TripCard({ trip }: { trip: Trip }) {
     };
   }
 
+  if (operator === "Chiltern Railways") {
+    operatorBadgeStyle = {
+      background: "rgb(65, 182, 230)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
   const retailerBadgeStyle: any = {
     background: "#f4f4f5",
     color: "#444",
