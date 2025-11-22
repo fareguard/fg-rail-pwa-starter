@@ -68,10 +68,6 @@ function extractStation(raw: string): string {
   if (!raw) return "";
 
   // Grab the last 1–4 capitalised “words” at the end of the string
-  // Examples:
-  // "... Avanti West Coast Wolverhampton"      -> "Avanti West Coast Wolverhampton"
-  // "... service from London Euston"           -> "London Euston"
-  // "... calling at Birmingham New Street"     -> "Birmingham New Street"
   const match = raw.match(
     /([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/
   );
@@ -157,7 +153,7 @@ function TripCard({ trip }: { trip: Trip }) {
     };
   }
 
-  // Retailer pill style (generic, only shown if different from operator)
+  // Retailer pill style (generic)
   const retailerBadgeStyle: any = {
     background: "#f4f4f5",
     color: "#444",
@@ -191,16 +187,27 @@ function TripCard({ trip }: { trip: Trip }) {
               marginBottom: 6,
             }}
           >
-            {operator && (
+            {/* If retailer and operator are the SAME (direct Avanti etc) → 1 pill */}
+            {isSameBrand && operator && (
               <span className="badge" style={operatorBadgeStyle}>
                 {operator}
               </span>
             )}
 
-            {!isSameBrand && retailer && (
-              <span className="badge" style={retailerBadgeStyle}>
-                {retailer}
-              </span>
+            {/* If they differ (TrainPal + Avanti etc) → 2 pills */}
+            {!isSameBrand && (
+              <>
+                {retailer && (
+                  <span className="badge" style={retailerBadgeStyle}>
+                    {retailer}
+                  </span>
+                )}
+                {operator && (
+                  <span className="badge" style={operatorBadgeStyle}>
+                    {operator}
+                  </span>
+                )}
+              </>
             )}
 
             {isEticket && (
