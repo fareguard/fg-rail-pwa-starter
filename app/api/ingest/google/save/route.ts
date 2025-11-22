@@ -56,7 +56,9 @@ function headerValue(payload: any, name: string): string | undefined {
   return h?.value;
 }
 
-// ------------------------------------------------------------------
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
 
 function safeTimestamp(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -64,9 +66,41 @@ function safeTimestamp(value: string | null | undefined): string | null {
   if (isNaN(d.getTime())) {
     return null;
   }
-  // Let Postgres parse a normal ISO string
   return d.toISOString();
 }
+
+/**
+ * Normalise operator names so the UI doesn’t get a bunch of
+ * slightly different labels for the same thing.
+ */
+function normaliseOperatorName(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  const lower = s.toLowerCase();
+
+  // West Midlands
+  if (lower.startsWith("west midlands")) {
+    return "West Midlands Railway";
+  }
+
+  // CrossCountry brands
+  if (lower === "crosscountry trains" || lower === "cross country trains") {
+    return "CrossCountry";
+  }
+
+  // Northern variants
+  if (
+    lower === "northern rail" ||
+    lower === "northern railway" ||
+    lower === "northern trains"
+  ) {
+    return "Northern";
+  }
+
+  return s;
+}
+
+// ------------------------------------------------------------------
 
 export async function GET() {
   try {
@@ -198,30 +232,84 @@ export async function GET() {
       if (!parsed?.is_ticket) {
         continue;
       }
-        
-      
-            // ---- Insert into trips ----
-      const toInsert = {
+
+      // -------------------------------
+      // Normalised fields for insert
+      // -------------------------------
+      const operatorRaw = parsed.operator ?? parsed.provider ?? null;
+      const operator = normaliseOperatorName(operatorRaw);
+      const retailer = parsed.retailer ?? parsed.provider ?? null;
+
+      const departStr =
+        parsed.depart_planned || parsed.outbound_departure || null;
+      const arriveStr = parsed.arrive_planned || null;
+      const outboundStr =
+        parsed.outbound_departure || parsed.depart_planned || null;
+
+      const departIso = safeTimestamp(departStr);
+      const arriveIso = safeTimestamp(arriveStr);
+      const outboundIso = safeTimestamp(outboundStr);
+
+      // -------------------------------------------
+      // De-duplication: same booking_ref + route
+      // -------------------------------------------
+      let existingTrip: { id: string; depart_planned: string | null } | null =
+        null;
+
+      if (parsed.booking_ref && parsed.origin && parsed.destination) {
+        const { data: existingRows, error: existingErr } = await supa
+          .from("trips")
+          .select("id, depart_planned")
+          .eq("user_email", user_email)
+          .eq("booking_ref", parsed.booking_ref)
+          .eq("origin", parsed.origin)
+          .eq("destination", parsed.destination)
+          .limit(1);
+
+        if (!existingErr && existingRows && existingRows.length) {
+          existingTrip = existingRows[0] as any;
+        }
+      }
+
+      // If we already have a trip, keep the earliest depart_planned
+      let finalDepart = departIso;
+      if (existingTrip?.depart_planned && finalDepart) {
+        const existingDate = new Date(existingTrip.depart_planned);
+        const newDate = new Date(finalDepart);
+        if (existingDate <= newDate) {
+          finalDepart = existingTrip.depart_planned;
+        }
+      }
+
+      const baseRecord = {
         user_id: userId,
         user_email,
-        retailer: parsed.retailer ?? parsed.provider, // if you don't have parsed.retailer this still works
+        retailer,
         email_id: id,
-        operator: parsed.operator ?? parsed.provider,
-        booking_ref: parsed.booking_ref,
-        origin: parsed.origin,
-        destination: parsed.destination,
-        depart_planned: safeTimestamp(parsed.depart_planned),
-        arrive_planned: safeTimestamp(parsed.arrive_planned),
-        outbound_departure: safeTimestamp(parsed.outbound_departure),
+        operator,
+        booking_ref: parsed.booking_ref || null,
+        origin: parsed.origin || null,
+        destination: parsed.destination || null,
+        depart_planned: finalDepart,
+        arrive_planned: arriveIso,
+        outbound_departure: outboundIso,
         is_ticket: true,
         pnr_json: parsed,
         source: "gmail",
       };
 
-      const { error: tripErr } = await supa.from("trips").upsert(toInsert, {
-        onConflict:
-          "user_email,booking_ref,depart_planned,origin,destination",
-      });
+      let tripErr: any = null;
+
+      if (existingTrip) {
+        const { error } = await supa
+          .from("trips")
+          .update(baseRecord)
+          .eq("id", existingTrip.id);
+        tripErr = error;
+      } else {
+        const { error } = await supa.from("trips").insert(baseRecord);
+        tripErr = error;
+      }
 
       if (tripErr) {
         tripErrors.push({
