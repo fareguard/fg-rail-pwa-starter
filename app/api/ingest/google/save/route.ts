@@ -58,6 +58,16 @@ function headerValue(payload: any, name: string): string | undefined {
 
 // ------------------------------------------------------------------
 
+function safeTimestamp(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const d = new Date(value);
+  if (isNaN(d.getTime())) {
+    return null;
+  }
+  // Let Postgres parse a normal ISO string
+  return d.toISOString();
+}
+
 export async function GET() {
   try {
     const supa = getSupabaseAdmin();
@@ -194,21 +204,19 @@ export async function GET() {
       const toInsert = {
         user_id: userId,
         user_email,
-        retailer: parsed.provider,                 // booking channel (TrainPal, Trainline, etc.)
+        retailer: parsed.retailer ?? parsed.provider, // if you don't have parsed.retailer this still works
         email_id: id,
-        operator: parsed.operator || parsed.provider, // train company actually running it
+        operator: parsed.operator ?? parsed.provider,
         booking_ref: parsed.booking_ref,
         origin: parsed.origin,
         destination: parsed.destination,
-        depart_planned: parsed.depart_planned,
-        arrive_planned: parsed.arrive_planned,
-        outbound_departure: parsed.outbound_departure,
+        depart_planned: safeTimestamp(parsed.depart_planned),
+        arrive_planned: safeTimestamp(parsed.arrive_planned),
+        outbound_departure: safeTimestamp(parsed.outbound_departure),
         is_ticket: true,
         pnr_json: parsed,
         source: "gmail",
       };
-
-
 
       const { error: tripErr } = await supa.from("trips").upsert(toInsert, {
         onConflict:
