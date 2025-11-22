@@ -4,7 +4,14 @@ export type ParseTrainEmailOutput =
   | {
       is_ticket: true;
       ignore_reason?: string;
+
+      // who sent / where bought
       provider?: string;
+      retailer?: string;
+
+      // who runs the train
+      operator?: string;
+
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -15,7 +22,10 @@ export type ParseTrainEmailOutput =
   | {
       is_ticket: false;
       ignore_reason: string;
+
       provider?: string;
+      retailer?: string;
+      operator?: string;
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -24,19 +34,21 @@ export type ParseTrainEmailOutput =
       outbound_departure?: string;
     };
 
-// **NOTE**: allow booking_ref + timestamps to be null in the “good” branch.
-// Frontend already handles null > hides pill / shows “Departs: —”.
 export type ParsedTicketResult =
   | {
       is_ticket: true;
       ignore_reason?: undefined;
+
       provider: string;
-      booking_ref: string | null;
+      retailer: string | null;
+      operator: string | null;
+
+      booking_ref: string;
       origin: string;
       destination: string;
-      depart_planned: string | null;
+      depart_planned: string;
       arrive_planned: string | null;
-      outbound_departure: string | null;
+      outbound_departure: string;
     }
   | {
       is_ticket: false;
@@ -58,11 +70,10 @@ export const ALLOWED_SENDER_FRAGMENTS = [
   "c2c-online.co.uk",
   "thameslinkrailway.com",
   "crosscountrytrains.co.uk",
-  "tfl.gov.uk", // if you want London travel stuff
+  "tfl.gov.uk",
 ];
 
 export const EXCLUDE_KEYWORDS = [
-  // obvious non-train merchants / stuff we NEVER want
   "costa",
   "starbucks",
   "uber",
