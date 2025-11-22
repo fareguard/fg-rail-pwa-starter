@@ -1,3 +1,4 @@
+// components/TripsLive.tsx
 "use client";
 
 import { useMemo } from "react";
@@ -15,8 +16,6 @@ type Trip = {
   status: string | null;
   is_ticket: boolean | null;
   created_at: string | null;
-  // will be present from the API even if TS doesn’t know it yet
-  outbound_departure?: string | null;
 };
 
 type TripsResponse = {
@@ -28,19 +27,21 @@ type TripsResponse = {
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// --- helpers ---------------------------------------------------------
+// -------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------
 
-function preferDepartTime(trip: Trip): string | null {
-  // prefer depart_planned, but fall back to outbound_departure
-  return trip.depart_planned ?? trip.outbound_departure ?? null;
+function parseTime(value: string | null): Date | null {
+  if (!value) return null;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 function formatDepart(trip: Trip) {
-  const raw = preferDepartTime(trip);
-  if (!raw) return "Departs: —";
+  if (!trip.depart_planned) return "Departs: —";
 
-  const d = new Date(raw);
-  if (isNaN(d.getTime())) return "Departs: —";
+  const d = parseTime(trip.depart_planned);
+  if (!d) return "Departs: —";
 
   const date = d.toLocaleDateString("en-GB", {
     weekday: "short",
@@ -63,28 +64,20 @@ const OPERATOR_PREFIXES = [
   "West Midlands Trains",
   "London Northwestern Railway",
   "Great Western Railway",
+  "GWR",
   "Northern",
   "ScotRail",
   "TransPennine Express",
   "Thameslink",
+  "Transport for Wales",
 ];
 
-const AGGREGATOR_BRANDS = ["TrainPal", "Trainline", "TheTrainline", "National Rail"];
-
-function normalise(str: string | null | undefined) {
-  return (str || "").trim().toLowerCase();
-}
-
-/**
- * Take a noisy text blob like:
- * "Your booking is confirmed Thank you for booking with Avanti West Coast Wolverhampton"
- * or "Avanti West Coast Wolverhampton"
- * and pull out the likely station, e.g. "Wolverhampton".
- */
 function extractStation(raw: string): string {
   if (!raw) return "";
 
-  const match = raw.match(/([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/);
+  const match = raw.match(
+    /([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/,
+  );
 
   let station = (match?.[1] || raw).trim();
 
@@ -112,123 +105,130 @@ function buildTitle(trip: Trip): string {
     return `${origin} → ${destination}`;
   }
 
-  if (destination) {
-    return destination;
-  }
-
-  if (trip.booking_ref) {
-    return `Booking ref ${trip.booking_ref}`;
-  }
+  if (destination) return destination;
+  if (trip.booking_ref) return `Booking ref ${trip.booking_ref}`;
 
   return "Train journey";
 }
 
-// ---------- MERGING / DEDUPING LOGIC ---------------------------------
+// -------------------------------------------------------------
+// Brand normalisation
+// -------------------------------------------------------------
 
-function isAggregator(name: string | null | undefined): boolean {
-  const n = normalise(name);
-  if (!n) return false;
-  return AGGREGATOR_BRANDS.some((b) => n.includes(b.toLowerCase()));
+function normaliseBrand(raw: string | null | undefined): string {
+  if (!raw) return "";
+  const s = raw.trim();
+  if (!s) return "";
+
+  const lower = s.toLowerCase();
+
+  if (lower.includes("crosscountry")) return "CrossCountry";
+  if (lower.includes("trainpal")) return "TrainPal";
+  if (lower.includes("trainline")) return "Trainline";
+
+  if (
+    lower.includes("west midlands railway") ||
+    lower.includes("west midlands trains")
+  ) {
+    return "West Midlands Railway";
+  }
+
+  if (lower.includes("gwr") || lower.includes("great western")) {
+    return "GWR";
+  }
+
+  if (lower.includes("avanti")) return "Avanti West Coast";
+  if (lower.includes("northern")) return "Northern";
+
+  if (lower.includes("transport for wales") || lower.includes("tfw")) {
+    return "Transport for Wales";
+  }
+
+  return s;
 }
 
-/**
- * Merge trips that look like the same physical journey.
- * Heuristic:
- *  - same origin + destination (case-insensitive)
- *  - departure times within 10 minutes OR missing but same booking_ref
- */
-function mergeTrips(trips: Trip[]): Trip[] {
-  if (!trips.length) return [];
+// -------------------------------------------------------------
+// Deduplication
+// -------------------------------------------------------------
 
-  const groups: Trip[][] = [];
+function scoreTrip(t: Trip): number {
+  let score = 0;
+  if (t.depart_planned) score += 4;
+  if (t.arrive_planned) score += 1;
+  if (t.origin && t.destination) score += 2;
+  if (t.operator && t.retailer && t.operator !== t.retailer) score += 1;
+  if (t.status === "submitted" || t.status === "queued") score += 1;
+  if (t.booking_ref && t.booking_ref !== "UNKNOWN") score += 1;
+  return score;
+}
+
+function areProbablySameJourney(a: Trip, b: Trip): boolean {
+  const originA = (a.origin || "").toLowerCase();
+  const destA = (a.destination || "").toLowerCase();
+  const originB = (b.origin || "").toLowerCase();
+  const destB = (b.destination || "").toLowerCase();
+
+  if (!originA || !destA || !originB || !destB) return false;
+  if (originA !== originB || destA !== destB) return false;
+
+  const brandA =
+    normaliseBrand(a.operator) || normaliseBrand(a.retailer) || "";
+  const brandB =
+    normaliseBrand(b.operator) || normaliseBrand(b.retailer) || "";
+
+  if (brandA && brandB && brandA !== brandB) return false;
+
+  const refA = (a.booking_ref || "").trim();
+  const refB = (b.booking_ref || "").trim();
+  if (refA && refB && refA === refB) return true;
+
+  const tA = parseTime(a.depart_planned);
+  const tB = parseTime(b.depart_planned);
+
+  if (!tA && !tB) return false;
+  if (!tA || !tB) {
+    // same route + same booking_ref but only one has time
+    return !!(refA && refB && refA === refB);
+  }
+
+  const diffMs = Math.abs(tA.getTime() - tB.getTime());
+  const tenMinutes = 10 * 60 * 1000;
+
+  return diffMs <= tenMinutes;
+}
+
+function dedupeTrips(trips: Trip[]): Trip[] {
+  const result: Trip[] = [];
 
   for (const trip of trips) {
-    const o = normalise(trip.origin);
-    const d = normalise(trip.destination);
-    const depRaw = preferDepartTime(trip);
-    const depMs = depRaw ? new Date(depRaw).getTime() : null;
+    let merged = false;
 
-    let placed = false;
+    for (let i = 0; i < result.length; i++) {
+      const existing = result[i];
+      if (areProbablySameJourney(existing, trip)) {
+        const existingScore = scoreTrip(existing);
+        const newScore = scoreTrip(trip);
 
-    for (const group of groups) {
-      const g0 = group[0];
-      const go = normalise(g0.origin);
-      const gd = normalise(g0.destination);
-      if (o !== go || d !== gd) continue;
+        if (newScore > existingScore) {
+          result[i] = trip;
+        }
 
-      const gDepRaw = preferDepartTime(g0);
-      const gDepMs = gDepRaw ? new Date(gDepRaw).getTime() : null;
-
-      const bothHaveDep = depMs !== null && gDepMs !== null;
-      const depClose =
-        bothHaveDep && Math.abs(depMs! - gDepMs!) <= 10 * 60 * 1000; // 10 mins
-
-      const bookingMatch =
-        (trip.booking_ref && trip.booking_ref === g0.booking_ref) ||
-        !trip.booking_ref ||
-        !g0.booking_ref;
-
-      if ((bothHaveDep && depClose && bookingMatch) || (!bothHaveDep && bookingMatch)) {
-        group.push(trip);
-        placed = true;
+        merged = true;
         break;
       }
     }
 
-    if (!placed) {
-      groups.push([trip]);
+    if (!merged) {
+      result.push(trip);
     }
   }
 
-  const merged: Trip[] = groups.map((group) => {
-    if (group.length === 1) return group[0];
-
-    // start from first as base
-    const base: Trip = { ...group[0] };
-
-    // best depart/arrive
-    base.depart_planned =
-      group.find((t) => t.depart_planned)?.depart_planned ?? base.depart_planned;
-    (base as any).outbound_departure =
-      group.find((t) => t.outbound_departure)?.outbound_departure ??
-      (base as any).outbound_departure;
-    base.arrive_planned =
-      group.find((t) => t.arrive_planned)?.arrive_planned ?? base.arrive_planned;
-
-    const allRetailers = group.map((t) => t.retailer || "").filter(Boolean);
-    const allOperators = group.map((t) => t.operator || "").filter(Boolean);
-
-    const chosenRetailer =
-      allRetailers.find((r) => isAggregator(r)) ||
-      allOperators.find((r) => isAggregator(r)) ||
-      base.retailer;
-
-    const chosenOperator =
-      allOperators.find((o) => !isAggregator(o)) || base.operator;
-
-    return {
-      ...base,
-      retailer: chosenRetailer || base.retailer,
-      operator: chosenOperator || base.operator,
-    };
-  });
-
-  // sort newest first
-  merged.sort((a, b) => {
-    const ad = preferDepartTime(a);
-    const bd = preferDepartTime(b);
-    if (ad && bd) {
-      return new Date(bd).getTime() - new Date(ad).getTime();
-    }
-    if (ad) return -1;
-    if (bd) return 1;
-    return 0;
-  });
-
-  return merged;
+  return result;
 }
 
-// ---------------------------------------------------------------------
+// -------------------------------------------------------------
+// Card
+// -------------------------------------------------------------
 
 function TripCard({ trip }: { trip: Trip }) {
   const title = useMemo(() => buildTitle(trip), [trip]);
@@ -241,12 +241,15 @@ function TripCard({ trip }: { trip: Trip }) {
       ? "#fbbf24"
       : "#22c55e";
 
-  const operator = (trip.operator || "").trim();
-  const retailer = (trip.retailer || "").trim();
+  const rawOperator = (trip.operator || "").trim();
+  const rawRetailer = (trip.retailer || "").trim();
+
+  const operator = normaliseBrand(rawOperator);
+  const retailer = normaliseBrand(rawRetailer);
+
   const isSameBrand =
     operator && retailer && operator.toLowerCase() === retailer.toLowerCase();
 
-  // Operator pill style (brand-aware)
   let operatorBadgeStyle: any = {
     background: "#ecf2f8",
     color: "var(--fg-navy)",
@@ -300,7 +303,6 @@ function TripCard({ trip }: { trip: Trip }) {
     };
   }
 
-  // Retailer pill style (generic)
   const retailerBadgeStyle: any = {
     background: "#f4f4f5",
     color: "#444",
@@ -402,7 +404,9 @@ function TripCard({ trip }: { trip: Trip }) {
   );
 }
 
-// ---------------------------------------------------------------------
+// -------------------------------------------------------------
+// Main component
+// -------------------------------------------------------------
 
 export default function TripsLive() {
   const { data, error, isValidating } = useSWR<TripsResponse>(
@@ -410,7 +414,7 @@ export default function TripsLive() {
     fetcher,
     {
       refreshInterval: 60_000,
-    }
+    },
   );
 
   if (error) {
@@ -437,7 +441,9 @@ export default function TripsLive() {
     );
   }
 
-  if (!data.trips.length) {
+  const trips = useMemo(() => dedupeTrips(data.trips || []), [data.trips]);
+
+  if (!trips.length) {
     return (
       <p className="small" style={{ marginTop: 16, color: "var(--fg-muted)" }}>
         No journeys detected yet. We&apos;ll add them here as soon as your
@@ -445,11 +451,6 @@ export default function TripsLive() {
       </p>
     );
   }
-
-  const mergedTrips = useMemo(
-    () => mergeTrips(data.trips),
-    [data.trips]
-  );
 
   return (
     <div style={{ marginTop: 16 }}>
@@ -477,7 +478,7 @@ export default function TripsLive() {
           gap: 12,
         }}
       >
-        {mergedTrips.map((trip) => (
+        {trips.map((trip) => (
           <TripCard key={trip.id} trip={trip} />
         ))}
       </ul>
