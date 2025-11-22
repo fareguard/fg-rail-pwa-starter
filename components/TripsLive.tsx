@@ -144,7 +144,6 @@ function TripCard({ trip }: { trip: Trip }) {
   if (operator === "Avanti West Coast") {
     operatorBadgeStyle = {
       background: "rgb(0, 128, 138)", // custom Avanti teal
-      border: "1px solid rgb(0, 70, 80)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
@@ -157,7 +156,6 @@ function TripCard({ trip }: { trip: Trip }) {
   if (operator === "CrossCountry") {
     operatorBadgeStyle = {
       background: "rgb(159, 40, 67)", // custom XC red
-      border: "1px solid rgb(202, 18, 63)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
@@ -166,6 +164,32 @@ function TripCard({ trip }: { trip: Trip }) {
       letterSpacing: "0.003em",
     };
   }
+
+  if (operator === "Northern") {
+    operatorBadgeStyle = {
+      background: "rgb(35, 47, 95)", // custom northern colour background ygm
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
+  if (operator === "West Midlands Railway") {
+    operatorBadgeStyle = {
+      background: "rgb(60, 16, 83)", // custom WMR purple mate
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
+
 
   // Retailer pill style (generic)
   const retailerBadgeStyle: any = {
