@@ -15,6 +15,8 @@ type Trip = {
   status: string | null;
   is_ticket: boolean | null;
   created_at: string | null;
+  // will be present from the API even if TS doesn’t know it yet
+  outbound_departure?: string | null;
 };
 
 type TripsResponse = {
@@ -28,10 +30,18 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 // --- helpers ---------------------------------------------------------
 
-function formatDepart(trip: Trip) {
-  if (!trip.depart_planned) return "Departs: —";
+function preferDepartTime(trip: Trip): string | null {
+  // prefer depart_planned, but fall back to outbound_departure
+  return trip.depart_planned ?? trip.outbound_departure ?? null;
+}
 
-  const d = new Date(trip.depart_planned);
+function formatDepart(trip: Trip) {
+  const raw = preferDepartTime(trip);
+  if (!raw) return "Departs: —";
+
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return "Departs: —";
+
   const date = d.toLocaleDateString("en-GB", {
     weekday: "short",
     day: "numeric",
@@ -59,6 +69,12 @@ const OPERATOR_PREFIXES = [
   "Thameslink",
 ];
 
+const AGGREGATOR_BRANDS = ["TrainPal", "Trainline", "TheTrainline", "National Rail"];
+
+function normalise(str: string | null | undefined) {
+  return (str || "").trim().toLowerCase();
+}
+
 /**
  * Take a noisy text blob like:
  * "Your booking is confirmed Thank you for booking with Avanti West Coast Wolverhampton"
@@ -68,15 +84,10 @@ const OPERATOR_PREFIXES = [
 function extractStation(raw: string): string {
   if (!raw) return "";
 
-  // Grab the last 1–4 capitalised “words” at the end of the string
-  const match = raw.match(
-    /([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/
-  );
+  const match = raw.match(/([A-Z][\w&'()/-]*(?: [A-Z][\w&'()/-]*){0,3})\s*$/);
 
   let station = (match?.[1] || raw).trim();
 
-  // If station begins with a known operator name, strip that prefix:
-  // "Avanti West Coast Wolverhampton" -> "Wolverhampton"
   for (const op of OPERATOR_PREFIXES) {
     if (station.startsWith(op + " ")) {
       station = station.slice(op.length).trim();
@@ -84,7 +95,6 @@ function extractStation(raw: string): string {
     }
   }
 
-  // Strip obvious boilerplate if it somehow stuck to the front
   return station
     .replace(/^Your booking is confirmed/i, "")
     .replace(/^Thank you for booking with .*/i, "")
@@ -98,12 +108,10 @@ function buildTitle(trip: Trip): string {
   const origin = extractStation(rawOrigin);
   const destination = rawDestination;
 
-  // Use cleaned data when we have both ends
   if (origin && destination) {
     return `${origin} → ${destination}`;
   }
 
-  // Fallbacks
   if (destination) {
     return destination;
   }
@@ -113,6 +121,111 @@ function buildTitle(trip: Trip): string {
   }
 
   return "Train journey";
+}
+
+// ---------- MERGING / DEDUPING LOGIC ---------------------------------
+
+function isAggregator(name: string | null | undefined): boolean {
+  const n = normalise(name);
+  if (!n) return false;
+  return AGGREGATOR_BRANDS.some((b) => n.includes(b.toLowerCase()));
+}
+
+/**
+ * Merge trips that look like the same physical journey.
+ * Heuristic:
+ *  - same origin + destination (case-insensitive)
+ *  - departure times within 10 minutes OR missing but same booking_ref
+ */
+function mergeTrips(trips: Trip[]): Trip[] {
+  if (!trips.length) return [];
+
+  const groups: Trip[][] = [];
+
+  for (const trip of trips) {
+    const o = normalise(trip.origin);
+    const d = normalise(trip.destination);
+    const depRaw = preferDepartTime(trip);
+    const depMs = depRaw ? new Date(depRaw).getTime() : null;
+
+    let placed = false;
+
+    for (const group of groups) {
+      const g0 = group[0];
+      const go = normalise(g0.origin);
+      const gd = normalise(g0.destination);
+      if (o !== go || d !== gd) continue;
+
+      const gDepRaw = preferDepartTime(g0);
+      const gDepMs = gDepRaw ? new Date(gDepRaw).getTime() : null;
+
+      const bothHaveDep = depMs !== null && gDepMs !== null;
+      const depClose =
+        bothHaveDep && Math.abs(depMs! - gDepMs!) <= 10 * 60 * 1000; // 10 mins
+
+      const bookingMatch =
+        (trip.booking_ref && trip.booking_ref === g0.booking_ref) ||
+        !trip.booking_ref ||
+        !g0.booking_ref;
+
+      if ((bothHaveDep && depClose && bookingMatch) || (!bothHaveDep && bookingMatch)) {
+        group.push(trip);
+        placed = true;
+        break;
+      }
+    }
+
+    if (!placed) {
+      groups.push([trip]);
+    }
+  }
+
+  const merged: Trip[] = groups.map((group) => {
+    if (group.length === 1) return group[0];
+
+    // start from first as base
+    const base: Trip = { ...group[0] };
+
+    // best depart/arrive
+    base.depart_planned =
+      group.find((t) => t.depart_planned)?.depart_planned ?? base.depart_planned;
+    (base as any).outbound_departure =
+      group.find((t) => t.outbound_departure)?.outbound_departure ??
+      (base as any).outbound_departure;
+    base.arrive_planned =
+      group.find((t) => t.arrive_planned)?.arrive_planned ?? base.arrive_planned;
+
+    const allRetailers = group.map((t) => t.retailer || "").filter(Boolean);
+    const allOperators = group.map((t) => t.operator || "").filter(Boolean);
+
+    const chosenRetailer =
+      allRetailers.find((r) => isAggregator(r)) ||
+      allOperators.find((r) => isAggregator(r)) ||
+      base.retailer;
+
+    const chosenOperator =
+      allOperators.find((o) => !isAggregator(o)) || base.operator;
+
+    return {
+      ...base,
+      retailer: chosenRetailer || base.retailer,
+      operator: chosenOperator || base.operator,
+    };
+  });
+
+  // sort newest first
+  merged.sort((a, b) => {
+    const ad = preferDepartTime(a);
+    const bd = preferDepartTime(b);
+    if (ad && bd) {
+      return new Date(bd).getTime() - new Date(ad).getTime();
+    }
+    if (ad) return -1;
+    if (bd) return 1;
+    return 0;
+  });
+
+  return merged;
 }
 
 // ---------------------------------------------------------------------
@@ -125,15 +238,13 @@ function TripCard({ trip }: { trip: Trip }) {
 
   const statusColour =
     trip.status === "submitted" || trip.status === "queued"
-      ? "#fbbf24" // amber
-      : "#22c55e"; // green
+      ? "#fbbf24"
+      : "#22c55e";
 
   const operator = (trip.operator || "").trim();
   const retailer = (trip.retailer || "").trim();
   const isSameBrand =
-    operator &&
-    retailer &&
-    operator.toLowerCase() === retailer.toLowerCase();
+    operator && retailer && operator.toLowerCase() === retailer.toLowerCase();
 
   // Operator pill style (brand-aware)
   let operatorBadgeStyle: any = {
@@ -143,7 +254,7 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "Avanti West Coast") {
     operatorBadgeStyle = {
-      background: "rgb(0, 128, 138)", // custom Avanti teal
+      background: "rgb(0, 128, 138)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
@@ -155,7 +266,7 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "CrossCountry") {
     operatorBadgeStyle = {
-      background: "rgb(159, 40, 67)", // custom XC red
+      background: "rgb(159, 40, 67)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
@@ -167,7 +278,7 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "Northern") {
     operatorBadgeStyle = {
-      background: "rgb(35, 47, 95)", // custom northern colour background ygm
+      background: "rgb(35, 47, 95)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
@@ -179,7 +290,7 @@ function TripCard({ trip }: { trip: Trip }) {
 
   if (operator === "West Midlands Railway") {
     operatorBadgeStyle = {
-      background: "rgb(60, 16, 83)", // custom WMR purple mate
+      background: "rgb(60, 16, 83)",
       color: "#FFFFFF",
       borderRadius: "9999px",
       padding: "3px 11px",
@@ -188,8 +299,6 @@ function TripCard({ trip }: { trip: Trip }) {
       letterSpacing: "0.003em",
     };
   }
-
-
 
   // Retailer pill style (generic)
   const retailerBadgeStyle: any = {
@@ -225,14 +334,12 @@ function TripCard({ trip }: { trip: Trip }) {
               marginBottom: 6,
             }}
           >
-            {/* If retailer and operator are the SAME (direct Avanti etc) → 1 pill */}
             {isSameBrand && operator && (
               <span className="badge" style={operatorBadgeStyle}>
                 {operator}
               </span>
             )}
 
-            {/* If they differ (TrainPal + Avanti etc) → 2 pills */}
             {!isSameBrand && (
               <>
                 {retailer && (
@@ -273,10 +380,7 @@ function TripCard({ trip }: { trip: Trip }) {
           </p>
 
           {/* depart info */}
-          <p
-            className="small"
-            style={{ margin: 0, color: "var(--fg-muted)" }}
-          >
+          <p className="small" style={{ margin: 0, color: "var(--fg-muted)" }}>
             {departLabel}
           </p>
         </div>
@@ -342,6 +446,11 @@ export default function TripsLive() {
     );
   }
 
+  const mergedTrips = useMemo(
+    () => mergeTrips(data.trips),
+    [data.trips]
+  );
+
   return (
     <div style={{ marginTop: 16 }}>
       {isValidating && (
@@ -368,7 +477,7 @@ export default function TripsLive() {
           gap: 12,
         }}
       >
-        {data.trips.map((trip) => (
+        {mergedTrips.map((trip) => (
           <TripCard key={trip.id} trip={trip} />
         ))}
       </ul>
