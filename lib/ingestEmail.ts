@@ -39,12 +39,6 @@ function extractJsonObject(raw: string): string {
   return text.slice(firstBrace, lastBrace + 1);
 }
 
-function cleanStr(v?: string | null): string | null {
-  if (!v) return null;
-  const t = v.trim();
-  return t.length ? t : null;
-}
-
 export async function ingestEmail({
   id,
   subject,
@@ -81,12 +75,12 @@ export async function ingestEmail({
       '  \"outbound_departure\"?: string\n' +
       "}\n\n" +
       "- Only set is_ticket = true if this clearly contains a UK train e-ticket or journey confirmation\n" +
-      "  (Trainline, TrainPal, National Rail, Avanti West Coast, West Midlands Railway, Northern, etc.).\n" +
+      "  (Trainline, TrainPal, National Rail, Avanti West Coast, West Midlands Railway, Great Western Railway, Northern, etc.).\n" +
+      "- Always try to fill provider, origin and destination. Use the from-address and subject line as hints.\n" +
       "- For TrainPal subjects like 'TrainPal: Booking Confirmation: Birmingham New Street ↔ Cannock',\n" +
-      "  set provider = the train operating company (e.g. 'West Midlands Railway'),\n" +
-      "  origin = 'Birmingham New Street', destination = 'Cannock'.\n" +
-      "- booking_ref is OPTIONAL. If you can't confidently find one, leave it empty or null.\n" +
-      "- depart_planned / outbound_departure should be an ISO-like datetime if possible; if unsure, leave empty.\n" +
+      "  set provider = 'TrainPal', origin = 'Birmingham New Street', destination = 'Cannock'.\n" +
+      "- depart_planned and outbound_departure SHOULD be in ISO 8601 format:\n" +
+      "  'YYYY-MM-DDTHH:MM:SSZ' (UTC). If you are unsure of the exact time, you may omit them.\n" +
       "- If it's marketing, receipts, general account stuff, or unclear, set is_ticket = false and give a clear ignore_reason.\n\n" +
       `EMAIL METADATA:\nEmail-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\nEMAIL BODY:\n${body}`,
   });
@@ -102,7 +96,7 @@ export async function ingestEmail({
   try {
     const jsonStr = extractJsonObject(rawText);
     parsed = JSON.parse(jsonStr) as ParseTrainEmailOutput;
-  } catch {
+  } catch (e) {
     // If the model somehow didn't give valid JSON, fail safely
     return {
       is_ticket: false,
@@ -110,40 +104,9 @@ export async function ingestEmail({
     };
   }
 
-  // ------------- Heuristics / fallbacks before gating -----------------
-
-  if (parsed.is_ticket) {
-    const lowerMeta = `${from} ${subject}`.toLowerCase();
-
-    // If provider missing, infer from metadata
-    if (!parsed.provider) {
-      if (lowerMeta.includes("crosscountry")) parsed.provider = "CrossCountry";
-      else if (lowerMeta.includes("northern")) parsed.provider = "Northern";
-      else if (lowerMeta.includes("great western railway") || lowerMeta.includes("gwr"))
-        parsed.provider = "Great Western Railway";
-      else if (lowerMeta.includes("west midlands railway"))
-        parsed.provider = "West Midlands Railway";
-      else if (lowerMeta.includes("avanti")) parsed.provider = "Avanti West Coast";
-    }
-
-    // If origin/destination missing, try to parse from subject
-    // e.g. "TrainPal: Booking Confirmation: Birmingham New Street ↔ Cannock"
-    // or   "TrainPal: Booking Confirmation: London Marylebone → Solihull"
-    if (!parsed.origin || !parsed.destination) {
-      const m =
-        subject.match(/Booking Confirmation:\s*(.+?)\s*[↔→-]\s*(.+)$/i) ||
-        subject.match(/Booking:\s*(.+?)\s*[↔→-]\s*(.+)$/i);
-
-      if (m) {
-        const subjOrigin = cleanStr(m[1]);
-        const subjDest = cleanStr(m[2]);
-        if (!parsed.origin && subjOrigin) parsed.origin = subjOrigin;
-        if (!parsed.destination && subjDest) parsed.destination = subjDest;
-      }
-    }
-  }
-
-  // 1) Not a ticket → ignore
+  // -------------------------------------------------------------------
+  // 1) If the model says "not a ticket", just respect that
+  // -------------------------------------------------------------------
   if (!parsed.is_ticket) {
     return {
       is_ticket: false,
@@ -151,34 +114,88 @@ export async function ingestEmail({
     };
   }
 
-  // Helper — require non-empty strings
+  // -------------------------------------------------------------------
+  // 2) Heuristics to fix missing provider / origin / destination
+  // -------------------------------------------------------------------
+  const fromLower = from.toLowerCase();
+  const subjectLower = subject.toLowerCase();
+
+  // Provider fallback from sender domain
+  if (!parsed.provider || !parsed.provider.trim()) {
+    if (fromLower.includes("trainpal")) {
+      parsed.provider = "TrainPal";
+    } else if (fromLower.includes("trainline")) {
+      parsed.provider = "Trainline";
+    } else if (fromLower.includes("gwr.com") || subjectLower.includes("great western")) {
+      parsed.provider = "Great Western Railway";
+    } else if (fromLower.includes("crosscountry")) {
+      parsed.provider = "CrossCountry";
+    } else if (fromLower.includes("northernrailway")) {
+      parsed.provider = "Northern";
+    } else if (fromLower.includes("chilternrailways")) {
+      parsed.provider = "Chiltern Railways";
+    } else if (fromLower.includes("avantiwestcoast")) {
+      parsed.provider = "Avanti West Coast";
+    } else if (fromLower.includes("westmidlandsrailway")) {
+      parsed.provider = "West Midlands Railway";
+    }
+  }
+
+  // Try to pull "A → B" or "A ↔ B" out of the *tail* of the subject line
+  const subjectTail = (subject.split(":").pop() || subject).trim();
+  const arrowMatch = subjectTail.match(/(.+?)\s*[↔→-]\s*(.+)/);
+
+  if (arrowMatch) {
+    const subOrigin = arrowMatch[1].trim();
+    const subDest = arrowMatch[2].trim();
+
+    if (!parsed.origin || !parsed.origin.trim()) {
+      parsed.origin = subOrigin;
+    }
+    if (!parsed.destination || !parsed.destination.trim()) {
+      parsed.destination = subDest;
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // 3) Gate: we only *require* provider + origin + destination
+  // -------------------------------------------------------------------
   const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
-  // 2) Lighter gate – we only *require* provider + origin + destination.
-  const hasBasicTrip =
-    requiredString(parsed.provider) &&
-    requiredString(parsed.origin) &&
-    requiredString(parsed.destination);
-
-  if (!hasBasicTrip) {
+  if (
+    !requiredString(parsed.provider) ||
+    !requiredString(parsed.origin) ||
+    !requiredString(parsed.destination)
+  ) {
     return {
       is_ticket: false,
       ignore_reason: "missing_basic_fields_for_dashboard",
     };
   }
 
-  // 3) Valid usable ticket → return strong typed result
+  // -------------------------------------------------------------------
+  // 4) Normalise fields & fallbacks so types stay happy
+  // -------------------------------------------------------------------
   const provider = parsed.provider!.trim();
   const origin = parsed.origin!.trim();
   const destination = parsed.destination!.trim();
 
-  const booking_ref = cleanStr(parsed.booking_ref);
+  const booking_ref =
+    (parsed.booking_ref && parsed.booking_ref.trim()) || "UNKNOWN";
+
   const depart_planned =
-    cleanStr(parsed.depart_planned) || cleanStr(parsed.outbound_departure);
+    (parsed.depart_planned && parsed.depart_planned.trim()) ||
+    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
+    "UNKNOWN";
+
   const outbound_departure =
-    cleanStr(parsed.outbound_departure) || cleanStr(parsed.depart_planned);
-  const arrive_planned = cleanStr(parsed.arrive_planned);
+    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
+    (parsed.depart_planned && parsed.depart_planned.trim()) ||
+    "UNKNOWN";
+
+  const arrive_planned =
+    (parsed.arrive_planned && parsed.arrive_planned.trim()) || null;
 
   return {
     is_ticket: true,
@@ -186,8 +203,8 @@ export async function ingestEmail({
     booking_ref,
     origin,
     destination,
-    depart_planned: depart_planned || null,
-    arrive_planned: arrive_planned || null,
-    outbound_departure: outbound_departure || null,
+    depart_planned,
+    arrive_planned,
+    outbound_departure,
   };
 }
