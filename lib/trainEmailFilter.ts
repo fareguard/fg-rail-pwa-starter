@@ -4,13 +4,9 @@ export type ParseTrainEmailOutput =
   | {
       is_ticket: true;
       ignore_reason?: string;
-
-      // who sent / sold it
       provider?: string;
-      retailer?: string;
-      operator?: string;
-
-      // journey details
+      retailer?: string;   // NEW
+      operator?: string;   // NEW
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -21,11 +17,9 @@ export type ParseTrainEmailOutput =
   | {
       is_ticket: false;
       ignore_reason: string;
-
       provider?: string;
-      retailer?: string;
-      operator?: string;
-
+      retailer?: string;   // NEW
+      operator?: string;   // NEW
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -33,6 +27,7 @@ export type ParseTrainEmailOutput =
       arrive_planned?: string;
       outbound_departure?: string;
     };
+
 
 export type ParsedTicketResult =
   | {
