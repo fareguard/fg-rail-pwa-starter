@@ -252,7 +252,7 @@ export async function ingestEmail({
       "- operator: the train operating company running the service (Avanti West Coast, West Midlands Railway, CrossCountry, Northern, Transport for Wales, etc.).\n\n" +
       "RULES:\n" +
       "- Only set is_ticket = true if this email clearly represents a BOOKED UK rail journey or e-ticket / booking confirmation.\n" +
-      "- Booking confirmations like \"Your GWR booking confirmation 9HFGG44C\" or\n" +
+      "- Booking confirmations like \"Your GWR booking confirmation\" or\n" +
       "  \"Confirmation of your South Western Railway booking\" MUST be treated as tickets\n" +
       "  if they describe a journey such as \"Journey: 1 Dawlish to Starcross\" or\n" +
       "  \"Journey: 1 Sunbury to Upper Halliford\" and an outward journey / departure time.\n" +
@@ -289,7 +289,6 @@ export async function ingestEmail({
   // 2) LLM says “not a ticket” or misses fields → try regex fallback
   // -----------------------------------------------------------------------
 
-  // Derive a provider-like thing for gating
   const providerLike =
     (parsed.operator && parsed.operator.trim()) ||
     (parsed.provider && parsed.provider.trim()) ||
@@ -308,8 +307,7 @@ export async function ingestEmail({
       return {
         is_ticket: false,
         ignore_reason:
-          parsed.ignore_reason ||
-          "missing_basic_fields_for_dashboard",
+          parsed.ignore_reason || "missing_basic_fields_for_dashboard",
       };
     }
     parsed = fb;
