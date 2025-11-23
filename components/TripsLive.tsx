@@ -1,7 +1,7 @@
 // components/TripsLive.tsx
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import useSWR from "swr";
 
 type Trip = {
@@ -16,6 +16,7 @@ type Trip = {
   status: string | null;
   is_ticket: boolean | null;
   created_at: string | null;
+  outbound_departure?: string | null;
 };
 
 type TripsResponse = {
@@ -26,6 +27,19 @@ type TripsResponse = {
 };
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
+
+// -------------------------------------------------------------
+// Sorting helpers
+// -------------------------------------------------------------
+
+type SortOrder = "latest" | "earliest";
+
+function safeTime(t: string | null | undefined): number {
+  if (!t) return 0;
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return 0;
+  return d.getTime();
+}
 
 // -------------------------------------------------------------
 // Helpers
@@ -491,6 +505,29 @@ function TripCard({ trip }: { trip: Trip }) {
 }
 
 // -------------------------------------------------------------
+// Button styles for sort toggle
+// -------------------------------------------------------------
+
+const buttonBase = {
+  borderRadius: 999,
+  border: "1px solid #e5e7eb",
+  padding: "4px 10px",
+  fontSize: 11,
+  textTransform: "uppercase" as const,
+  letterSpacing: "0.08em",
+  background: "#ffffff",
+  color: "var(--fg-muted)",
+  cursor: "pointer",
+};
+
+const activeButton = {
+  ...buttonBase,
+  background: "var(--fg-navy)",
+  color: "#ffffff",
+  borderColor: "var(--fg-navy)",
+};
+
+// -------------------------------------------------------------
 // Main component
 // -------------------------------------------------------------
 
@@ -502,6 +539,8 @@ export default function TripsLive() {
       refreshInterval: 60_000,
     },
   );
+
+  const [sortOrder, setSortOrder] = useState<SortOrder>("latest");
 
   if (error) {
     return (
@@ -529,6 +568,16 @@ export default function TripsLive() {
 
   const trips = useMemo(() => dedupeTrips(data.trips || []), [data.trips]);
 
+  const sortedTrips = useMemo(() => {
+    const copy = [...trips];
+    copy.sort((a, b) => {
+      const ta = safeTime(a.depart_planned || a.outbound_departure);
+      const tb = safeTime(b.depart_planned || b.outbound_departure);
+      return sortOrder === "latest" ? tb - ta : ta - tb;
+    });
+    return copy;
+  }, [trips, sortOrder]);
+
   if (!trips.length) {
     return (
       <p className="small" style={{ marginTop: 16, color: "var(--fg-muted)" }}>
@@ -555,6 +604,30 @@ export default function TripsLive() {
         </p>
       )}
 
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          marginBottom: 8,
+          gap: 8,
+        }}
+      >
+        <button
+          type="button"
+          style={sortOrder === "latest" ? activeButton : buttonBase}
+          onClick={() => setSortOrder("latest")}
+        >
+          Newest first
+        </button>
+        <button
+          type="button"
+          style={sortOrder === "earliest" ? activeButton : buttonBase}
+          onClick={() => setSortOrder("earliest")}
+        >
+          Oldest first
+        </button>
+      </div>
+
       <ul
         style={{
           padding: 0,
@@ -564,7 +637,7 @@ export default function TripsLive() {
           gap: 12,
         }}
       >
-        {trips.map((trip) => (
+        {sortedTrips.map((trip) => (
           <TripCard key={trip.id} trip={trip} />
         ))}
       </ul>
