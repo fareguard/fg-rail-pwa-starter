@@ -51,6 +51,7 @@ function extractJsonObject(raw: string): string {
 const DELAY_EMAIL_KEYWORDS = [
   "delay repay",
   "delayrepay",
+  "delay-repay",
   "compensation for your delayed",
   "compensation for your journey",
   "your claim has been approved",
@@ -66,6 +67,71 @@ const DELAY_EMAIL_KEYWORDS = [
 function looksLikeDelayEmail(subject: string, body: string): boolean {
   const text = `${subject} ${body}`.toLowerCase();
   return DELAY_EMAIL_KEYWORDS.some((k) => text.includes(k));
+}
+
+// ---------------------------------------------------------------------------
+// Special-case parser for GWR booking confirmations (noreply@gwr.com)
+// The LLM keeps being over-cautious here, so we just regex it.
+// ---------------------------------------------------------------------------
+type GwrParsed = {
+  booking_ref: string | null;
+  origin: string;
+  destination: string;
+  depart_planned: string | null;
+  arrive_planned: string | null;
+  operator: string;
+};
+
+function tryParseGwrTicket(
+  subject: string,
+  body: string
+): GwrParsed | null {
+  const lowerBody = body.toLowerCase();
+
+  if (!/outward journey:/i.test(body) || !/departs/i.test(body)) {
+    return null;
+  }
+
+  // Booking ref from subject or body
+  const refMatch =
+    subject.match(/booking confirmation\s+([A-Z0-9]{6,10})/i) ||
+    body.match(/reference[^A-Z0-9]*([A-Z0-9]{6,10})/i);
+
+  const booking_ref = refMatch ? refMatch[1] : null;
+
+  // Example pattern:
+  // "Outward journey: 28 Dec 2025
+  //  departs Swansea at 23:27 ... to station Neath arrives 23:39"
+  const journeyMatch = body.match(
+    /Outward journey:\s*([0-9]{1,2}\s+\w+\s+[0-9]{4})[\s\S]*?departs\s+([A-Za-z][A-Za-z ]+?)\s+at\s+(\d{1,2}:\d{2})[\s\S]*?\bto station\s+([A-Za-z][A-Za-z ]+?)\s+arrives\s+(\d{1,2}:\d{2})/i
+  );
+
+  if (!journeyMatch) {
+    return null;
+  }
+
+  const journeyDate = journeyMatch[1].trim();       // "28 Dec 2025"
+  const origin = journeyMatch[2].trim();            // "Swansea"
+  const depTime = journeyMatch[3].trim();           // "23:27"
+  const destination = journeyMatch[4].trim();       // "Neath"
+  const arrTime = journeyMatch[5].trim();           // "23:39"
+
+  const depart_planned = `${journeyDate} ${depTime}`;
+  const arrive_planned = `${journeyDate} ${arrTime}`;
+
+  // If the body mentions Transport for Wales, use that as operator.
+  const operator = /transport for wales/i.test(lowerBody)
+    ? "Transport for Wales"
+    : "GWR";
+
+  return {
+    booking_ref,
+    origin,
+    destination,
+    depart_planned,
+    arrive_planned,
+    operator,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +159,29 @@ export async function ingestEmail({
       is_ticket: false,
       ignore_reason: "delay_or_compensation_email",
     };
+  }
+
+  const fromLc = from.toLowerCase();
+
+  // 0.5) GWR booking confirmations – parse via regex and skip the LLM
+  if (fromLc.includes("@gwr.com")) {
+    const gwr = tryParseGwrTicket(subject, body);
+    if (gwr) {
+      return {
+        is_ticket: true,
+        provider: "GWR",
+        retailer: "GWR",
+        operator: gwr.operator,
+        booking_ref: gwr.booking_ref || "UNKNOWN",
+        origin: gwr.origin,
+        destination: gwr.destination,
+        // These are "raw" strings; safeTimestamp in route.ts will normalise them.
+        depart_planned: gwr.depart_planned,
+        arrive_planned: gwr.arrive_planned,
+        outbound_departure: gwr.depart_planned,
+      };
+    }
+    // fall through to LLM as a last resort
   }
 
   // 1) Ask the model to return STRICT JSON (no markdown, no prose)
@@ -127,11 +216,6 @@ export async function ingestEmail({
       "    * retailer = \"TrainPal\" or \"Trainline\" (etc.)\n" +
       "    * operator = e.g. \"West Midlands Railway\", \"Avanti West Coast\", \"CrossCountry\", \"Northern\", etc.\n" +
       "    * provider can be the same as retailer, or the operator – either is fine.\n" +
-      "- For GWR-style e-mails where the text says something like\n" +
-      "    \"Outward journey: 28 Dec 2025 departs Swansea at 23:27 travel by Train service provider Transport for Wales to Neath\",\n" +
-      "  you MUST set is_ticket = true, origin = \"Swansea\", destination = \"Neath\",\n" +
-      "  depart_planned = \"2025-12-28 23:27\" (or the closest parsable time string),\n" +
-      "  and operator = \"Transport for Wales\" (provider/retailer can be \"GWR\").\n" +
       "- Many operators put the actual barcode or PDF attachment separately. As long as the email body describes a booked journey,\n" +
       "  treat it as is_ticket = true.\n" +
       "- If the email is primarily about Delay Repay, compensation, or a refund for a journey that ALREADY happened\n" +
@@ -153,7 +237,7 @@ export async function ingestEmail({
   try {
     const jsonStr = extractJsonObject(rawText);
     parsed = JSON.parse(jsonStr) as ParseTrainEmailOutput;
-  } catch (e) {
+  } catch {
     // If the model somehow didn't give valid JSON, fail safely
     return {
       is_ticket: false,
@@ -161,7 +245,7 @@ export async function ingestEmail({
     };
   }
 
-  // 2) Not a ticket → ignore
+  // 2) Model says not a ticket → respect that
   if (!parsed.is_ticket) {
     return {
       is_ticket: false,
@@ -173,18 +257,31 @@ export async function ingestEmail({
   const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
+  // Clean basic strings
+  const origin = parsed.origin?.trim() || "";
+  const destination = parsed.destination?.trim() || "";
+
+  const departClean =
+    parsed.depart_planned?.trim() || parsed.outbound_departure?.trim() || "";
+  const outboundClean =
+    parsed.outbound_departure?.trim() || parsed.depart_planned?.trim() || "";
+  const arriveClean = parsed.arrive_planned?.trim() || "";
+
+  const retailerClean = parsed.retailer?.trim() || null;
+  const operatorClean = parsed.operator?.trim() || null;
+
   // Normalise provider-ish string for gating
   const providerLike =
-    (parsed.operator && parsed.operator.trim()) ||
+    (operatorClean && operatorClean) ||
     (parsed.provider && parsed.provider.trim()) ||
-    (parsed.retailer && parsed.retailer.trim()) ||
+    (retailerClean && retailerClean) ||
     null;
 
-  // 3) Lighter gate – we only *require* provider + origin + destination.
+  // 3) Basic trip requirement: provider-ish + origin + destination
   const hasBasicTrip =
     requiredString(providerLike) &&
-    requiredString(parsed.origin) &&
-    requiredString(parsed.destination);
+    requiredString(origin) &&
+    requiredString(destination);
 
   if (!hasBasicTrip) {
     return {
@@ -193,48 +290,35 @@ export async function ingestEmail({
     };
   }
 
-  // 4) Valid usable ticket → build a strongly-typed result
-  const operator =
-    (parsed.operator && parsed.operator.trim()) || null;
+  // 3.5) Extra safety: if we have NO departure time AT ALL, treat it as non-ticket.
+  // This kills TrainPal delay/update e-mails that mention a route but no time.
+  if (!departClean && !outboundClean) {
+    return {
+      is_ticket: false,
+      ignore_reason: "missing_departure_time",
+    };
+  }
 
-  const retailer =
-    (parsed.retailer && parsed.retailer.trim()) || null;
-
+  // 4) Valid usable ticket → return strong typed result
   const provider =
-    operator ||
+    operatorClean ||
     (parsed.provider && parsed.provider.trim()) ||
-    retailer ||
+    retailerClean ||
     "UNKNOWN";
-
-  const origin = parsed.origin!.trim();
-  const destination = parsed.destination!.trim();
 
   const booking_ref =
     (parsed.booking_ref && parsed.booking_ref.trim()) || "UNKNOWN";
 
-  const depart_planned =
-    (parsed.depart_planned && parsed.depart_planned.trim()) ||
-    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
-    null;
-
-  const outbound_departure =
-    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
-    (parsed.depart_planned && parsed.depart_planned.trim()) ||
-    null;
-
-  const arrive_planned =
-    (parsed.arrive_planned && parsed.arrive_planned.trim()) || null;
-
   return {
     is_ticket: true,
     provider,
-    retailer,
-    operator,
+    retailer: retailerClean,
+    operator: operatorClean,
     booking_ref,
     origin,
     destination,
-    depart_planned,
-    arrive_planned,
-    outbound_departure,
+    depart_planned: departClean || null,
+    arrive_planned: arriveClean || null,
+    outbound_departure: outboundClean || null,
   };
 }
