@@ -193,16 +193,18 @@ export async function ingestEmail({
     };
   }
 
-  // 4) Valid usable ticket → return strong typed result
-  //    Fill in missing optional fields with safe fallbacks so types stay happy.
-  const provider =
-    (parsed.operator && parsed.operator.trim()) ||
-    (parsed.provider && parsed.provider.trim()) ||
-    (parsed.retailer && parsed.retailer.trim()) ||
-    "UNKNOWN";
+  // 4) Valid usable ticket → build a strongly-typed result
+  const operator =
+    (parsed.operator && parsed.operator.trim()) || null;
 
   const retailer =
-    (parsed.retailer && parsed.retailer.trim()) || undefined;
+    (parsed.retailer && parsed.retailer.trim()) || null;
+
+  const provider =
+    operator ||
+    (parsed.provider && parsed.provider.trim()) ||
+    retailer ||
+    "UNKNOWN";
 
   const origin = parsed.origin!.trim();
   const destination = parsed.destination!.trim();
@@ -213,21 +215,21 @@ export async function ingestEmail({
   const depart_planned =
     (parsed.depart_planned && parsed.depart_planned.trim()) ||
     (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
-    "UNKNOWN";
+    null;
 
   const outbound_departure =
     (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
     (parsed.depart_planned && parsed.depart_planned.trim()) ||
-    "UNKNOWN";
+    null;
 
   const arrive_planned =
     (parsed.arrive_planned && parsed.arrive_planned.trim()) || null;
 
-  // We only expose provider in ParsedTicketResult as `provider`.
-  // Retailer/operator are stored via route.ts using the raw parsed object.
   return {
     is_ticket: true,
     provider,
+    retailer,
+    operator,
     booking_ref,
     origin,
     destination,
