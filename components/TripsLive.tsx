@@ -315,6 +315,66 @@ function TripCard({ trip }: { trip: Trip }) {
     };
   }
 
+  if (operator === "LNER") {
+    operatorBadgeStyle = {
+      background: "rgb(206, 19, 46)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
+  if (operator === "Greater Anglia") {
+    operatorBadgeStyle = {
+      background: "rgb(215, 4, 40)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
+  if (operator === "South Western Railway") {
+    operatorBadgeStyle = {
+      background: "rgb(2, 35, 81)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
+  if (operator === "ScotRail") {
+    operatorBadgeStyle = {
+      background: "rgb(0, 31, 91)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
+  if (operator === "GWR") {
+    operatorBadgeStyle = {
+      background: "rgb(10, 45, 38)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
   const retailerBadgeStyle: any = {
     background: "#f4f4f5",
     color: "#444",
