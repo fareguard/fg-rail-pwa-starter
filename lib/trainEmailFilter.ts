@@ -1,5 +1,4 @@
 // lib/trainEmailFilter.ts
-// CLEAN, GENERAL, UK-WIDE VERSION (no duplication, no hacks)
 
 export type ParseTrainEmailOutput =
   | {
@@ -33,12 +32,16 @@ export type ParsedTicketResult =
   | {
       is_ticket: true;
       ignore_reason?: undefined;
+
       provider: string;
       retailer: string | null;
       operator: string | null;
+
       booking_ref: string;
       origin: string;
       destination: string;
+
+      // we allow null here – UI will show "Departs: —"
       depart_planned: string | null;
       arrive_planned: string | null;
       outbound_departure: string | null;
@@ -49,109 +52,106 @@ export type ParsedTicketResult =
     };
 
 // ---------------------------------------------------------------------------
-// 1) Known legitimate sender domains
+// Strong allowlist of senders. If the "from" address contains any of these
+// fragments, we treat it as a rail email without needing "train"/"rail" words.
 // ---------------------------------------------------------------------------
-
 export const ALLOWED_SENDER_FRAGMENTS = [
-  // Aggregators
-  "trainline.",
-  "trainpal.",
-  "raileasy.",
+  // Aggregators / apps
+  "trainline.com",
+  "info.thetrainline.com",
+  "trainpal.com",
 
-  // UK Train Operators (TOCs)
-  "avantiwestcoast.",
-  "lner.",
-  "gwr.",
-  "southeasternrailway.",
-  "southernrailway.",
-  "swrailway.",              // South Western Railway
-  "southwesternrailway.",
-  "northernrailway.",
-  "scotrail.co.uk",
-  "tpexpress.co.uk",
-  "chilternrailways.",
-  "crosscountrytrains.",
-  "merseyrail.org",
-  "c2c-online.",
-  "thameslinkrailway.",
-  "transportforwales",
-  "tfwrail.",
-  "gatwickexpress.",
-  "heathrowexpress.",
+  // Common shared booking platform for several TOCs
+  "trainsfares.co.uk", // ScotRail, Greater Anglia, Northern, etc
+
+  // Individual TOCs / operators
+  "avantiwestcoast.co.uk",
+  "lner.co.uk",
+  "gwr.com",
+  "gwrmail.com",
+  "tfwrail.wales",
+  "transportforwales.com",
+  "chilternrailways.co.uk",
+  "northernrailway.co.uk",
+  "southwesternrailway.com",
+  "scotrail",
+  "greateranglia",
+  "c2c-online.co.uk",
+  "thameslinkrailway.com",
+  "crosscountrytrains.co.uk",
+  "tfl.gov.uk", // if you want London travel stuff
 ];
 
-// ---------------------------------------------------------------------------
-// 2) Auto-REJECT words (marketing, payments, etc.)
-// ---------------------------------------------------------------------------
-
+// Obvious non-train merchants / stuff we NEVER want
 export const EXCLUDE_KEYWORDS = [
-  "receipt",
-  "payment",
-  "invoice",
-  "booking.com",
   "costa",
   "starbucks",
+  "uber",
   "ubereats",
   "just eat",
   "deliveroo",
   "hotel",
   "airbnb",
+  "booking.com",
+  "payment receipt",
+  "invoice",
   "subscription",
 ];
 
-// ---------------------------------------------------------------------------
-// 3) Ticket indicator keywords (broad)
-// ---------------------------------------------------------------------------
-
+// Phrases that usually indicate a rail ticket / journey
 export const RAIL_KEYWORDS = [
   "e-ticket",
   "eticket",
   "your ticket",
-  "booking reference",
-  "booking confirmation",
+  "ticket for",
   "your journey",
   "outward journey",
   "return journey",
-  "seat",
-  "coach",
+  "departure",
+  "arrival",
   "platform",
+  "coach",
+  "carriage",
+  "seat",
   "railcard",
-  "depart",
-  "arrive",
-  "to ",
-  "→",                    // operator emails often use this
+  "train to",
+  "train from",
+  "booking confirmation",
+  "your booking reference",
 ];
 
-// ---------------------------------------------------------------------------
-// 4) MAIN FILTER
-// ---------------------------------------------------------------------------
-
-export function isTrainEmail(input: {
+type TrainEmailCheckInput = {
   from?: string | null;
   subject?: string | null;
   body?: string | null;
-}): boolean {
+};
+
+export function isTrainEmail(input: TrainEmailCheckInput): boolean {
   const from = (input.from || "").toLowerCase();
   const subject = (input.subject || "").toLowerCase();
   const body = (input.body || "").toLowerCase();
 
   const text = `${subject} ${body}`;
 
-  // (A) If sender is a known TOC/retailer → ALWAYS allow
+  // 1) Strong allow by known sender domains
   if (ALLOWED_SENDER_FRAGMENTS.some((frag) => from.includes(frag))) {
     return true;
   }
 
-  // (B) Hard reject obvious non-ticket emails
+  // 2) Quick hard reject for obvious non-train stuff
   if (EXCLUDE_KEYWORDS.some((word) => text.includes(word))) {
     return false;
   }
 
-  // (C) Soft allow if typical ticket wording appears
-  if (RAIL_KEYWORDS.some((word) => text.includes(word))) {
-    return true;
+  // 3) Must mention train/rail somewhere for unknown senders
+  if (!text.includes("train") && !text.includes("rail")) {
+    return false;
   }
 
-  // (D) Otherwise reject
-  return false;
+  // 4) And must look like a ticket / journey, not just a random mention
+  if (!RAIL_KEYWORDS.some((word) => text.includes(word))) {
+    return false;
+  }
+
+  return true;
 }
