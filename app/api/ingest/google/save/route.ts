@@ -9,6 +9,8 @@ import { ingestEmail } from "@/lib/ingestEmail";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+const CONCURRENCY = 5;
+
 function b64ToUtf8(b64: string) {
   const s = b64.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(s, "base64").toString("utf-8");
@@ -102,7 +104,7 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
 
 // ------------------------------------------------------------------
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const supa = getSupabaseAdmin();
 
@@ -129,203 +131,237 @@ export async function GET() {
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
-    let pageToken: string | undefined = undefined;
-    const messageIds: string[] = [];
-    const MAX_PAGES = 3;
+    const url = new URL(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+    );
+    url.searchParams.set("q", SEARCH_QUERY);
+    url.searchParams.set("maxResults", "50");
 
-    for (let i = 0; i < MAX_PAGES; i++) {
-      const url = new URL(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages"
-      );
-      url.searchParams.set("q", SEARCH_QUERY);
-      url.searchParams.set("maxResults", "50");
-      if (pageToken) url.searchParams.set("pageToken", pageToken);
-
-      const list = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }).then((x) => x.json());
-
-      if (Array.isArray(list.messages)) {
-        for (const m of list.messages) {
-          if (m?.id) messageIds.push(m.id);
-        }
-      }
-
-      pageToken = list.nextPageToken;
-      if (!pageToken) break;
+    // Optional pageToken passed in as query param
+    const reqUrl = new URL(req.url);
+    const requestPageToken = reqUrl.searchParams.get("pageToken");
+    if (requestPageToken) {
+      url.searchParams.set("pageToken", requestPageToken);
     }
+
+    const list = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }).then((x) => x.json());
+
+    const messageIds: string[] = Array.isArray(list.messages)
+      ? list.messages
+          .map((m: any) => m?.id)
+          .filter((id: string | undefined) => !!id)
+      : [];
+
+    const scanned = messageIds.length;
 
     if (!messageIds.length) {
       return NextResponse.json({
         ok: true,
+        scanned: 0,
         saved_raw: 0,
         saved_trips: 0,
-        scanned: 0,
+        nextPageToken: list.nextPageToken ?? null,
         user_email,
         trip_errors: [],
       });
     }
 
-    // 3) Hydrate, store raw, parse trips
+    // 3) Hydrate, store raw, parse trips (with batched concurrency)
     let savedRaw = 0;
     let savedTrips = 0;
-    let scanned = 0;
     const tripErrors: { email_id: string; message: string }[] = [];
 
-    for (const id of messageIds) {
-      scanned++;
+    // Chunk message IDs so we only have CONCURRENCY in flight at once
+    const chunks: string[][] = [];
+    for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
+      chunks.push(messageIds.slice(i, i + CONCURRENCY));
+    }
 
-      const fullMsg = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
-        { headers: { Authorization: `Bearer ${accessToken}` } }
-      ).then((x) => x.json());
+    for (const chunk of chunks) {
+      const results = await Promise.allSettled(
+        chunk.map(async (id) => {
+          // ----------------------------------------------------
+          // Step 4: skip messages we've already processed
+          // ----------------------------------------------------
+          const { data: existing } = await supa
+            .from("debug_llm_outputs")
+            .select("id")
+            .eq("email_id", id)
+            .limit(1)
+            .maybeSingle();
 
-      const subject = headerValue(fullMsg.payload, "Subject") || "";
-      const from = headerValue(fullMsg.payload, "From") || "";
-      const body = extractBody(fullMsg.payload);
-      const snippet = fullMsg.snippet || "";
+          if (existing) {
+            // Already parsed this email; skip heavy work
+            return;
+          }
 
-      // ---- Save raw email ----
-      const { error: rawErr } = await supa.from("raw_emails").upsert(
-        {
-          provider: "google",
-          user_email,
-          message_id: id,
-          subject,
-          sender: from,
-          snippet,
-          body_plain: body || null,
-        },
-        { onConflict: "provider,message_id" } as any
+          // Fetch full Gmail message
+          const fullMsg = await fetch(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          ).then((x) => x.json());
+
+          const subject = headerValue(fullMsg.payload, "Subject") || "";
+          const from = headerValue(fullMsg.payload, "From") || "";
+          const body = extractBody(fullMsg.payload);
+          const snippet = fullMsg.snippet || "";
+
+          // ---- Save raw email (idempotent upsert) ----
+          const { error: rawErr } = await supa.from("raw_emails").upsert(
+            {
+              provider: "google",
+              user_email,
+              message_id: id,
+              subject,
+              sender: from,
+              snippet,
+              body_plain: body || null,
+            },
+            { onConflict: "provider,message_id" } as any
+          );
+
+          if (!rawErr) savedRaw++;
+
+          // ---- Filter non-train emails BEFORE parsing ----
+          if (!isTrainEmail({ from, subject, body })) {
+            return;
+          }
+
+          // ---- Call ingestEmail (LLM parser + gating) ----
+          const parsed: any = await ingestEmail({
+            id,
+            from,
+            subject,
+            body_plain: body,
+            snippet,
+          });
+
+          // ---- Log into debug_llm_outputs for inspection ----
+          try {
+            await supa.from("debug_llm_outputs").insert({
+              email_id: id,
+              from_addr: from,
+              subject,
+              raw_input: body || snippet || "",
+              raw_output: JSON.stringify(parsed),
+            });
+          } catch {
+            // swallow debug errors
+          }
+
+          // If ingestEmail says "not a usable ticket", skip
+          if (!parsed?.is_ticket) {
+            return;
+          }
+
+          // -------------------------------
+          // Normalised fields for insert
+          // -------------------------------
+          const operatorRaw = parsed.operator ?? parsed.provider ?? null;
+          const operator = normaliseOperatorName(operatorRaw);
+          const retailer = parsed.retailer ?? parsed.provider ?? null;
+
+          const departStr =
+            parsed.depart_planned || parsed.outbound_departure || null;
+          const arriveStr = parsed.arrive_planned || null;
+          const outboundStr =
+            parsed.outbound_departure || parsed.depart_planned || null;
+
+          const departIso = safeTimestamp(departStr);
+          const arriveIso = safeTimestamp(arriveStr);
+          const outboundIso = safeTimestamp(outboundStr);
+
+          // -------------------------------------------
+          // De-duplication: same booking_ref + route
+          // -------------------------------------------
+          let existingTrip:
+            | { id: string; depart_planned: string | null }
+            | null = null;
+
+          if (parsed.booking_ref && parsed.origin && parsed.destination) {
+            const { data: existingRows, error: existingErr } = await supa
+              .from("trips")
+              .select("id, depart_planned")
+              .eq("user_email", user_email)
+              .eq("booking_ref", parsed.booking_ref)
+              .eq("origin", parsed.origin)
+              .eq("destination", parsed.destination)
+              .limit(1);
+
+            if (!existingErr && existingRows && existingRows.length) {
+              existingTrip = existingRows[0] as any;
+            }
+          }
+
+          // If we already have a trip, keep the earliest depart_planned
+          let finalDepart = departIso;
+          if (existingTrip?.depart_planned && finalDepart) {
+            const existingDate = new Date(existingTrip.depart_planned);
+            const newDate = new Date(finalDepart);
+            if (existingDate <= newDate) {
+              finalDepart = existingTrip.depart_planned;
+            }
+          }
+
+          const baseRecord = {
+            user_id: userId,
+            user_email,
+            retailer,
+            email_id: id,
+            operator,
+            booking_ref: parsed.booking_ref || null,
+            origin: parsed.origin || null,
+            destination: parsed.destination || null,
+            depart_planned: finalDepart,
+            arrive_planned: arriveIso,
+            outbound_departure: outboundIso,
+            is_ticket: true,
+            pnr_json: parsed,
+            source: "gmail",
+          };
+
+          let tripErr: any = null;
+
+          if (existingTrip) {
+            const { error } = await supa
+              .from("trips")
+              .update(baseRecord)
+              .eq("id", existingTrip.id);
+            tripErr = error;
+          } else {
+            const { error } = await supa.from("trips").insert(baseRecord);
+            tripErr = error;
+          }
+
+          if (tripErr) {
+            tripErrors.push({
+              email_id: id,
+              message: tripErr.message ?? String(tripErr),
+            });
+          } else {
+            savedTrips++;
+          }
+        })
       );
 
-      if (!rawErr) savedRaw++;
-
-      // ---- Filter non-train emails BEFORE parsing ----
-      if (!isTrainEmail({ from, subject, body })) {
-        continue;
-      }
-
-      // ---- Call ingestEmail (LLM parser + gating) ----
-      const parsed: any = await ingestEmail({
-        id,
-        from,
-        subject,
-        body_plain: body,
-        snippet,
-      });
-
-      // ---- Log into debug_llm_outputs for inspection ----
-      try {
-        await supa.from("debug_llm_outputs").insert({
-          email_id: id,
-          from_addr: from,
-          subject,
-          raw_input: body || snippet || "",
-          raw_output: JSON.stringify(parsed),
-        });
-      } catch {
-        // swallow debug errors
-      }
-
-      // If ingestEmail says "not a usable ticket", skip
-      if (!parsed?.is_ticket) {
-        continue;
-      }
-
-      // -------------------------------
-      // Normalised fields for insert
-      // -------------------------------
-      const operatorRaw = parsed.operator ?? parsed.provider ?? null;
-      const operator = normaliseOperatorName(operatorRaw);
-      const retailer = parsed.retailer ?? parsed.provider ?? null;
-
-      const departStr =
-        parsed.depart_planned || parsed.outbound_departure || null;
-      const arriveStr = parsed.arrive_planned || null;
-      const outboundStr =
-        parsed.outbound_departure || parsed.depart_planned || null;
-
-      const departIso = safeTimestamp(departStr);
-      const arriveIso = safeTimestamp(arriveStr);
-      const outboundIso = safeTimestamp(outboundStr);
-
-      // -------------------------------------------
-      // De-duplication: same booking_ref + route
-      // -------------------------------------------
-      let existingTrip: { id: string; depart_planned: string | null } | null =
-        null;
-
-      if (parsed.booking_ref && parsed.origin && parsed.destination) {
-        const { data: existingRows, error: existingErr } = await supa
-          .from("trips")
-          .select("id, depart_planned")
-          .eq("user_email", user_email)
-          .eq("booking_ref", parsed.booking_ref)
-          .eq("origin", parsed.origin)
-          .eq("destination", parsed.destination)
-          .limit(1);
-
-        if (!existingErr && existingRows && existingRows.length) {
-          existingTrip = existingRows[0] as any;
+      // Optional: log rejected ones somewhere central
+      for (const r of results) {
+        if (r.status === "rejected") {
+          console.error("Error processing Gmail message:", r.reason);
+          // You could also insert into a Supabase debug table here if you want
         }
-      }
-
-      // If we already have a trip, keep the earliest depart_planned
-      let finalDepart = departIso;
-      if (existingTrip?.depart_planned && finalDepart) {
-        const existingDate = new Date(existingTrip.depart_planned);
-        const newDate = new Date(finalDepart);
-        if (existingDate <= newDate) {
-          finalDepart = existingTrip.depart_planned;
-        }
-      }
-
-      const baseRecord = {
-        user_id: userId,
-        user_email,
-        retailer,
-        email_id: id,
-        operator,
-        booking_ref: parsed.booking_ref || null,
-        origin: parsed.origin || null,
-        destination: parsed.destination || null,
-        depart_planned: finalDepart,
-        arrive_planned: arriveIso,
-        outbound_departure: outboundIso,
-        is_ticket: true,
-        pnr_json: parsed,
-        source: "gmail",
-      };
-
-      let tripErr: any = null;
-
-      if (existingTrip) {
-        const { error } = await supa
-          .from("trips")
-          .update(baseRecord)
-          .eq("id", existingTrip.id);
-        tripErr = error;
-      } else {
-        const { error } = await supa.from("trips").insert(baseRecord);
-        tripErr = error;
-      }
-
-      if (tripErr) {
-        tripErrors.push({
-          email_id: id,
-          message: tripErr.message ?? String(tripErr),
-        });
-      } else {
-        savedTrips++;
       }
     }
 
+    // Step 3: return something fast + page token for caller
     return NextResponse.json({
       ok: true,
+      scanned,
       saved_raw: savedRaw,
       saved_trips: savedTrips,
-      scanned,
+      nextPageToken: list.nextPageToken ?? null,
       user_email,
       trip_errors: tripErrors,
     });
