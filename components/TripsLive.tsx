@@ -354,20 +354,22 @@ function TripCard({ trip }: { trip: Trip }) {
               </span>
             )}
 
-            {!isSameBrand && (
-              <>
-                {retailer && (
-                  <span className="badge" style={retailerBadgeStyle}>
-                    {retailer}
-                  </span>
-                )}
-                {operator && (
-                  <span className="badge" style={operatorBadgeStyle}>
-                    {operator}
-                  </span>
-                )}
-              </>
-            )}
+          {/* If they differ (TrainPal + Avanti etc) → 2 pills (operator first) */}
+          {!isSameBrand && (
+            <>
+              {operator && (
+                <span className="badge" style={operatorBadgeStyle}>
+                  {operator}
+                </span>
+              )}
+              {retailer && (
+                <span className="badge" style={retailerBadgeStyle}>
+                  {retailer}
+                </span>
+              )}
+            </>
+          )}
+
 
             {isEticket && (
               <span
