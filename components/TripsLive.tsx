@@ -1,7 +1,7 @@
 // components/TripsLive.tsx
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import useSWR from "swr";
 
 type Trip = {
@@ -452,22 +452,21 @@ function TripCard({ trip }: { trip: Trip }) {
               </span>
             )}
 
-          {/* If they differ (TrainPal + Avanti etc) → 2 pills (operator first) */}
-          {!isSameBrand && (
-            <>
-              {operator && (
-                <span className="badge" style={operatorBadgeStyle}>
-                  {operator}
-                </span>
-              )}
-              {retailer && (
-                <span className="badge" style={retailerBadgeStyle}>
-                  {retailer}
-                </span>
-              )}
-            </>
-          )}
-
+            {/* If they differ (TrainPal + Avanti etc) → 2 pills (operator first) */}
+            {!isSameBrand && (
+              <>
+                {operator && (
+                  <span className="badge" style={operatorBadgeStyle}>
+                    {operator}
+                  </span>
+                )}
+                {retailer && (
+                  <span className="badge" style={retailerBadgeStyle}>
+                    {retailer}
+                  </span>
+                )}
+              </>
+            )}
 
             {isEticket && (
               <span
@@ -552,7 +551,38 @@ export default function TripsLive() {
     },
   );
 
+  // 1) Safe default — no localStorage on initial render
   const [sortOrder, setSortOrder] = useState<SortOrder>("latest");
+
+  // 2) On mount, read stored preference (client only)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = window.localStorage.getItem("fareguard-sort");
+
+      if (stored === "latest" || stored === "earliest") {
+        setSortOrder(stored);
+      }
+      // in case you previously saved "newest"/"oldest"
+      else if (stored === "newest") {
+        setSortOrder("latest");
+      } else if (stored === "oldest") {
+        setSortOrder("earliest");
+      }
+    } catch {
+      // ignore localStorage errors
+    }
+  }, []);
+
+  // 3) Persist whenever it changes
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("fareguard-sort", sortOrder);
+    } catch {
+      // ignore
+    }
+  }, [sortOrder]);
 
   if (error) {
     return (
