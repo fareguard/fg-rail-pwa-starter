@@ -29,12 +29,16 @@ async function refreshWithGoogle(refresh_token: string) {
 
   const json = await res.json();
   if (!res.ok) {
-    throw new Error(`Google refresh failed: ${res.status} ${JSON.stringify(json)}`);
+    throw new Error(
+      `Google refresh failed: ${res.status} ${JSON.stringify(json)}`
+    );
   }
   return json;
 }
 
-export async function getFreshAccessToken(user_email: string): Promise<string> {
+export async function getFreshAccessToken(
+  user_email: string
+): Promise<string> {
   const supa = getSupabaseAdmin();
 
   // Pull latest row for this email
@@ -53,6 +57,7 @@ export async function getFreshAccessToken(user_email: string): Promise<string> {
   const row = data[0] as OAuthRow;
 
   const now = Math.floor(Date.now() / 1000);
+
   // If valid and not near expiry (30s buffer), use it
   if (row.access_token && row.expires_at && row.expires_at > now + 30) {
     return row.access_token;
@@ -66,11 +71,13 @@ export async function getFreshAccessToken(user_email: string): Promise<string> {
   const refreshed = await refreshWithGoogle(row.refresh_token);
 
   const newAccess = refreshed.access_token as string | undefined;
-  const newExpiresIn = typeof refreshed.expires_in === "number" ? refreshed.expires_in : null;
+  const newExpiresIn =
+    typeof refreshed.expires_in === "number" ? refreshed.expires_in : null;
   const newExpiresAt = newExpiresIn ? now + newExpiresIn : null;
 
   // NOTE: Google may rotate refresh_token and return a new one.
-  const rotatedRefresh = (refreshed.refresh_token as string | undefined) ?? row.refresh_token;
+  const rotatedRefresh =
+    (refreshed.refresh_token as string | undefined) ?? row.refresh_token;
 
   await supa
     .from("oauth_staging")
