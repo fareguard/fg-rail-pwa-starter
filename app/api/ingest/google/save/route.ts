@@ -11,6 +11,10 @@ export const runtime = "nodejs";
 
 const CONCURRENCY = 5;
 
+// ------------------------------------------------------------
+// Base64 helpers
+// ------------------------------------------------------------
+
 function b64ToUtf8(b64: string) {
   const s = b64.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(s, "base64").toString("utf-8");
@@ -21,34 +25,76 @@ function decodePart(part: any): string {
   return b64ToUtf8(String(part.body.data));
 }
 
+// ------------------------------------------------------------
+// Extract the *full* body text (plain + HTML) from a Gmail payload
+// We concatenate all text/plain and text/html parts rather than
+// just taking the first one (GWR/SWR/ScotRail style templates
+// often split content across parts).
+// ------------------------------------------------------------
+
 function extractBody(payload: any): string {
   if (!payload) return "";
 
-  const mime = payload.mimeType || "";
+  const parts: any[] = [];
 
-  if (mime.startsWith("text/plain")) return decodePart(payload);
+  function walk(part: any) {
+    if (!part) return;
+    if (part.parts && part.parts.length) {
+      part.parts.forEach(walk);
+    } else if (part.body && part.body.data) {
+      parts.push(part);
+    }
+  }
 
-  if (mime.startsWith("text/html")) {
-    const html = decodePart(payload);
-    return html
+  walk(payload);
+
+  let plainChunks: string[] = [];
+  let htmlChunks: string[] = [];
+
+  for (const part of parts) {
+    const mime = (part.mimeType || "").toLowerCase();
+    const text = decodePart(part);
+    if (!text) continue;
+
+    if (mime.startsWith("text/plain")) {
+      plainChunks.push(text);
+    } else if (mime.startsWith("text/html")) {
+      htmlChunks.push(text);
+    }
+  }
+
+  let plain = plainChunks.join("\n\n");
+  let htmlRaw = htmlChunks.join("\n\n");
+
+  // Fallback: sometimes payload.body.data has everything
+  if (!plain && !htmlRaw && payload.body?.data) {
+    const raw = decodePart(payload);
+    const mime = (payload.mimeType || "").toLowerCase();
+    if (mime.startsWith("text/plain")) {
+      plain = raw;
+    } else if (mime.startsWith("text/html")) {
+      htmlRaw = raw;
+    }
+  }
+
+  if (htmlRaw) {
+    const htmlStripped = htmlRaw
       .replace(/<style[\s\S]*?<\/style>/gi, "")
       .replace(/<script[\s\S]*?<\/script>/gi, "")
       .replace(/<[^>]+>/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
+
+    if (!plain) {
+      plain = htmlStripped;
+    } else {
+      // keep HTML content too – some operators only put journey
+      // details in the HTML part.
+      plain = `${plain}\n\n${htmlStripped}`;
+    }
   }
 
-  let plain = "";
-  let html = "";
-
-  for (const p of payload.parts || []) {
-    const t = extractBody(p);
-    if (!t) continue;
-    if ((p.mimeType || "").startsWith("text/plain") && !plain) plain = t;
-    if ((p.mimeType || "").startsWith("text/html") && !html) html = t;
-  }
-
-  return plain || html || "";
+  return plain.trim();
 }
 
 function headerValue(payload: any, name: string): string | undefined {
@@ -59,7 +105,7 @@ function headerValue(payload: any, name: string): string | undefined {
 }
 
 // ------------------------------------------------------------
-// Helpers
+// Helpers used for normalising trip rows
 // ------------------------------------------------------------
 
 function safeTimestamp(value: string | null | undefined): string | null {
@@ -159,7 +205,7 @@ export async function GET(req: Request) {
     if (!messageIds.length) {
       return NextResponse.json({
         ok: true,
-        scanned: 0,
+       scanned: 0,
         saved_raw: 0,
         saved_trips: 0,
         nextPageToken: list.nextPageToken ?? null,
@@ -346,11 +392,9 @@ export async function GET(req: Request) {
         })
       );
 
-      // Optional: log rejected ones somewhere central
       for (const r of results) {
         if (r.status === "rejected") {
           console.error("Error processing Gmail message:", r.reason);
-          // You could also insert into a Supabase debug table here if you want
         }
       }
     }
