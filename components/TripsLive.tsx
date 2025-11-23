@@ -401,6 +401,18 @@ function TripCard({ trip }: { trip: Trip }) {
     };
   }
 
+  if (operator === "c2c") {
+    operatorBadgeStyle = {
+      background: "rgb(182, 28, 140)",
+      color: "#FFFFFF",
+      borderRadius: "9999px",
+      padding: "3px 11px",
+      fontWeight: 600,
+      fontSize: "0.8rem",
+      letterSpacing: "0.003em",
+    };
+  }
+
   const retailerBadgeStyle: any = {
     background: "#f4f4f5",
     color: "#444",
