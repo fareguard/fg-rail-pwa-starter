@@ -1,12 +1,13 @@
 // lib/trainEmailFilter.ts
+// CLEAN, GENERAL, UK-WIDE VERSION (no duplication, no hacks)
 
 export type ParseTrainEmailOutput =
   | {
       is_ticket: true;
       ignore_reason?: string;
       provider?: string;
-      retailer?: string;   // NEW
-      operator?: string;   // NEW
+      retailer?: string;
+      operator?: string;
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -18,8 +19,8 @@ export type ParseTrainEmailOutput =
       is_ticket: false;
       ignore_reason: string;
       provider?: string;
-      retailer?: string;   // NEW
-      operator?: string;   // NEW
+      retailer?: string;
+      operator?: string;
       booking_ref?: string;
       origin?: string;
       destination?: string;
@@ -28,21 +29,16 @@ export type ParseTrainEmailOutput =
       outbound_departure?: string;
     };
 
-
 export type ParsedTicketResult =
   | {
       is_ticket: true;
       ignore_reason?: undefined;
-
       provider: string;
       retailer: string | null;
       operator: string | null;
-
       booking_ref: string;
       origin: string;
       destination: string;
-
-      // we allow null here – UI will show "Departs: —"
       depart_planned: string | null;
       arrive_planned: string | null;
       outbound_departure: string | null;
@@ -52,319 +48,110 @@ export type ParsedTicketResult =
       ignore_reason: string;
     };
 
-// Known sender fragments – strong allow
+// ---------------------------------------------------------------------------
+// 1) Known legitimate sender domains
+// ---------------------------------------------------------------------------
+
 export const ALLOWED_SENDER_FRAGMENTS = [
-  // Aggregators / apps
-  "trainline.com",
-  "trainpal.com",
-
-  // TOCs / rail operators (add/remove as needed)
-  "avantiwestcoast.co.uk",
-  "lner.co.uk",
-  "gwr.com",                // Great Western Railway
-  "tfwrail.wales",          // Transport for Wales
-  "transportforwales.com",
-  "gwrmail.com",
-
-  "gwr", // belt-and-braces – covers some odd From: variations
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  // others
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-  "gwr.com", // safe if duplicated; it's just a substring match
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  // original list continues
-  "gwr.com", // (harmless if repeated)
-  "gwrmail.com",
-  "gwrmail.co.uk",
-
-  "gwr.com", // just in case
-  "gwrmail.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  // your previous domains moved down so we don’t lose them:
-  "gwr.com",
-  "gwrmail.com",
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  // (you can clean this list up – the important bit is that
-  //  “gwr.com” and TfW domains are present at least once.)
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  "gwr.com",
-  "gwrmail.com",
-
-  // original:
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  "gwr.com",
-
-  // existing TOCs
-  "gwr.com",
-  "chilternrailways.co.uk",
-  "tickets.greatnorthernrail.com",
-  "northernrailway.co.uk",
-  "c2c-online.co.uk",
-  "thameslinkrailway.com",
-  "crosscountrytrains.co.uk",
-  "tfl.gov.uk", // if you want London travel stuff
+  // Aggregators
+  "trainline.",
+  "trainpal.",
+  "raileasy.",
+
+  // UK Train Operators (TOCs)
+  "avantiwestcoast.",
+  "lner.",
+  "gwr.",
+  "southeasternrailway.",
+  "southernrailway.",
+  "swrailway.",              // South Western Railway
+  "southwesternrailway.",
+  "northernrailway.",
+  "scotrail.co.uk",
+  "tpexpress.co.uk",
+  "chilternrailways.",
+  "crosscountrytrains.",
+  "merseyrail.org",
+  "c2c-online.",
+  "thameslinkrailway.",
+  "transportforwales",
+  "tfwrail.",
+  "gatwickexpress.",
+  "heathrowexpress.",
 ];
 
+// ---------------------------------------------------------------------------
+// 2) Auto-REJECT words (marketing, payments, etc.)
+// ---------------------------------------------------------------------------
+
 export const EXCLUDE_KEYWORDS = [
-  // obvious non-train merchants / stuff we NEVER want
+  "receipt",
+  "payment",
+  "invoice",
+  "booking.com",
   "costa",
   "starbucks",
-  "uber",
   "ubereats",
   "just eat",
   "deliveroo",
   "hotel",
   "airbnb",
-  "booking.com",
-  "payment receipt",
-  "invoice",
   "subscription",
 ];
+
+// ---------------------------------------------------------------------------
+// 3) Ticket indicator keywords (broad)
+// ---------------------------------------------------------------------------
 
 export const RAIL_KEYWORDS = [
   "e-ticket",
   "eticket",
   "your ticket",
-  "ticket for",
+  "booking reference",
+  "booking confirmation",
   "your journey",
   "outward journey",
   "return journey",
-  "departure",
-  "arrival",
-  "platform",
-  "coach",
-  "carriage",
   "seat",
+  "coach",
+  "platform",
   "railcard",
-  "train to",
-  "train from",
-  "booking confirmation",
-  "your booking reference",
+  "depart",
+  "arrive",
+  "to ",
+  "→",                    // operator emails often use this
 ];
 
-type TrainEmailCheckInput = {
+// ---------------------------------------------------------------------------
+// 4) MAIN FILTER
+// ---------------------------------------------------------------------------
+
+export function isTrainEmail(input: {
   from?: string | null;
   subject?: string | null;
   body?: string | null;
-};
-
-export function isTrainEmail(input: TrainEmailCheckInput): boolean {
+}): boolean {
   const from = (input.from || "").toLowerCase();
   const subject = (input.subject || "").toLowerCase();
   const body = (input.body || "").toLowerCase();
 
   const text = `${subject} ${body}`;
 
-  // 1) Strong allow by known sender domains
+  // (A) If sender is a known TOC/retailer → ALWAYS allow
   if (ALLOWED_SENDER_FRAGMENTS.some((frag) => from.includes(frag))) {
     return true;
   }
 
-  // 2) Quick hard reject for obvious non-train stuff
+  // (B) Hard reject obvious non-ticket emails
   if (EXCLUDE_KEYWORDS.some((word) => text.includes(word))) {
     return false;
   }
 
-  // 3) Must mention train/rail somewhere
-  if (!text.includes("train") && !text.includes("rail")) {
-    return false;
+  // (C) Soft allow if typical ticket wording appears
+  if (RAIL_KEYWORDS.some((word) => text.includes(word))) {
+    return true;
   }
 
-  // 4) And must look like a ticket / journey, not just a random mention
-  if (!RAIL_KEYWORDS.some((word) => text.includes(word))) {
-    return false;
-  }
-
-  return true;
+  // (D) Otherwise reject
+  return false;
 }
