@@ -69,6 +69,65 @@ function looksLikeDelayEmail(subject: string, body: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Hand-rolled parser for GWR booking confirmation e-mails
+// (noreply@gwr.com, subject contains "booking confirmation")
+// Generic – not specific to your journey.
+// ---------------------------------------------------------------------------
+function parseGwrBooking(
+  from: string,
+  subject: string,
+  body: string
+): ParsedTicketResult | null {
+  const fromLower = from.toLowerCase();
+  const subjLower = subject.toLowerCase();
+
+  if (!fromLower.includes("@gwr.com")) return null;
+  if (!subjLower.includes("booking confirmation")) return null;
+  if (!body.toLowerCase().includes("journey:")) return null;
+
+  // Booking reference: "Your booking reference: 9HFGG44C"
+  const refMatch = body.match(/Your booking reference[: ]+([A-Z0-9]{5,10})/i);
+
+  // "Journey: 1 Dawlish to Starcross ..."
+  const journeyMatch = body.match(
+    /Journey:\s*\d+\s+([A-Za-z &'()-]+?)\s+to\s+([A-Za-z &'()-]+?)(?:\s|@|\r?\n)/i
+  );
+  if (!journeyMatch) return null;
+
+  const origin = journeyMatch[1].trim();
+  const destination = journeyMatch[2].trim();
+
+  // "Outward journey: 19 Jan 2026"
+  const dateMatch = body.match(
+    /Outward journey:\s*([0-9]{1,2}\s+\w+\s+20[0-9]{2})/i
+  );
+
+  // "... departs Dawlish at 20:13 travel by Train service provider ..."
+  const timeMatch = body.match(
+    /departs\s+[A-Za-z &'()-]+?\s+at\s+([0-9]{1,2}:[0-9]{2})/i
+  );
+
+  let depart_planned = "UNKNOWN";
+  if (dateMatch && timeMatch) {
+    depart_planned = `${dateMatch[1]} ${timeMatch[1]}`;
+  }
+
+  return {
+    is_ticket: true,
+    // these fields come from ParsedTicketResult type
+    provider: "GWR",
+    retailer: null,
+    operator: "GWR",
+    booking_ref: refMatch?.[1] || "UNKNOWN",
+    origin,
+    destination,
+    depart_planned,
+    arrive_planned: null,
+    outbound_departure: depart_planned,
+  };
+}
+
+// ---------------------------------------------------------------------------
 
 export async function ingestEmail({
   id,
@@ -95,6 +154,12 @@ export async function ingestEmail({
     };
   }
 
+  // 0.5) Special-case GWR booking confirmations – parse without the LLM
+  const gwrParsed = parseGwrBooking(from, subject, body);
+  if (gwrParsed) {
+    return gwrParsed;
+  }
+
   // 1) Ask the model to return STRICT JSON (no markdown, no prose)
   const completion = await openai.responses.create({
     model: "gpt-4.1-mini",
@@ -117,28 +182,23 @@ export async function ingestEmail({
       "}\n\n" +
       "DEFINITIONS:\n" +
       "- provider: brand that sold the ticket (TrainPal, Trainline, GWR, Avanti, Northern, ScotRail, c2c, etc.).\n" +
-      "- retailer: intermediary like TrainPal/Trainline when the actual operator is another TOC.\n" +
-      "- operator: the train operating company running the service (Avanti West Coast, West Midlands Railway,\n" +
-      "  CrossCountry, Northern, Transport for Wales, GWR, SWR, ScotRail, etc.).\n\n" +
-      "WHAT COUNTS AS A TICKET:\n" +
-      "- Booking confirmation / e-ticket emails that clearly describe a *booked* UK rail journey.\n" +
-      "- Typical phrases: \"Your booking confirmation\", \"Your trip to X is confirmed\", \"Your GWR booking confirmation 9HFGG44C\",\n" +
-      "  \"Journey: 1 Dawlish to Starcross @ £2.00\", \"Outward journey: 19 Jan 2026 departs Dawlish at 20:13 ... arrives 20:21\".\n" +
-      "- These MUST be treated as tickets (is_ticket = true) if you can identify origin, destination and a departure date/time.\n\n" +
-      "WHAT **IS NOT** A TICKET:\n" +
-      "- Pure registration / account emails (\"Thank you for registering\", \"Activate your account\").\n" +
-      "- Pure marketing.\n" +
-      "- Pure Delay Repay / compensation e-mails (already filtered, but keep them as is_ticket = false if you see one).\n" +
-      "- E-mails that only say \"your e-tickets are attached\" without any journey details (no origin/destination or times).\n\n" +
+      "- retailer: use this for an intermediary like TrainPal/Trainline when the actual operator is another TOC.\n" +
+      "- operator: the train operating company running the service (Avanti West Coast, West Midlands Railway, CrossCountry, Northern, Transport for Wales, etc.).\n\n" +
       "RULES:\n" +
-      "- Only set is_ticket = true if this specific e-mail clearly represents a BOOKED UK rail journey.\n" +
+      "- Only set is_ticket = true if this email clearly represents a BOOKED UK rail journey or e-ticket / booking confirmation.\n" +
+      "- Subjects like \"Booking confirmation\", \"Your tickets\", \"Your GWR booking confirmation\" MUST be treated as tickets\n" +
+      "  if they describe a journey such as \"Outward journey: 28 Dec 2025 departs Swansea at 23:27 ... arrives Neath 23:39\".\n" +
       "- If an aggregator (TrainPal / Trainline) sells a journey on another operator:\n" +
       "    * retailer = \"TrainPal\" or \"Trainline\" (etc.)\n" +
-      "    * operator = the TOC running the train (e.g. \"Northern\", \"Avanti West Coast\").\n" +
-      "    * provider can be either the retailer or the operator.\n" +
-      "- If the body contains a line like \"Journey: 1 <ORIGIN> to <DESTINATION> ...\" and an \"Outward journey\" date,\n" +
-      "  and a phrase like \"departs <ORIGIN> at HH:MM ... arrives ...\", you SHOULD treat it as a ticket.\n" +
-      "- If you are unsure whether it's a ticket vs marketing/compensation, prefer is_ticket = false with a clear ignore_reason.\n\n" +
+      "    * operator = e.g. \"West Midlands Railway\", \"Avanti West Coast\", \"CrossCountry\", \"Northern\", etc.\n" +
+      "    * provider can be the same as retailer, or the operator – either is fine.\n" +
+      "- Many operators put the actual barcode or PDF attachment separately. As long as the email body describes a booked journey,\n" +
+      "  treat it as is_ticket = true.\n" +
+      "- If the email is primarily about Delay Repay, compensation, or a refund for a journey that ALREADY happened\n" +
+      "  (even if it describes the past journey), you MUST set is_ticket = false and give an ignore_reason like\n" +
+      "  \"delay_compensation_email\".\n" +
+      "- If you are genuinely unsure whether it's a ticket vs marketing/compensation, prefer is_ticket = false\n" +
+      "  with a clear ignore_reason.\n\n" +
       `EMAIL METADATA:\nEmail-ID: ${id || "unknown"}\nFrom: ${from}\nSubject: ${subject}\n\nEMAIL BODY:\n${body}`,
   });
 
@@ -153,7 +213,7 @@ export async function ingestEmail({
   try {
     const jsonStr = extractJsonObject(rawText);
     parsed = JSON.parse(jsonStr) as ParseTrainEmailOutput;
-  } catch {
+  } catch (e) {
     // If the model somehow didn't give valid JSON, fail safely
     return {
       is_ticket: false,
@@ -170,7 +230,7 @@ export async function ingestEmail({
   }
 
   // Helper — require non-empty strings
-  const nonEmpty = (v: string | null | undefined) =>
+  const requiredString = (v: string | null | undefined) =>
     typeof v === "string" && v.trim().length > 0;
 
   // Normalise provider-ish string for gating
@@ -180,26 +240,27 @@ export async function ingestEmail({
     (parsed.retailer && parsed.retailer.trim()) ||
     null;
 
-  // We now require: provider + origin + destination + *some* departure time,
-  // otherwise we treat it as too weak (this kills the “Departs — / no time” junk).
+  const departLike =
+    (parsed.depart_planned && parsed.depart_planned.trim()) ||
+    (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
+    null;
+
+  // 3) Gate: we require provider + origin + destination + SOME departure time.
+  // This stops all the "Departs —" zombies and attachment-only e-ticket e-mails.
   const hasBasicTrip =
-    nonEmpty(providerLike) &&
-    nonEmpty(parsed.origin) &&
-    nonEmpty(parsed.destination);
+    requiredString(providerLike) &&
+    requiredString(parsed.origin) &&
+    requiredString(parsed.destination) &&
+    requiredString(departLike);
 
-  const hasDepartureTime =
-    nonEmpty(parsed.depart_planned) || nonEmpty(parsed.outbound_departure);
-
-  if (!hasBasicTrip || !hasDepartureTime) {
+  if (!hasBasicTrip) {
     return {
       is_ticket: false,
-      ignore_reason: !hasBasicTrip
-        ? "missing_basic_fields_for_dashboard"
-        : "missing_departure_time",
+      ignore_reason: "missing_basic_fields_for_dashboard",
     };
   }
 
-  // 3) Valid usable ticket → return strong typed result
+  // 4) Valid usable ticket → return strong typed result
   const provider =
     (parsed.operator && parsed.operator.trim()) ||
     (parsed.provider && parsed.provider.trim()) ||
@@ -221,12 +282,12 @@ export async function ingestEmail({
   const depart_planned =
     (parsed.depart_planned && parsed.depart_planned.trim()) ||
     (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
-    null;
+    "UNKNOWN";
 
   const outbound_departure =
     (parsed.outbound_departure && parsed.outbound_departure.trim()) ||
     (parsed.depart_planned && parsed.depart_planned.trim()) ||
-    null;
+    "UNKNOWN";
 
   const arrive_planned =
     (parsed.arrive_planned && parsed.arrive_planned.trim()) || null;
