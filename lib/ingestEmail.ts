@@ -62,32 +62,6 @@ function looksLikeDelayClaim(subject: string, body: string): boolean {
   return DELAY_EMAIL_HARD_KEYWORDS.some((k) => text.includes(k));
 }
 
-// E-ticket *delivery* emails (we usually want the booking confirmation instead)
-function looksLikeEticketDelivery(subject: string, body: string): boolean {
-  const s = subject.toLowerCase();
-  const b = body.toLowerCase();
-
-  const mentionsEticket =
-    s.includes("eticket") ||
-    s.includes("e-ticket") ||
-    s.includes("etickets") ||
-    s.includes("e-tickets");
-
-  const mentionsAttached =
-    b.includes("we've attached etickets") ||
-    b.includes("we have attached etickets") ||
-    b.includes("etickets for your trip") ||
-    b.includes("e-tickets for your trip");
-
-  // Trainline / TOCs often send:
-  //  1) “Your trip is confirmed… This is just a booking confirmation.”  ✅ keep
-  //  2) “We’ve attached your e-tickets…”                                 ❌ drop
-  const isBookingConfirmation =
-    b.includes("this is just a booking confirmation");
-
-  return mentionsEticket && mentionsAttached && !isBookingConfirmation;
-}
-
 // Quick regex: does the text contain any time-like “HH:MM”
 function hasTimeLike(text: string): boolean {
   return /\b([0-2]?\d:[0-5]\d)\b/.test(text);
@@ -215,14 +189,6 @@ export async function ingestEmail({
     return {
       is_ticket: false,
       ignore_reason: "delay_compensation_email",
-    };
-  }
-
-  // 0.5) Drop pure e-ticket delivery emails to avoid duplicates
-  if (looksLikeEticketDelivery(subject, body)) {
-    return {
-      is_ticket: false,
-      ignore_reason: "eticket_delivery_email",
     };
   }
 
