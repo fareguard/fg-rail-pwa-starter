@@ -1,6 +1,6 @@
 // app/api/me/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { getSessionFromRequest } from "@/lib/session";
+import { NextResponse } from "next/server";
+import { parseUserFromRequest } from "@/lib/oauth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -15,19 +15,20 @@ function noStoreJson(body: any, status = 200) {
   return res;
 }
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   try {
-    const session = getSessionFromRequest(req);
+    const sessionUser = parseUserFromRequest();
 
-    if (!session) {
-      return noStoreJson({ authenticated: false });
+    if (sessionUser) {
+      return noStoreJson({
+        authenticated: true,
+        email: sessionUser.email,
+        via: "gmail-session",
+      });
     }
 
-    return noStoreJson({
-      authenticated: true,
-      email: session.email,
-      via: "gmail-session",
-    });
+    // Not logged in
+    return noStoreJson({ authenticated: false });
   } catch (e: any) {
     return noStoreJson({
       authenticated: false,
