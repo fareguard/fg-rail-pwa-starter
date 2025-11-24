@@ -1,41 +1,46 @@
 // app/api/auth/google/start/route.ts
-import { NextRequest, NextResponse } from "next/server";
-
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
-
-const SCOPES = [
-  "openid",
-  "email",
-  "profile",
-  "https://www.googleapis.com/auth/gmail.readonly",
-];
+import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   const url = new URL(req.url);
   const next = url.searchParams.get("next") || "/dashboard";
 
-  const origin =
-    GOOGLE_REDIRECT_URI && GOOGLE_REDIRECT_URI.startsWith("http")
-      ? new URL(GOOGLE_REDIRECT_URI).origin
-      : `${url.protocol}//${url.host}`;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI;
 
-  const redirectUri =
-    GOOGLE_REDIRECT_URI ?? `${origin}/api/auth/google/callback`;
+  if (!clientId || !redirectUri) {
+    return NextResponse.json(
+      { error: "Missing GOOGLE_CLIENT_ID or GOOGLE_REDIRECT_URI" },
+      { status: 500 }
+    );
+  }
 
-  const state = new URLSearchParams({ next }).toString();
+  const scope = [
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+  ].join(" ");
 
-  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-  authUrl.searchParams.set("client_id", GOOGLE_CLIENT_ID);
+  // we only store `next` in state
+  const state = `next=${encodeURIComponent(next)}`;
+
+  const authUrl = new URL(
+    "https://accounts.google.com/o/oauth2/v2/auth"
+  );
+  authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", SCOPES.join(" "));
+  authUrl.searchParams.set("scope", scope);
   authUrl.searchParams.set("access_type", "offline");
   authUrl.searchParams.set("include_granted_scopes", "true");
   authUrl.searchParams.set("prompt", "consent");
   authUrl.searchParams.set("state", state);
 
-  return NextResponse.redirect(authUrl.toString());
+  return NextResponse.redirect(authUrl.toString(), { status: 302 });
 }
