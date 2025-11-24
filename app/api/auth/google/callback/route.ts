@@ -82,16 +82,15 @@ export async function GET(req: Request) {
 
     // --- 3) dynamic import of Supabase + session helpers ---
     let getSupabaseAdmin:
-      | (() => ReturnType<(typeof import("@/lib/supabase-admin"))["getSupabaseAdmin"]>)
+      | (() => any)
       | undefined = undefined;
     let createSessionCookie: ((email: string) => void) | undefined = undefined;
 
     try {
-      const supaMod = await import("@/lib/supabase-admin");
-      // @ts-expect-error – simple assignment is fine here
+      const supaMod: any = await import("@/lib/supabase-admin");
       getSupabaseAdmin = supaMod.getSupabaseAdmin;
 
-      const oauthMod = await import("@/lib/oauth");
+      const oauthMod: any = await import("@/lib/oauth");
       createSessionCookie = oauthMod.createSessionCookie as
         | ((email: string) => void)
         | undefined;
