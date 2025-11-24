@@ -1,8 +1,8 @@
 // app/api/ingest/google/save/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { getSupabaseServer } from "@/lib/supabase-server";
-import { getFreshAccessToken } from "@/lib/google";
+import { getFreshAccessTokenForUser } from "@/lib/google";
+import { getSession } from "@/lib/session";
 
 import { isTrainEmail } from "@/lib/trainEmailFilter";
 import { ingestEmail } from "@/lib/ingestEmail";
@@ -80,11 +80,9 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
   if (lower.startsWith("west midlands")) {
     return "West Midlands Railway";
   }
-
   if (lower === "crosscountry trains" || lower === "cross country trains") {
     return "CrossCountry";
   }
-
   if (
     lower === "northern rail" ||
     lower === "northern railway" ||
@@ -100,43 +98,39 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
 
 export async function GET(req: Request) {
   try {
-    const supaServer = getSupabaseServer();
-    const supaAdmin = getSupabaseAdmin();
-
-    // 0) Require a logged-in FareGuard user (per-browser session)
-    const {
-      data: { user },
-    } = await supaServer.auth.getUser();
-
-    if (!user) {
+    const session = getSession();
+    if (!session) {
       return NextResponse.json(
         { ok: false, error: "Not authenticated" },
         { status: 401 }
       );
     }
 
-    const userId = user.id;
+    const { user_id: userId, email: user_email } = session;
 
-    // 1) Get a fresh Gmail token for THIS user
-    const { accessToken, user_email } = await getFreshAccessToken(userId);
+    const supa = getSupabaseAdmin();
+
+    // Get access token for THIS user
+    const { accessToken } = await getFreshAccessTokenForUser(userId);
 
     // 2) Gmail search query
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
-    const url = new URL(
+    const gmailUrl = new URL(
       "https://gmail.googleapis.com/gmail/v1/users/me/messages"
     );
-    url.searchParams.set("q", SEARCH_QUERY);
-    url.searchParams.set("maxResults", "50");
+    gmailUrl.searchParams.set("q", SEARCH_QUERY);
+    gmailUrl.searchParams.set("maxResults", "50");
 
+    // Optional pageToken passed in as query param
     const reqUrl = new URL(req.url);
     const requestPageToken = reqUrl.searchParams.get("pageToken");
     if (requestPageToken) {
-      url.searchParams.set("pageToken", requestPageToken);
+      gmailUrl.searchParams.set("pageToken", requestPageToken);
     }
 
-    const list = await fetch(url.toString(), {
+    const list = await fetch(gmailUrl.toString(), {
       headers: { Authorization: `Bearer ${accessToken}` },
     }).then((x) => x.json());
 
@@ -165,6 +159,7 @@ export async function GET(req: Request) {
     const tripErrors: { email_id: string; message: string }[] = [];
 
     const chunks: string[][] = [];
+    const CONCURRENCY = 5;
     for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
       chunks.push(messageIds.slice(i, i + CONCURRENCY));
     }
@@ -172,8 +167,7 @@ export async function GET(req: Request) {
     for (const chunk of chunks) {
       const results = await Promise.allSettled(
         chunk.map(async (id) => {
-          // Skip emails we've already parsed (per email_id)
-          const { data: existing } = await supaAdmin
+          const { data: existing } = await supa
             .from("debug_llm_outputs")
             .select("id")
             .eq("email_id", id)
@@ -192,11 +186,11 @@ export async function GET(req: Request) {
           const body = extractBody(fullMsg.payload);
           const snippet = fullMsg.snippet || "";
 
-          // Save raw email for THIS user
-          const { error: rawErr } = await supaAdmin.from("raw_emails").upsert(
+          const { error: rawErr } = await supa.from("raw_emails").upsert(
             {
               provider: "google",
               user_email,
+              user_id: userId,
               message_id: id,
               subject,
               sender: from,
@@ -208,7 +202,6 @@ export async function GET(req: Request) {
 
           if (!rawErr) savedRaw++;
 
-          // Filter non-train emails BEFORE parsing
           if (!isTrainEmail({ from, subject, body })) {
             return;
           }
@@ -221,9 +214,8 @@ export async function GET(req: Request) {
             snippet,
           });
 
-          // Debug log
           try {
-            await supaAdmin.from("debug_llm_outputs").insert({
+            await supa.from("debug_llm_outputs").insert({
               email_id: id,
               from_addr: from,
               subject,
@@ -231,12 +223,11 @@ export async function GET(req: Request) {
               raw_output: JSON.stringify(parsed),
             });
           } catch {
-            // ignore debug failure
+            // ignore
           }
 
           if (!parsed?.is_ticket) return;
 
-          // Normalise for DB insert
           const operatorRaw = parsed.operator ?? parsed.provider ?? null;
           const operator = normaliseOperatorName(operatorRaw);
           const retailer = parsed.retailer ?? parsed.provider ?? null;
@@ -251,13 +242,12 @@ export async function GET(req: Request) {
           const arriveIso = safeTimestamp(arriveStr);
           const outboundIso = safeTimestamp(outboundStr);
 
-          // De-dupe on (user_id + booking_ref + origin + destination)
           let existingTrip:
             | { id: string; depart_planned: string | null }
             | null = null;
 
           if (parsed.booking_ref && parsed.origin && parsed.destination) {
-            const { data: existingRows, error: existingErr } = await supaAdmin
+            const { data: existingRows, error: existingErr } = await supa
               .from("trips")
               .select("id, depart_planned")
               .eq("user_id", userId)
@@ -300,13 +290,13 @@ export async function GET(req: Request) {
           let tripErr: any = null;
 
           if (existingTrip) {
-            const { error } = await supaAdmin
+            const { error } = await supa
               .from("trips")
               .update(baseRecord)
               .eq("id", existingTrip.id);
             tripErr = error;
           } else {
-            const { error } = await supaAdmin.from("trips").insert(baseRecord);
+            const { error } = await supa.from("trips").insert(baseRecord);
             tripErr = error;
           }
 
@@ -338,6 +328,7 @@ export async function GET(req: Request) {
       trip_errors: tripErrors,
     });
   } catch (e: any) {
+    console.error("ingest error", e);
     return NextResponse.json(
       { ok: false, error: e?.message || String(e) },
       { status: 500 }
