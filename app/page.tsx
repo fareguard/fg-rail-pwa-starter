@@ -28,8 +28,6 @@ export default function Home() {
             />
           </div>
           <div className="navActions">
-            <Link className="btn btnGhost" href="/how-it-works">How it works</Link>
-            <Link className="btn btnGhost" href="/pricing">Pricing</Link>
             <Link className="btn btnGhost" href="/dashboard">Dashboard</Link>
           </div>
         </div>
