@@ -3,10 +3,12 @@ import crypto from "crypto";
 import { cookies } from "next/headers";
 
 const COOKIE_NAME = "fg_session";
-const SESSION_SECRET = process.env.SESSION_SECRET;
+const SESSION_SECRET = process.env.SESSION_SECRET || "";
 
-if (!SESSION_SECRET) {
-  throw new Error("SESSION_SECRET env var is required");
+// ---- internal helpers ----
+
+function hasSecret(): boolean {
+  return typeof SESSION_SECRET === "string" && SESSION_SECRET.length > 0;
 }
 
 type SessionPayload = {
@@ -14,15 +16,23 @@ type SessionPayload = {
   createdAt: number;
 };
 
-// HMAC signer
 function sign(body: string): string {
+  if (!hasSecret()) return "";
   return crypto
-    .createHmac("sha256", SESSION_SECRET as string)
+    .createHmac("sha256", SESSION_SECRET)
     .update(body)
     .digest("base64url");
 }
 
+// ---- public helpers ----
+
 export function createSessionCookie(email: string) {
+  // If mis-configured, don’t crash the app – just skip the cookie.
+  if (!hasSecret()) {
+    console.error("SESSION_SECRET missing – cannot create session cookie");
+    return;
+  }
+
   const payload: SessionPayload = {
     email,
     createdAt: Date.now(),
@@ -48,6 +58,8 @@ export function destroySessionCookie() {
 }
 
 export function getSessionFromCookies(): SessionPayload | null {
+  if (!hasSecret()) return null;
+
   const store = cookies();
   const raw = store.get(COOKIE_NAME)?.value;
   if (!raw) return null;
@@ -56,11 +68,15 @@ export function getSessionFromCookies(): SessionPayload | null {
   if (!body || !sig) return null;
 
   const expected = sign(body);
+  if (!expected) return null;
 
-  // timing-safe comparison
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+  try {
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return null;
+    }
+  } catch {
     return null;
   }
 
@@ -73,7 +89,7 @@ export function getSessionFromCookies(): SessionPayload | null {
   }
 }
 
-// Simple helper your routes can call
+// what /api/me uses
 export function parseUserFromRequest():
   | { email: string }
   | null {
