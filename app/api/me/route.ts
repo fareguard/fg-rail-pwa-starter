@@ -1,6 +1,6 @@
 // app/api/me/route.ts
 import { NextResponse } from "next/server";
-import { getSupabaseServer } from "@/lib/supabase-server";
+import { getSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -17,20 +17,17 @@ function noStoreJson(body: any, status = 200) {
 
 export async function GET() {
   try {
-    const supabase = getSupabaseServer();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const session = getSession();
 
-    if (!user) {
+    if (!session) {
       return noStoreJson({ authenticated: false });
     }
 
     return noStoreJson({
       authenticated: true,
-      email: user.email,
-      userId: user.id,
-      via: "supabase",
+      email: session.email,
+      userId: session.user_id,
+      via: "gmail-session",
     });
   } catch (e: any) {
     return noStoreJson({
