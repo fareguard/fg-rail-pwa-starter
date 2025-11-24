@@ -1,11 +1,11 @@
 // app/api/ingest/google/save/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { getFreshAccessTokenForUser } from "@/lib/google";
-import { getSession } from "@/lib/session";
+import { getFreshAccessToken } from "@/lib/google";
 
 import { isTrainEmail } from "@/lib/trainEmailFilter";
 import { ingestEmail } from "@/lib/ingestEmail";
+import { getSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -59,10 +59,6 @@ function headerValue(payload: any, name: string): string | undefined {
   return h?.value;
 }
 
-// ------------------------------------------------------------
-// Helpers
-// ------------------------------------------------------------
-
 function safeTimestamp(value: string | null | undefined): string | null {
   if (!value) return null;
   const d = new Date(value);
@@ -72,7 +68,9 @@ function safeTimestamp(value: string | null | undefined): string | null {
   return d.toISOString();
 }
 
-function normaliseOperatorName(raw: string | null | undefined): string | null {
+function normaliseOperatorName(
+  raw: string | null | undefined
+): string | null {
   if (!raw) return null;
   const s = raw.trim();
   const lower = s.toLowerCase();
@@ -80,9 +78,11 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
   if (lower.startsWith("west midlands")) {
     return "West Midlands Railway";
   }
+
   if (lower === "crosscountry trains" || lower === "cross country trains") {
     return "CrossCountry";
   }
+
   if (
     lower === "northern rail" ||
     lower === "northern railway" ||
@@ -94,11 +94,9 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
   return s;
 }
 
-// ------------------------------------------------------------------
-
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
-    const session = getSession();
+    const session = getSessionFromRequest(req);
     if (!session) {
       return NextResponse.json(
         { ok: false, error: "Not authenticated" },
@@ -106,31 +104,45 @@ export async function GET(req: Request) {
       );
     }
 
-    const { user_id: userId, email: user_email } = session;
+    const user_email = session.email;
 
     const supa = getSupabaseAdmin();
 
-    // Get access token for THIS user
-    const { accessToken } = await getFreshAccessTokenForUser(userId);
+    const { data: oauthRows, error: oErr } = await supa
+      .from("oauth_staging")
+      .select("*")
+      .eq("provider", "google")
+      .eq("user_email", user_email)
+      .order("created_at", { ascending: false })
+      .limit(1);
 
-    // 2) Gmail search query
+    if (oErr) throw oErr;
+    if (!oauthRows?.length) {
+      return NextResponse.json(
+        { ok: false, error: "No Gmail connected for this user" },
+        { status: 400 }
+      );
+    }
+
+    const { user_id: userId } = oauthRows[0] as any;
+    const accessToken = await getFreshAccessToken(user_email);
+
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
-    const gmailUrl = new URL(
+    const url = new URL(
       "https://gmail.googleapis.com/gmail/v1/users/me/messages"
     );
-    gmailUrl.searchParams.set("q", SEARCH_QUERY);
-    gmailUrl.searchParams.set("maxResults", "50");
+    url.searchParams.set("q", SEARCH_QUERY);
+    url.searchParams.set("maxResults", "50");
 
-    // Optional pageToken passed in as query param
     const reqUrl = new URL(req.url);
     const requestPageToken = reqUrl.searchParams.get("pageToken");
     if (requestPageToken) {
-      gmailUrl.searchParams.set("pageToken", requestPageToken);
+      url.searchParams.set("pageToken", requestPageToken);
     }
 
-    const list = await fetch(gmailUrl.toString(), {
+    const list = await fetch(url.toString(), {
       headers: { Authorization: `Bearer ${accessToken}` },
     }).then((x) => x.json());
 
@@ -159,7 +171,6 @@ export async function GET(req: Request) {
     const tripErrors: { email_id: string; message: string }[] = [];
 
     const chunks: string[][] = [];
-    const CONCURRENCY = 5;
     for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
       chunks.push(messageIds.slice(i, i + CONCURRENCY));
     }
@@ -174,7 +185,9 @@ export async function GET(req: Request) {
             .limit(1)
             .maybeSingle();
 
-          if (existing) return;
+          if (existing) {
+            return;
+          }
 
           const fullMsg = await fetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
@@ -190,7 +203,6 @@ export async function GET(req: Request) {
             {
               provider: "google",
               user_email,
-              user_id: userId,
               message_id: id,
               subject,
               sender: from,
@@ -223,10 +235,12 @@ export async function GET(req: Request) {
               raw_output: JSON.stringify(parsed),
             });
           } catch {
-            // ignore
+            // ignore debug failures
           }
 
-          if (!parsed?.is_ticket) return;
+          if (!parsed?.is_ticket) {
+            return;
+          }
 
           const operatorRaw = parsed.operator ?? parsed.provider ?? null;
           const operator = normaliseOperatorName(operatorRaw);
@@ -250,7 +264,7 @@ export async function GET(req: Request) {
             const { data: existingRows, error: existingErr } = await supa
               .from("trips")
               .select("id, depart_planned")
-              .eq("user_id", userId)
+              .eq("user_email", user_email)
               .eq("booking_ref", parsed.booking_ref)
               .eq("origin", parsed.origin)
               .eq("destination", parsed.destination)
@@ -328,7 +342,7 @@ export async function GET(req: Request) {
       trip_errors: tripErrors,
     });
   } catch (e: any) {
-    console.error("ingest error", e);
+    console.error("ingest/google/save error", e);
     return NextResponse.json(
       { ok: false, error: e?.message || String(e) },
       { status: 500 }
