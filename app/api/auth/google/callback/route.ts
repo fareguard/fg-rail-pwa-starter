@@ -80,19 +80,24 @@ export async function GET(req: Request) {
       return NextResponse.redirect(`${next}?auth_error=no_email`);
     }
 
-    // --- 3) **dynamic** import of Supabase + session helpers ---
-    let getSupabaseAdmin: any;
-    let createSessionCookie: (email: string) => void;
+    // --- 3) dynamic import of Supabase + session helpers ---
+    let getSupabaseAdmin:
+      | (() => ReturnType<(typeof import("@/lib/supabase-admin"))["getSupabaseAdmin"]>)
+      | undefined = undefined;
+    let createSessionCookie: ((email: string) => void) | undefined = undefined;
 
     try {
       const supaMod = await import("@/lib/supabase-admin");
+      // @ts-expect-error – simple assignment is fine here
       getSupabaseAdmin = supaMod.getSupabaseAdmin;
 
       const oauthMod = await import("@/lib/oauth");
-      createSessionCookie = oauthMod.createSessionCookie;
+      createSessionCookie = oauthMod.createSessionCookie as
+        | ((email: string) => void)
+        | undefined;
     } catch (dynErr) {
       console.error("Dynamic import of supabase/oauth modules failed:", dynErr);
-      // if this fails, we still let the user through – just no tokens/session saved
+      // we'll still let the user through; just no tokens/session saved
     }
 
     // --- 4) store tokens in Supabase (if admin client available) ---
@@ -132,7 +137,9 @@ export async function GET(req: Request) {
       if (createSessionCookie) {
         createSessionCookie(email);
       } else {
-        console.warn("createSessionCookie not available – skipping session cookie");
+        console.warn(
+          "createSessionCookie not available – skipping session cookie"
+        );
       }
     } catch (cookieErr) {
       console.error("Failed to create session cookie:", cookieErr);
@@ -142,7 +149,6 @@ export async function GET(req: Request) {
     return NextResponse.redirect(next);
   } catch (err) {
     console.error("Google callback handler crashed at top level:", err);
-    // last-ditch: never leak a raw 500, always redirect
     return NextResponse.redirect("/dashboard?auth_error=callback");
   }
 }
