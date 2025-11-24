@@ -1,31 +1,41 @@
 // app/api/auth/google/start/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI!; // e.g. https://www.fareguard.co.uk/api/auth/google/callback
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+
+const SCOPES = [
+  "openid",
+  "email",
+  "profile",
+  "https://www.googleapis.com/auth/gmail.readonly",
+];
 
 export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const next = searchParams.get("next") || "/dashboard";
+export async function GET(req: NextRequest) {
+  const url = new URL(req.url);
+  const next = url.searchParams.get("next") || "/dashboard";
 
-  const params = new URLSearchParams({
-    client_id: GOOGLE_CLIENT_ID,
-    redirect_uri: GOOGLE_REDIRECT_URI,
-    response_type: "code",
-    access_type: "offline",          // ensures refresh_token
-    prompt: "consent",               // forces refresh_token every time
-    include_granted_scopes: "true",
-    scope: [
-      "openid",
-      "email",
-      "https://www.googleapis.com/auth/gmail.readonly",
-    ].join(" "),
-    state: new URLSearchParams({ next }).toString(), // we’ll round-trip the target
-  });
+  const origin =
+    GOOGLE_REDIRECT_URI && GOOGLE_REDIRECT_URI.startsWith("http")
+      ? new URL(GOOGLE_REDIRECT_URI).origin
+      : `${url.protocol}//${url.host}`;
 
-  const url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-  return NextResponse.redirect(url);
+  const redirectUri =
+    GOOGLE_REDIRECT_URI ?? `${origin}/api/auth/google/callback`;
+
+  const state = new URLSearchParams({ next }).toString();
+
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("client_id", GOOGLE_CLIENT_ID);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", SCOPES.join(" "));
+  authUrl.searchParams.set("access_type", "offline");
+  authUrl.searchParams.set("include_granted_scopes", "true");
+  authUrl.searchParams.set("prompt", "consent");
+  authUrl.searchParams.set("state", state);
+
+  return NextResponse.redirect(authUrl.toString());
 }
