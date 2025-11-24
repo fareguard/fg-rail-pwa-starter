@@ -1,6 +1,7 @@
 // app/api/ingest/google/save/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getSupabaseServer } from "@/lib/supabase-server";
 import { getFreshAccessToken } from "@/lib/google";
 
 import { isTrainEmail } from "@/lib/trainEmailFilter";
@@ -10,10 +11,6 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const CONCURRENCY = 5;
-
-// ------------------------------------------------------------
-// Base64 helpers
-// ------------------------------------------------------------
 
 function b64ToUtf8(b64: string) {
   const s = b64.replace(/-/g, "+").replace(/_/g, "/");
@@ -25,76 +22,34 @@ function decodePart(part: any): string {
   return b64ToUtf8(String(part.body.data));
 }
 
-// ------------------------------------------------------------
-// Extract the *full* body text (plain + HTML) from a Gmail payload
-// We concatenate all text/plain and text/html parts rather than
-// just taking the first one (GWR/SWR/ScotRail style templates
-// often split content across parts).
-// ------------------------------------------------------------
-
 function extractBody(payload: any): string {
   if (!payload) return "";
 
-  const parts: any[] = [];
+  const mime = payload.mimeType || "";
 
-  function walk(part: any) {
-    if (!part) return;
-    if (part.parts && part.parts.length) {
-      part.parts.forEach(walk);
-    } else if (part.body && part.body.data) {
-      parts.push(part);
-    }
-  }
+  if (mime.startsWith("text/plain")) return decodePart(payload);
 
-  walk(payload);
-
-  let plainChunks: string[] = [];
-  let htmlChunks: string[] = [];
-
-  for (const part of parts) {
-    const mime = (part.mimeType || "").toLowerCase();
-    const text = decodePart(part);
-    if (!text) continue;
-
-    if (mime.startsWith("text/plain")) {
-      plainChunks.push(text);
-    } else if (mime.startsWith("text/html")) {
-      htmlChunks.push(text);
-    }
-  }
-
-  let plain = plainChunks.join("\n\n");
-  let htmlRaw = htmlChunks.join("\n\n");
-
-  // Fallback: sometimes payload.body.data has everything
-  if (!plain && !htmlRaw && payload.body?.data) {
-    const raw = decodePart(payload);
-    const mime = (payload.mimeType || "").toLowerCase();
-    if (mime.startsWith("text/plain")) {
-      plain = raw;
-    } else if (mime.startsWith("text/html")) {
-      htmlRaw = raw;
-    }
-  }
-
-  if (htmlRaw) {
-    const htmlStripped = htmlRaw
+  if (mime.startsWith("text/html")) {
+    const html = decodePart(payload);
+    return html
       .replace(/<style[\s\S]*?<\/style>/gi, "")
       .replace(/<script[\s\S]*?<\/script>/gi, "")
       .replace(/<[^>]+>/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
-
-    if (!plain) {
-      plain = htmlStripped;
-    } else {
-      // keep HTML content too – some operators only put journey
-      // details in the HTML part.
-      plain = `${plain}\n\n${htmlStripped}`;
-    }
   }
 
-  return plain.trim();
+  let plain = "";
+  let html = "";
+
+  for (const p of payload.parts || []) {
+    const t = extractBody(p);
+    if (!t) continue;
+    if ((p.mimeType || "").startsWith("text/plain") && !plain) plain = t;
+    if ((p.mimeType || "").startsWith("text/html") && !html) html = t;
+  }
+
+  return plain || html || "";
 }
 
 function headerValue(payload: any, name: string): string | undefined {
@@ -105,7 +60,7 @@ function headerValue(payload: any, name: string): string | undefined {
 }
 
 // ------------------------------------------------------------
-// Helpers used for normalising trip rows
+// Helpers
 // ------------------------------------------------------------
 
 function safeTimestamp(value: string | null | undefined): string | null {
@@ -117,26 +72,19 @@ function safeTimestamp(value: string | null | undefined): string | null {
   return d.toISOString();
 }
 
-/**
- * Normalise operator names so the UI doesn’t get a bunch of
- * slightly different labels for the same thing.
- */
 function normaliseOperatorName(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const s = raw.trim();
   const lower = s.toLowerCase();
 
-  // West Midlands
   if (lower.startsWith("west midlands")) {
     return "West Midlands Railway";
   }
 
-  // CrossCountry brands
   if (lower === "crosscountry trains" || lower === "cross country trains") {
     return "CrossCountry";
   }
 
-  // Northern variants
   if (
     lower === "northern rail" ||
     lower === "northern railway" ||
@@ -152,26 +100,25 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
 
 export async function GET(req: Request) {
   try {
-    const supa = getSupabaseAdmin();
+    const supaServer = getSupabaseServer();
+    const supaAdmin = getSupabaseAdmin();
 
-    // 1) Most recent connected Google account
-    const { data: oauthRows, error: oErr } = await supa
-      .from("oauth_staging")
-      .select("*")
-      .eq("provider", "google")
-      .order("created_at", { ascending: false })
-      .limit(1);
+    // 0) Require a logged-in FareGuard user (per-browser session)
+    const {
+      data: { user },
+    } = await supaServer.auth.getUser();
 
-    if (oErr) throw oErr;
-    if (!oauthRows?.length) {
+    if (!user) {
       return NextResponse.json(
-        { ok: false, error: "No Gmail connected" },
-        { status: 400 }
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
       );
     }
 
-    const { user_email, user_id: userId } = oauthRows[0] as any;
-    const accessToken = await getFreshAccessToken(user_email);
+    const userId = user.id;
+
+    // 1) Get a fresh Gmail token for THIS user
+    const { accessToken, user_email } = await getFreshAccessToken(userId);
 
     // 2) Gmail search query
     const SEARCH_QUERY =
@@ -183,7 +130,6 @@ export async function GET(req: Request) {
     url.searchParams.set("q", SEARCH_QUERY);
     url.searchParams.set("maxResults", "50");
 
-    // Optional pageToken passed in as query param
     const reqUrl = new URL(req.url);
     const requestPageToken = reqUrl.searchParams.get("pageToken");
     if (requestPageToken) {
@@ -205,7 +151,7 @@ export async function GET(req: Request) {
     if (!messageIds.length) {
       return NextResponse.json({
         ok: true,
-       scanned: 0,
+        scanned: 0,
         saved_raw: 0,
         saved_trips: 0,
         nextPageToken: list.nextPageToken ?? null,
@@ -214,12 +160,10 @@ export async function GET(req: Request) {
       });
     }
 
-    // 3) Hydrate, store raw, parse trips (with batched concurrency)
     let savedRaw = 0;
     let savedTrips = 0;
     const tripErrors: { email_id: string; message: string }[] = [];
 
-    // Chunk message IDs so we only have CONCURRENCY in flight at once
     const chunks: string[][] = [];
     for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
       chunks.push(messageIds.slice(i, i + CONCURRENCY));
@@ -228,22 +172,16 @@ export async function GET(req: Request) {
     for (const chunk of chunks) {
       const results = await Promise.allSettled(
         chunk.map(async (id) => {
-          // ----------------------------------------------------
-          // Step 4: skip messages we've already processed
-          // ----------------------------------------------------
-          const { data: existing } = await supa
+          // Skip emails we've already parsed (per email_id)
+          const { data: existing } = await supaAdmin
             .from("debug_llm_outputs")
             .select("id")
             .eq("email_id", id)
             .limit(1)
             .maybeSingle();
 
-          if (existing) {
-            // Already parsed this email; skip heavy work
-            return;
-          }
+          if (existing) return;
 
-          // Fetch full Gmail message
           const fullMsg = await fetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
             { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -254,8 +192,8 @@ export async function GET(req: Request) {
           const body = extractBody(fullMsg.payload);
           const snippet = fullMsg.snippet || "";
 
-          // ---- Save raw email (idempotent upsert) ----
-          const { error: rawErr } = await supa.from("raw_emails").upsert(
+          // Save raw email for THIS user
+          const { error: rawErr } = await supaAdmin.from("raw_emails").upsert(
             {
               provider: "google",
               user_email,
@@ -270,12 +208,11 @@ export async function GET(req: Request) {
 
           if (!rawErr) savedRaw++;
 
-          // ---- Filter non-train emails BEFORE parsing ----
+          // Filter non-train emails BEFORE parsing
           if (!isTrainEmail({ from, subject, body })) {
             return;
           }
 
-          // ---- Call ingestEmail (LLM parser + gating) ----
           const parsed: any = await ingestEmail({
             id,
             from,
@@ -284,9 +221,9 @@ export async function GET(req: Request) {
             snippet,
           });
 
-          // ---- Log into debug_llm_outputs for inspection ----
+          // Debug log
           try {
-            await supa.from("debug_llm_outputs").insert({
+            await supaAdmin.from("debug_llm_outputs").insert({
               email_id: id,
               from_addr: from,
               subject,
@@ -294,17 +231,12 @@ export async function GET(req: Request) {
               raw_output: JSON.stringify(parsed),
             });
           } catch {
-            // swallow debug errors
+            // ignore debug failure
           }
 
-          // If ingestEmail says "not a usable ticket", skip
-          if (!parsed?.is_ticket) {
-            return;
-          }
+          if (!parsed?.is_ticket) return;
 
-          // -------------------------------
-          // Normalised fields for insert
-          // -------------------------------
+          // Normalise for DB insert
           const operatorRaw = parsed.operator ?? parsed.provider ?? null;
           const operator = normaliseOperatorName(operatorRaw);
           const retailer = parsed.retailer ?? parsed.provider ?? null;
@@ -319,18 +251,16 @@ export async function GET(req: Request) {
           const arriveIso = safeTimestamp(arriveStr);
           const outboundIso = safeTimestamp(outboundStr);
 
-          // -------------------------------------------
-          // De-duplication: same booking_ref + route
-          // -------------------------------------------
+          // De-dupe on (user_id + booking_ref + origin + destination)
           let existingTrip:
             | { id: string; depart_planned: string | null }
             | null = null;
 
           if (parsed.booking_ref && parsed.origin && parsed.destination) {
-            const { data: existingRows, error: existingErr } = await supa
+            const { data: existingRows, error: existingErr } = await supaAdmin
               .from("trips")
               .select("id, depart_planned")
-              .eq("user_email", user_email)
+              .eq("user_id", userId)
               .eq("booking_ref", parsed.booking_ref)
               .eq("origin", parsed.origin)
               .eq("destination", parsed.destination)
@@ -341,7 +271,6 @@ export async function GET(req: Request) {
             }
           }
 
-          // If we already have a trip, keep the earliest depart_planned
           let finalDepart = departIso;
           if (existingTrip?.depart_planned && finalDepart) {
             const existingDate = new Date(existingTrip.depart_planned);
@@ -371,13 +300,13 @@ export async function GET(req: Request) {
           let tripErr: any = null;
 
           if (existingTrip) {
-            const { error } = await supa
+            const { error } = await supaAdmin
               .from("trips")
               .update(baseRecord)
               .eq("id", existingTrip.id);
             tripErr = error;
           } else {
-            const { error } = await supa.from("trips").insert(baseRecord);
+            const { error } = await supaAdmin.from("trips").insert(baseRecord);
             tripErr = error;
           }
 
@@ -399,7 +328,6 @@ export async function GET(req: Request) {
       }
     }
 
-    // Step 3: return something fast + page token for caller
     return NextResponse.json({
       ok: true,
       scanned,
