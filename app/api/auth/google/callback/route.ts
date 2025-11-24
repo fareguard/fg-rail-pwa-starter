@@ -1,7 +1,5 @@
 // app/api/auth/google/callback/route.ts
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { createSessionCookie } from "@/lib/oauth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -20,7 +18,7 @@ export async function GET(req: Request) {
       try {
         next = decodeURIComponent(encoded);
       } catch {
-        // ignore bad state
+        // bad state, stick with /dashboard
       }
     }
 
@@ -82,48 +80,69 @@ export async function GET(req: Request) {
       return NextResponse.redirect(`${next}?auth_error=no_email`);
     }
 
-    // --- 3) store tokens in Supabase ---
-    const now = Math.floor(Date.now() / 1000);
-    const expiresAt = expiresIn ? now + expiresIn : null;
+    // --- 3) **dynamic** import of Supabase + session helpers ---
+    let getSupabaseAdmin: any;
+    let createSessionCookie: (email: string) => void;
 
     try {
-      const supa = getSupabaseAdmin();
-      const { error: upsertErr } = await supa
-        .from("oauth_staging")
-        .upsert(
-          {
-            provider: "google",
-            user_email: email,
-            access_token: accessToken,
-            refresh_token: refreshToken ?? null,
-            expires_at: expiresAt,
-            scope: tokenJson.scope ?? null,
-            token_type: tokenJson.token_type ?? "Bearer",
-          },
-          { onConflict: "provider,user_email" } as any
-        );
+      const supaMod = await import("@/lib/supabase-admin");
+      getSupabaseAdmin = supaMod.getSupabaseAdmin;
 
-      if (upsertErr) {
-        console.error("Failed to upsert oauth_staging:", upsertErr);
+      const oauthMod = await import("@/lib/oauth");
+      createSessionCookie = oauthMod.createSessionCookie;
+    } catch (dynErr) {
+      console.error("Dynamic import of supabase/oauth modules failed:", dynErr);
+      // if this fails, we still let the user through – just no tokens/session saved
+    }
+
+    // --- 4) store tokens in Supabase (if admin client available) ---
+    try {
+      if (getSupabaseAdmin) {
+        const supa = getSupabaseAdmin();
+        const now = Math.floor(Date.now() / 1000);
+        const expiresAt = expiresIn ? now + expiresIn : null;
+
+        const { error: upsertErr } = await supa
+          .from("oauth_staging")
+          .upsert(
+            {
+              provider: "google",
+              user_email: email,
+              access_token: accessToken,
+              refresh_token: refreshToken ?? null,
+              expires_at: expiresAt,
+              scope: tokenJson.scope ?? null,
+              token_type: tokenJson.token_type ?? "Bearer",
+            },
+            { onConflict: "provider,user_email" } as any
+          );
+
+        if (upsertErr) {
+          console.error("Failed to upsert oauth_staging:", upsertErr);
+        }
+      } else {
+        console.warn("getSupabaseAdmin not available – skipping token store");
       }
     } catch (dbErr) {
-      console.error("Supabase admin error:", dbErr);
-      // don’t block login just because token storage failed once
+      console.error("Supabase admin error while storing tokens:", dbErr);
     }
 
-    // --- 4) create session cookie based on Gmail address ---
+    // --- 5) create session cookie from Gmail address ---
     try {
-      createSessionCookie(email);
+      if (createSessionCookie) {
+        createSessionCookie(email);
+      } else {
+        console.warn("createSessionCookie not available – skipping session cookie");
+      }
     } catch (cookieErr) {
       console.error("Failed to create session cookie:", cookieErr);
-      // still redirect; worst case /api/me sees you as logged out
     }
 
-    // --- 5) bounce back to dashboard ---
+    // --- 6) bounce back to dashboard (or next) ---
     return NextResponse.redirect(next);
   } catch (err) {
-    console.error("Google callback handler crashed:", err);
-    // last-ditch fallback to avoid a blank 500
+    console.error("Google callback handler crashed at top level:", err);
+    // last-ditch: never leak a raw 500, always redirect
     return NextResponse.redirect("/dashboard?auth_error=callback");
   }
 }
