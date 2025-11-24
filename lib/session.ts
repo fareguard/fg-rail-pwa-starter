@@ -6,8 +6,12 @@ const COOKIE_NAME = "fg_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 const SESSION_SECRET = process.env.SESSION_SECRET;
 
-if (!SESSION_SECRET) {
-  throw new Error("SESSION_SECRET env var is required");
+// Lazy check so build doesn't explode if env isn't set yet
+function ensureSecret(): string {
+  if (!SESSION_SECRET) {
+    throw new Error("SESSION_SECRET env var is required");
+  }
+  return SESSION_SECRET;
 }
 
 export type SessionPayload = {
@@ -36,7 +40,7 @@ function sign(payload: SessionPayload): string {
   const json = JSON.stringify(payload);
   const body = b64uEncode(Buffer.from(json, "utf8"));
   const hmac = crypto
-    .createHmac("sha256", SESSION_SECRET as string)
+    .createHmac("sha256", ensureSecret())
     .update(body)
     .digest();
   const sig = b64uEncode(hmac);
@@ -49,7 +53,7 @@ function verify(token: string): SessionPayload | null {
 
   const [body, sig] = parts;
   const expectedSig = b64uEncode(
-    crypto.createHmac("sha256", SESSION_SECRET as string).update(body).digest()
+    crypto.createHmac("sha256", ensureSecret()).update(body).digest()
   );
 
   if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
