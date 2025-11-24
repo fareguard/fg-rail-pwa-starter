@@ -584,6 +584,26 @@ export default function TripsLive() {
     }
   }, [sortOrder]);
 
+  // 4) Derived data – keep hooks ABOVE any early returns
+  const trips = useMemo(
+    () => dedupeTrips(data?.trips ?? []),
+    [data],
+  );
+
+  const sortedTrips = useMemo(() => {
+    const copy = [...trips];
+    copy.sort((a, b) => {
+      const ta = safeTime(a.depart_planned || a.outbound_departure);
+      const tb = safeTime(b.depart_planned || b.outbound_departure);
+      return sortOrder === "latest" ? tb - ta : ta - tb;
+    });
+    return copy;
+  }, [trips, sortOrder]);
+
+  // -----------------------------------------------------------
+  // Early returns (AFTER all hooks)
+  // -----------------------------------------------------------
+
   if (error) {
     return (
       <p className="small" style={{ marginTop: 16, color: "#b91c1c" }}>
@@ -608,19 +628,7 @@ export default function TripsLive() {
     );
   }
 
-  const trips = useMemo(() => dedupeTrips(data.trips || []), [data.trips]);
-
-  const sortedTrips = useMemo(() => {
-    const copy = [...trips];
-    copy.sort((a, b) => {
-      const ta = safeTime(a.depart_planned || a.outbound_departure);
-      const tb = safeTime(b.depart_planned || b.outbound_departure);
-      return sortOrder === "latest" ? tb - ta : ta - tb;
-    });
-    return copy;
-  }, [trips, sortOrder]);
-
-  if (!trips.length) {
+  if (!sortedTrips.length) {
     return (
       <p className="small" style={{ marginTop: 16, color: "var(--fg-muted)" }}>
         No journeys detected yet. We&apos;ll add them here as soon as your
