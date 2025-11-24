@@ -7,6 +7,7 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 type OAuthRow = {
   id: string;
   provider: string;
+  user_id: string;
   user_email: string;
   access_token: string | null;
   refresh_token: string | null;
@@ -36,38 +37,41 @@ async function refreshWithGoogle(refresh_token: string) {
   return json;
 }
 
-export async function getFreshAccessToken(
-  user_email: string
-): Promise<string> {
+/**
+ * Get a fresh Gmail access token for a specific Supabase user.
+ * Returns both the token and the Gmail address it’s tied to.
+ */
+export async function getFreshAccessToken(userId: string): Promise<{
+  accessToken: string;
+  user_email: string;
+}> {
   const supa = getSupabaseAdmin();
 
-  // Pull latest row for this email
   const { data, error } = await supa
     .from("oauth_staging")
     .select("*")
     .eq("provider", "google")
-    .eq("user_email", user_email)
+    .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(1);
 
   if (error || !data?.length) {
-    throw new Error("No Google OAuth tokens found for this email");
+    throw new Error("No Google OAuth tokens found for this user");
   }
 
   const row = data[0] as OAuthRow;
-
   const now = Math.floor(Date.now() / 1000);
 
   // If valid and not near expiry (30s buffer), use it
   if (row.access_token && row.expires_at && row.expires_at > now + 30) {
-    return row.access_token;
+    return { accessToken: row.access_token, user_email: row.user_email };
   }
 
   if (!row.refresh_token) {
-    throw new Error("Missing refresh_token; re-connect Gmail with consent");
+    throw new Error("Missing refresh_token; user must re-connect Gmail");
   }
 
-  // Try refresh
+  // Refresh with Google
   const refreshed = await refreshWithGoogle(row.refresh_token);
 
   const newAccess = refreshed.access_token as string | undefined;
@@ -75,7 +79,7 @@ export async function getFreshAccessToken(
     typeof refreshed.expires_in === "number" ? refreshed.expires_in : null;
   const newExpiresAt = newExpiresIn ? now + newExpiresIn : null;
 
-  // NOTE: Google may rotate refresh_token and return a new one.
+  // Google may rotate the refresh_token
   const rotatedRefresh =
     (refreshed.refresh_token as string | undefined) ?? row.refresh_token;
 
@@ -88,8 +92,9 @@ export async function getFreshAccessToken(
       scope: refreshed.scope ?? row.scope ?? null,
       token_type: refreshed.token_type ?? row.token_type ?? "Bearer",
     })
-    .eq("id", (row as any).id);
+    .eq("id", row.id);
 
   if (!newAccess) throw new Error("Refresh returned no access_token");
-  return newAccess;
+
+  return { accessToken: newAccess, user_email: row.user_email };
 }
