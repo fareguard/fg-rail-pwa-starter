@@ -4,11 +4,11 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 
-type OAuthRow = {
+export type OAuthRow = {
   id: string;
   provider: string;
-  user_id: string;
   user_email: string;
+  user_id: string;
   access_token: string | null;
   refresh_token: string | null;
   expires_at: number | null; // unix seconds
@@ -38,20 +38,18 @@ async function refreshWithGoogle(refresh_token: string) {
 }
 
 /**
- * Get a fresh Gmail access token for a specific Supabase user.
- * Returns both the token and the Gmail address it’s tied to.
+ * Get a fresh Gmail access token for this FareGuard user (Google sub).
  */
-export async function getFreshAccessToken(userId: string): Promise<{
-  accessToken: string;
-  user_email: string;
-}> {
+export async function getFreshAccessTokenForUser(
+  user_id: string
+): Promise<{ accessToken: string; oauthRow: OAuthRow }> {
   const supa = getSupabaseAdmin();
 
   const { data, error } = await supa
     .from("oauth_staging")
     .select("*")
     .eq("provider", "google")
-    .eq("user_id", userId)
+    .eq("user_id", user_id)
     .order("created_at", { ascending: false })
     .limit(1);
 
@@ -60,18 +58,18 @@ export async function getFreshAccessToken(userId: string): Promise<{
   }
 
   const row = data[0] as OAuthRow;
+
   const now = Math.floor(Date.now() / 1000);
 
   // If valid and not near expiry (30s buffer), use it
   if (row.access_token && row.expires_at && row.expires_at > now + 30) {
-    return { accessToken: row.access_token, user_email: row.user_email };
+    return { accessToken: row.access_token, oauthRow: row };
   }
 
   if (!row.refresh_token) {
     throw new Error("Missing refresh_token; user must re-connect Gmail");
   }
 
-  // Refresh with Google
   const refreshed = await refreshWithGoogle(row.refresh_token);
 
   const newAccess = refreshed.access_token as string | undefined;
@@ -79,11 +77,10 @@ export async function getFreshAccessToken(userId: string): Promise<{
     typeof refreshed.expires_in === "number" ? refreshed.expires_in : null;
   const newExpiresAt = newExpiresIn ? now + newExpiresIn : null;
 
-  // Google may rotate the refresh_token
   const rotatedRefresh =
     (refreshed.refresh_token as string | undefined) ?? row.refresh_token;
 
-  await supa
+  const { error: upErr } = await supa
     .from("oauth_staging")
     .update({
       access_token: newAccess ?? row.access_token,
@@ -92,9 +89,23 @@ export async function getFreshAccessToken(userId: string): Promise<{
       scope: refreshed.scope ?? row.scope ?? null,
       token_type: refreshed.token_type ?? row.token_type ?? "Bearer",
     })
-    .eq("id", row.id);
+    .eq("id", (row as any).id);
 
-  if (!newAccess) throw new Error("Refresh returned no access_token");
+  if (upErr) {
+    console.error("Failed to update oauth_staging", upErr);
+  }
 
-  return { accessToken: newAccess, user_email: row.user_email };
+  if (!newAccess && !row.access_token) {
+    throw new Error("Refresh returned no access_token");
+  }
+
+  return {
+    accessToken: newAccess ?? (row.access_token as string),
+    oauthRow: {
+      ...row,
+      access_token: newAccess ?? row.access_token,
+      refresh_token: rotatedRefresh,
+      expires_at: newExpiresAt,
+    },
+  };
 }
