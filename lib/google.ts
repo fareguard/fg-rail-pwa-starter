@@ -4,11 +4,10 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 
-export type OAuthRow = {
+type OAuthRow = {
   id: string;
   provider: string;
   user_email: string;
-  user_id: string;
   access_token: string | null;
   refresh_token: string | null;
   expires_at: number | null; // unix seconds
@@ -37,37 +36,32 @@ async function refreshWithGoogle(refresh_token: string) {
   return json;
 }
 
-/**
- * Get a fresh Gmail access token for this FareGuard user (Google sub).
- */
-export async function getFreshAccessTokenForUser(
-  user_id: string
-): Promise<{ accessToken: string; oauthRow: OAuthRow }> {
+export async function getFreshAccessToken(
+  user_email: string
+): Promise<string> {
   const supa = getSupabaseAdmin();
 
   const { data, error } = await supa
     .from("oauth_staging")
     .select("*")
     .eq("provider", "google")
-    .eq("user_id", user_id)
+    .eq("user_email", user_email)
     .order("created_at", { ascending: false })
     .limit(1);
 
   if (error || !data?.length) {
-    throw new Error("No Google OAuth tokens found for this user");
+    throw new Error("No Google OAuth tokens found for this email");
   }
 
   const row = data[0] as OAuthRow;
 
   const now = Math.floor(Date.now() / 1000);
-
-  // If valid and not near expiry (30s buffer), use it
   if (row.access_token && row.expires_at && row.expires_at > now + 30) {
-    return { accessToken: row.access_token, oauthRow: row };
+    return row.access_token;
   }
 
   if (!row.refresh_token) {
-    throw new Error("Missing refresh_token; user must re-connect Gmail");
+    throw new Error("Missing refresh_token; re-connect Gmail with consent");
   }
 
   const refreshed = await refreshWithGoogle(row.refresh_token);
@@ -80,7 +74,7 @@ export async function getFreshAccessTokenForUser(
   const rotatedRefresh =
     (refreshed.refresh_token as string | undefined) ?? row.refresh_token;
 
-  const { error: upErr } = await supa
+  await supa
     .from("oauth_staging")
     .update({
       access_token: newAccess ?? row.access_token,
@@ -91,21 +85,57 @@ export async function getFreshAccessTokenForUser(
     })
     .eq("id", (row as any).id);
 
-  if (upErr) {
-    console.error("Failed to update oauth_staging", upErr);
-  }
+  if (!newAccess) throw new Error("Refresh returned no access_token");
+  return newAccess;
+}
 
-  if (!newAccess && !row.access_token) {
-    throw new Error("Refresh returned no access_token");
-  }
+// -------- NEW: code -> tokens + userinfo ------------------------------
 
-  return {
-    accessToken: newAccess ?? (row.access_token as string),
-    oauthRow: {
-      ...row,
-      access_token: newAccess ?? row.access_token,
-      refresh_token: rotatedRefresh,
-      expires_at: newExpiresAt,
-    },
+export async function exchangeCodeForTokens(
+  code: string,
+  redirectUri: string
+) {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      redirect_uri: redirectUri,
+      grant_type: "authorization_code",
+    }),
+  });
+
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      `Google token exchange failed: ${res.status} ${JSON.stringify(json)}`
+    );
+  }
+  return json;
+}
+
+export async function fetchGoogleUser(accessToken: string) {
+  const res = await fetch(
+    "https://www.googleapis.com/oauth2/v3/userinfo",
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      `Google userinfo failed: ${res.status} ${JSON.stringify(json)}`
+    );
+  }
+  return json as {
+    sub?: string;
+    email?: string;
+    name?: string;
+    picture?: string;
   };
 }
