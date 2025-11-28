@@ -12,7 +12,6 @@ const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI!;
 function parseState(state: string | null): { next: string } {
   if (!state) return { next: "/dashboard" };
 
-  // state is in the form "next=%2Fdashboard"
   try {
     const params = new URLSearchParams(state);
     const next = params.get("next") || "/dashboard";
@@ -27,7 +26,7 @@ export async function GET(req: Request) {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
 
-  // Simple health check – no code -> just confirm endpoint is alive
+  // Health check: no code → just confirm it’s reachable
   if (!code) {
     return NextResponse.json({
       ok: true,
@@ -59,7 +58,11 @@ export async function GET(req: Request) {
     if (!tokenRes.ok) {
       console.error("Google token error:", tokenJson);
       return NextResponse.json(
-        { ok: false, error: "google_token_exchange_failed", details: tokenJson },
+        {
+          ok: false,
+          error: "google_token_exchange_failed",
+          details: tokenJson,
+        },
         { status: 500 }
       );
     }
@@ -68,7 +71,8 @@ export async function GET(req: Request) {
     const refresh_token = tokenJson.refresh_token as string | undefined;
     const expires_in = tokenJson.expires_in as number | undefined;
     const scope = tokenJson.scope as string | undefined;
-    const token_type = (tokenJson.token_type as string | undefined) ?? "Bearer";
+    const token_type =
+      (tokenJson.token_type as string | undefined) ?? "Bearer";
 
     if (!access_token) {
       return NextResponse.json(
@@ -80,10 +84,14 @@ export async function GET(req: Request) {
     const now = Math.floor(Date.now() / 1000);
     const expires_at = expires_in ? now + expires_in : null;
 
-    // 2) Fetch user profile to get the Gmail address
-    const userRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-      headers: { Authorization: `Bearer ${access_token}` },
-    });
+    // 2) Fetch user profile (to get Gmail address)
+    const userRes = await fetch(
+      "https://www.googleapis.com/oauth2/v3/userinfo",
+      {
+        headers: { Authorization: `Bearer ${access_token}` },
+      }
+    );
+
     const userJson = await userRes.json();
 
     if (!userRes.ok) {
@@ -103,7 +111,7 @@ export async function GET(req: Request) {
       );
     }
 
-    // 3) Upsert into oauth_staging for this email
+    // 3) Upsert tokens into oauth_staging for this email
     const supa = getSupabaseAdmin();
 
     const { error: upsertErr } = await supa.from("oauth_staging").upsert(
@@ -115,16 +123,17 @@ export async function GET(req: Request) {
         expires_at,
         scope: scope ?? null,
         token_type,
+        user_id: null, // we’re using Gmail-as-identity, no Supabase auth user
       },
       { onConflict: "provider,user_email" } as any
     );
 
     if (upsertErr) {
       console.error("Supabase upsert oauth_staging error:", upsertErr);
-      // Still continue – we at least create a session so the user can retry
+      // we still continue and set a session – user can retry ingest if needed
     }
 
-    // 4) Create session cookie so /api/me and other routes know who this is
+    // 4) Set fg_session cookie and redirect back
     const res = NextResponse.redirect(new URL(next, url.origin));
     createSessionCookie(res, email);
 
