@@ -1,5 +1,5 @@
 // app/api/ingest/google/save/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getFreshAccessToken } from "@/lib/google";
 
@@ -59,6 +59,10 @@ function headerValue(payload: any, name: string): string | undefined {
   return h?.value;
 }
 
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
+
 function safeTimestamp(value: string | null | undefined): string | null {
   if (!value) return null;
   const d = new Date(value);
@@ -68,21 +72,26 @@ function safeTimestamp(value: string | null | undefined): string | null {
   return d.toISOString();
 }
 
-function normaliseOperatorName(
-  raw: string | null | undefined
-): string | null {
+/**
+ * Normalise operator names so the UI doesn’t get a bunch of
+ * slightly different labels for the same thing.
+ */
+function normaliseOperatorName(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const s = raw.trim();
   const lower = s.toLowerCase();
 
+  // West Midlands
   if (lower.startsWith("west midlands")) {
     return "West Midlands Railway";
   }
 
+  // CrossCountry brands
   if (lower === "crosscountry trains" || lower === "cross country trains") {
     return "CrossCountry";
   }
 
+  // Northern variants
   if (
     lower === "northern rail" ||
     lower === "northern railway" ||
@@ -94,39 +103,49 @@ function normaliseOperatorName(
   return s;
 }
 
-export async function GET(req: NextRequest) {
+// ------------------------------------------------------------------
+
+export async function GET(req: Request) {
   try {
-    const session = getSessionFromRequest(req);
-    if (!session) {
+    const supa = getSupabaseAdmin();
+
+    // 0) Get SESSION email – this is the logged-in user
+    const session = await getSessionFromRequest(req);
+    const sessionEmail = session?.email;
+
+    if (!sessionEmail) {
       return NextResponse.json(
-        { ok: false, error: "Not authenticated" },
+        { ok: false, error: "Not authenticated; no session email" },
         { status: 401 }
       );
     }
 
-    const user_email = session.email;
-
-    const supa = getSupabaseAdmin();
-
+    // 1) Find this user's Google OAuth tokens
     const { data: oauthRows, error: oErr } = await supa
       .from("oauth_staging")
       .select("*")
       .eq("provider", "google")
-      .eq("user_email", user_email)
+      .eq("user_email", sessionEmail)
       .order("created_at", { ascending: false })
       .limit(1);
 
     if (oErr) throw oErr;
     if (!oauthRows?.length) {
       return NextResponse.json(
-        { ok: false, error: "No Gmail connected for this user" },
+        {
+          ok: false,
+          error: "No Gmail connection found for this user",
+        },
         { status: 400 }
       );
     }
 
-    const { user_id: userId } = oauthRows[0] as any;
+    const { user_email, user_id: userId } = oauthRows[0] as any;
+    // NOTE: user_email should be the same as sessionEmail,
+    // but we keep it in case the DB row has a canonical casing.
     const accessToken = await getFreshAccessToken(user_email);
 
+    // 2) Gmail search query – restricted to this user's mailbox via access token
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
@@ -136,6 +155,7 @@ export async function GET(req: NextRequest) {
     url.searchParams.set("q", SEARCH_QUERY);
     url.searchParams.set("maxResults", "50");
 
+    // Optional pageToken passed in as query param
     const reqUrl = new URL(req.url);
     const requestPageToken = reqUrl.searchParams.get("pageToken");
     if (requestPageToken) {
@@ -166,10 +186,12 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    // 3) Hydrate, store raw, parse trips (with batched concurrency)
     let savedRaw = 0;
     let savedTrips = 0;
     const tripErrors: { email_id: string; message: string }[] = [];
 
+    // Chunk message IDs so we only have CONCURRENCY in flight at once
     const chunks: string[][] = [];
     for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
       chunks.push(messageIds.slice(i, i + CONCURRENCY));
@@ -178,10 +200,12 @@ export async function GET(req: NextRequest) {
     for (const chunk of chunks) {
       const results = await Promise.allSettled(
         chunk.map(async (id) => {
+          // Skip messages we've already fully parsed for THIS user
           const { data: existing } = await supa
             .from("debug_llm_outputs")
             .select("id")
             .eq("email_id", id)
+            .eq("from_addr", user_email)
             .limit(1)
             .maybeSingle();
 
@@ -189,6 +213,7 @@ export async function GET(req: NextRequest) {
             return;
           }
 
+          // Fetch full Gmail message
           const fullMsg = await fetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
             { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -199,6 +224,7 @@ export async function GET(req: NextRequest) {
           const body = extractBody(fullMsg.payload);
           const snippet = fullMsg.snippet || "";
 
+          // ---- Save raw email (idempotent upsert) ----
           const { error: rawErr } = await supa.from("raw_emails").upsert(
             {
               provider: "google",
@@ -214,10 +240,12 @@ export async function GET(req: NextRequest) {
 
           if (!rawErr) savedRaw++;
 
+          // ---- Filter non-train emails BEFORE parsing ----
           if (!isTrainEmail({ from, subject, body })) {
             return;
           }
 
+          // ---- Call ingestEmail (LLM parser + gating) ----
           const parsed: any = await ingestEmail({
             id,
             from,
@@ -226,6 +254,7 @@ export async function GET(req: NextRequest) {
             snippet,
           });
 
+          // ---- Log into debug_llm_outputs for inspection ----
           try {
             await supa.from("debug_llm_outputs").insert({
               email_id: id,
@@ -235,14 +264,19 @@ export async function GET(req: NextRequest) {
               raw_output: JSON.stringify(parsed),
             });
           } catch {
-            // ignore debug failures
+            // swallow debug errors
           }
 
+          // If ingestEmail says "not a usable ticket", skip
           if (!parsed?.is_ticket) {
             return;
           }
 
-          const operatorRaw = parsed.operator ?? parsed.provider ?? null;
+          // ------------------------------- 
+          // Normalised fields for insert
+          // -------------------------------
+          const operatorRaw =
+            parsed.operator ?? parsed.provider ?? null;
           const operator = normaliseOperatorName(operatorRaw);
           const retailer = parsed.retailer ?? parsed.provider ?? null;
 
@@ -256,6 +290,7 @@ export async function GET(req: NextRequest) {
           const arriveIso = safeTimestamp(arriveStr);
           const outboundIso = safeTimestamp(outboundStr);
 
+          // De-duplication for THIS user: same booking_ref + route
           let existingTrip:
             | { id: string; depart_planned: string | null }
             | null = null;
@@ -275,6 +310,7 @@ export async function GET(req: NextRequest) {
             }
           }
 
+          // If we already have a trip, keep the earliest depart_planned
           let finalDepart = departIso;
           if (existingTrip?.depart_planned && finalDepart) {
             const existingDate = new Date(existingTrip.depart_planned);
@@ -285,8 +321,8 @@ export async function GET(req: NextRequest) {
           }
 
           const baseRecord = {
-            user_id: userId,
-            user_email,
+            user_id: userId ?? null,
+            user_email,  // <= this is the Gmail address tied to this session
             retailer,
             email_id: id,
             operator,
@@ -342,7 +378,7 @@ export async function GET(req: NextRequest) {
       trip_errors: tripErrors,
     });
   } catch (e: any) {
-    console.error("ingest/google/save error", e);
+    console.error("Ingest error", e);
     return NextResponse.json(
       { ok: false, error: e?.message || String(e) },
       { status: 500 }
