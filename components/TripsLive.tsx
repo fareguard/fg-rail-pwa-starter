@@ -543,14 +543,6 @@ const activeButton = {
 // -------------------------------------------------------------
 
 export default function TripsLive() {
-  const { data, error, isValidating } = useSWR<TripsResponse>(
-    "/api/trips/list",
-    fetcher,
-    {
-      refreshInterval: 60_000,
-    },
-  );
-
   // 1) Safe default — no localStorage on initial render
   const [sortOrder, setSortOrder] = useState<SortOrder>("latest");
 
@@ -583,6 +575,15 @@ export default function TripsLive() {
       // ignore
     }
   }, [sortOrder]);
+
+  // ✅ Call /dashboard/trips with the current sort order
+  const { data, error, isValidating } = useSWR<TripsResponse>(
+    `/dashboard/trips?sort=${sortOrder}`,
+    fetcher,
+    {
+      refreshInterval: 60_000,
+    },
+  );
 
   // 4) Derived data – keep hooks ABOVE any early returns
   const trips = useMemo(
