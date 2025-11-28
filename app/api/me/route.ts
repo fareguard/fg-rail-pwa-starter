@@ -1,10 +1,7 @@
 // app/api/me/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import {
-  decodeSession,
-  SESSION_COOKIE_NAME,
-} from "@/lib/session";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -19,23 +16,33 @@ function noStoreJson(body: any, status = 200) {
   return res;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const cookieStore = cookies();
-    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+    // 🔑 Read fg_session cookie → { email } or null
+    const session = await getSessionFromRequest(req);
+    const email = session?.email;
 
-    const session = decodeSession(raw);
-
-    if (session?.email) {
-      return noStoreJson({
-        authenticated: true,
-        email: session.email,
-        via: "gmail-session",
-      });
+    if (!email) {
+      return noStoreJson({ authenticated: false });
     }
 
-    // No valid session cookie → not authenticated
-    return noStoreJson({ authenticated: false });
+    // Optional: check that this Gmail actually has OAuth tokens in oauth_staging
+    const admin = getSupabaseAdmin();
+    const { data, error } = await admin
+      .from("oauth_staging")
+      .select("user_email")
+      .eq("provider", "google")
+      .eq("user_email", email)
+      .maybeSingle();
+
+    const gmailConnected = !error && !!data;
+
+    return noStoreJson({
+      authenticated: true,
+      email,
+      via: "gmail-session",
+      gmailConnected,
+    });
   } catch (e: any) {
     return noStoreJson({
       authenticated: false,
