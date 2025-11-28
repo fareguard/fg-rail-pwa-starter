@@ -1,96 +1,54 @@
 // lib/session.ts
 import crypto from "crypto";
-import type { NextRequest } from "next/server";
 
 export const SESSION_COOKIE_NAME = "fg_session";
-export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
-
-const SESSION_SECRET = process.env.SESSION_SECRET;
-
-function ensureSecret(): string {
-  if (!SESSION_SECRET) {
-    throw new Error("SESSION_SECRET env var is required");
-  }
-  return SESSION_SECRET;
-}
 
 export type SessionPayload = {
   email: string;
-  provider: "google";
-  sub?: string;
-  iat: number; // seconds
-  exp: number; // seconds
+  createdAt: number;
 };
 
-function b64u(input: Buffer | string): string {
-  const buf = Buffer.isBuffer(input) ? input : Buffer.from(input);
-  return buf
-    .toString("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+function getSessionSecret(): string {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) {
+    // important: throw only when called, not at import time
+    throw new Error("SESSION_SECRET env var is missing");
+  }
+  return secret;
 }
 
-function b64uDecode(str: string): Buffer {
-  let s = str.replace(/-/g, "+").replace(/_/g, "/");
-  while (s.length % 4) s += "=";
-  return Buffer.from(s, "base64");
+export function encodeSession(payload: SessionPayload): string {
+  const json = JSON.stringify(payload);
+  const b64 = Buffer.from(json, "utf8").toString("base64url");
+  const secret = getSessionSecret();
+  const sig = crypto.createHmac("sha256", secret).update(b64).digest("hex");
+  return `${b64}.${sig}`;
 }
 
-function sign(payload: SessionPayload): string {
-  const body = b64u(JSON.stringify(payload));
-  const hmac = crypto
-    .createHmac("sha256", ensureSecret())
-    .update(body)
-    .digest();
-  const sig = b64u(hmac);
-  return `${body}.${sig}`;
-}
+export function decodeSession(raw: string | undefined | null): SessionPayload | null {
+  if (!raw) return null;
+  const [b64, sig] = raw.split(".");
+  if (!b64 || !sig) return null;
 
-function verifyToken(token: string): SessionPayload | null {
-  const parts = token.split(".");
-  if (parts.length !== 2) return null;
-  const [body, sig] = parts;
-
-  const expectedSig = b64u(
-    crypto.createHmac("sha256", ensureSecret()).update(body).digest()
-  );
-
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expectedSig);
-  if (a.length !== b.length) return null;
-  if (!crypto.timingSafeEqual(a, b)) return null;
+  const secret = getSessionSecret();
+  const expected = crypto.createHmac("sha256", secret).update(b64).digest("hex");
 
   try {
-    const json = JSON.parse(b64uDecode(body).toString("utf8")) as SessionPayload;
-    const now = Math.floor(Date.now() / 1000);
-    if (json.exp && json.exp < now) return null;
-    return json;
+    // timing-safe compare when lengths match
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) return null;
+    if (!crypto.timingSafeEqual(a, b)) return null;
+  } catch {
+    if (sig !== expected) return null;
+  }
+
+  try {
+    const json = Buffer.from(b64, "base64url").toString("utf8");
+    const payload = JSON.parse(json);
+    if (!payload?.email) return null;
+    return payload;
   } catch {
     return null;
   }
-}
-
-export function createSessionToken(input: {
-  email: string;
-  provider?: "google";
-  sub?: string;
-}): string {
-  const now = Math.floor(Date.now() / 1000);
-  const payload: SessionPayload = {
-    email: input.email,
-    provider: input.provider ?? "google",
-    sub: input.sub,
-    iat: now,
-    exp: now + SESSION_TTL_SECONDS,
-  };
-  return sign(payload);
-}
-
-export function getSessionFromRequest(
-  req: NextRequest
-): SessionPayload | null {
-  const cookie = req.cookies.get(SESSION_COOKIE_NAME)?.value;
-  if (!cookie) return null;
-  return verifyToken(cookie);
 }
