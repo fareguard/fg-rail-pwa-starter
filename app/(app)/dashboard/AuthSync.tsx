@@ -1,21 +1,52 @@
-"use client";
+// app/dashboard/trips-live/route.ts
+import { NextResponse } from "next/server";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getSessionFromRequest } from "@/lib/session";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
-export default function AuthSync() {
-  const router = useRouter();
+function noStoreJson(body: any, status = 200) {
+  const res = NextResponse.json(body, { status });
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  return res;
+}
 
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "fg-auth-ok") {
-        // Re-render server components to pick up the new auth session
-        router.refresh();
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [router]);
+export async function GET(req: Request) {
+  try {
+    const session = await getSessionFromRequest(req);
+    const email = session?.email;
 
-  return null;
+    if (!email) {
+      return noStoreJson(
+        { ok: false, error: "Not authenticated", trips: [] },
+        401
+      );
+    }
+
+    const supa = getSupabaseAdmin();
+
+    const { searchParams } = new URL(req.url);
+    const sortDir = searchParams.get("sort") === "asc" ? "asc" : "desc";
+
+    const { data, error } = await supa
+      .from("trips")
+      .select("*")
+      .eq("user_email", email)           // 🔑 Filter by logged-in Gmail
+      .order("depart_planned", { ascending: sortDir === "asc" });
+
+    if (error) throw error;
+
+    return noStoreJson({
+      ok: true,
+      trips: data ?? [],
+    });
+  } catch (e: any) {
+    console.error("trips-live error", e);
+    return noStoreJson(
+      { ok: false, error: String(e?.message || e), trips: [] },
+      500
+    );
+  }
 }
