@@ -11,7 +11,6 @@ export type SessionPayload = {
 function getSessionSecret(): string {
   const secret = process.env.SESSION_SECRET;
   if (!secret) {
-    // important: throw only when called, not at import time
     throw new Error("SESSION_SECRET env var is missing");
   }
   return secret;
@@ -25,7 +24,9 @@ export function encodeSession(payload: SessionPayload): string {
   return `${b64}.${sig}`;
 }
 
-export function decodeSession(raw: string | undefined | null): SessionPayload | null {
+export function decodeSession(
+  raw: string | undefined | null
+): SessionPayload | null {
   if (!raw) return null;
   const [b64, sig] = raw.split(".");
   if (!b64 || !sig) return null;
@@ -34,7 +35,6 @@ export function decodeSession(raw: string | undefined | null): SessionPayload | 
   const expected = crypto.createHmac("sha256", secret).update(b64).digest("hex");
 
   try {
-    // timing-safe compare when lengths match
     const a = Buffer.from(sig);
     const b = Buffer.from(expected);
     if (a.length !== b.length) return null;
@@ -51,4 +51,35 @@ export function decodeSession(raw: string | undefined | null): SessionPayload | 
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------
+// Helper for API routes: pull the session from the Request cookies
+// ---------------------------------------------------------------------
+
+function readCookieFromHeader(
+  cookieHeader: string | null,
+  name: string
+): string | undefined {
+  if (!cookieHeader) return undefined;
+  const parts = cookieHeader.split(";");
+
+  for (const part of parts) {
+    const [rawKey, ...rawVal] = part.trim().split("=");
+    if (!rawKey) continue;
+    if (rawKey === name) {
+      return decodeURIComponent(rawVal.join("="));
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Used in API route handlers that only have the `Request` object,
+ * e.g. app/api/ingest/google/save/route.ts
+ */
+export function getSessionFromRequest(req: Request): SessionPayload | null {
+  const cookieHeader = req.headers.get("cookie");
+  const raw = readCookieFromHeader(cookieHeader, SESSION_COOKIE_NAME);
+  return decodeSession(raw);
 }
