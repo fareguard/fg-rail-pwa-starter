@@ -1,6 +1,10 @@
 // app/api/me/route.ts
 import { NextResponse } from "next/server";
-import { parseUserFromRequest } from "@/lib/oauth";
+import { cookies } from "next/headers";
+import {
+  decodeSession,
+  SESSION_COOKIE_NAME,
+} from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -17,17 +21,20 @@ function noStoreJson(body: any, status = 200) {
 
 export async function GET() {
   try {
-    const sessionUser = parseUserFromRequest();
+    const cookieStore = cookies();
+    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value;
 
-    if (sessionUser) {
+    const session = decodeSession(raw);
+
+    if (session?.email) {
       return noStoreJson({
         authenticated: true,
-        email: sessionUser.email,
+        email: session.email,
         via: "gmail-session",
       });
     }
 
-    // Not logged in
+    // No valid session cookie → not authenticated
     return noStoreJson({ authenticated: false });
   } catch (e: any) {
     return noStoreJson({
