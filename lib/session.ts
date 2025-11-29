@@ -47,7 +47,7 @@ export function decodeSession(cookieValue?: string | null): SessionPayload | nul
 }
 
 // Helper used in API routes that return a NextResponse
-export function createSessionCookie(res: import("next/server").NextResponse, email: string) {
+export function createSessionCookie(res: any, email: string) {
   const value = encodeSession({ email });
   res.cookies.set(SESSION_COOKIE_NAME, value, {
     httpOnly: true,
@@ -56,22 +56,4 @@ export function createSessionCookie(res: import("next/server").NextResponse, ema
     path: "/",
     maxAge: 60 * 60 * 24 * 365, // 1 year
   });
-}
-
-// Helper to read session from any Request (Node or Edge)
-export async function getSessionFromRequest(req: Request): Promise<SessionPayload | null> {
-  const header = req.headers.get("cookie") || "";
-  const cookies = Object.fromEntries(
-    header
-      .split(";")
-      .map((c) => c.trim())
-      .filter(Boolean)
-      .map((c) => {
-        const idx = c.indexOf("=");
-        if (idx === -1) return [c, ""];
-        return [c.slice(0, idx), decodeURIComponent(c.slice(idx + 1))];
-      })
-  );
-  const raw = cookies[SESSION_COOKIE_NAME];
-  return decodeSession(raw);
 }
