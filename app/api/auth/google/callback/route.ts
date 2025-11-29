@@ -21,8 +21,6 @@ async function exchangeCodeForTokens(code: string) {
       client_secret: GOOGLE_CLIENT_SECRET,
       redirect_uri: GOOGLE_REDIRECT_URI,
       grant_type: "authorization_code",
-      // offline so we get refresh_token
-      access_type: "offline",
     }),
   });
 
@@ -66,7 +64,6 @@ export async function GET(req: NextRequest) {
     const expiresIn = typeof tokens.expires_in === "number" ? tokens.expires_in : null;
     const scope = (tokens.scope as string | undefined) || null;
     const tokenType = (tokens.token_type as string | undefined) || "Bearer";
-
     const expiresAt =
       expiresIn != null ? Math.floor(Date.now() / 1000) + expiresIn : null;
 
@@ -78,50 +75,7 @@ export async function GET(req: NextRequest) {
       throw new Error("no_email_from_google");
     }
 
-    const supa = getSupabaseAdmin();
-
-    // Upsert into oauth_accounts (identity table)
-    await supa
-      .from("oauth_accounts")
-      .upsert(
-        {
-          provider: "google",
-          provider_user_id: profile.sub || email,
-          email,
-          raw_profile: profile,
-        },
-        { onConflict: "provider,provider_user_id" } as any
-      );
-
-    // Upsert into oauth_staging (tokens used by ingest)
-    await supa
-      .from("oauth_staging")
-      .upsert(
-        {
-          provider: "google",
-          user_email: email,
-          access_token: accessToken,
-          refresh_token: refreshToken,
-          expires_at: expiresAt,
-          scope,
-          token_type: tokenType,
-        },
-        { onConflict: "provider,user_email" } as any
-      );
-
-    // Also ensure a row exists in profiles (if you use it)
-    await supa
-      .from("profiles")
-      .upsert(
-        {
-          email,
-          provider: "google",
-          last_login_at: new Date().toISOString(),
-        },
-        { onConflict: "email" } as any
-      );
-
-    // Build redirect target (default: /dashboard)
+    // Decide where to send them after login
     let nextPath = "/dashboard";
     if (state && state.startsWith("next=")) {
       const raw = state.slice("next=".length);
@@ -129,14 +83,65 @@ export async function GET(req: NextRequest) {
         const decoded = decodeURIComponent(raw);
         if (decoded.startsWith("/")) nextPath = decoded;
       } catch {
-        // ignore
+        // ignore bad state
       }
     }
 
-    // Redirect with session cookie set
-    const res = NextResponse.redirect(new URL(nextPath, url.origin));
-    createSessionCookie(res, email); // 🔑 this ties the browser to THIS gmail
-    return res;
+    const redirectRes = NextResponse.redirect(new URL(nextPath, url.origin));
+
+    // 🔑 Set session cookie FIRST (so even if Supabase upsert fails, they are “logged in”)
+    createSessionCookie(redirectRes, email);
+
+    // 🔑 Best-effort upserts into Supabase (don’t block login)
+    try {
+      const supa = getSupabaseAdmin();
+
+      // identity table
+      await supa
+        .from("oauth_accounts")
+        .upsert(
+          {
+            provider: "google",
+            provider_user_id: profile.sub || email,
+            email,
+            raw_profile: profile,
+          },
+          { onConflict: "provider,provider_user_id" } as any
+        );
+
+      // tokens used by Gmail ingest
+      await supa
+        .from("oauth_staging")
+        .upsert(
+          {
+            provider: "google",
+            user_email: email,
+            access_token: accessToken,
+            refresh_token: refreshToken,
+            expires_at: expiresAt,
+            scope,
+            token_type: tokenType,
+          },
+          { onConflict: "provider,user_email" } as any
+        );
+
+      // simple profile table if you keep one
+      await supa
+        .from("profiles")
+        .upsert(
+          {
+            email,
+            provider: "google",
+            last_login_at: new Date().toISOString(),
+          },
+          { onConflict: "email" } as any
+        );
+    } catch (e) {
+      console.error("Supabase upsert error in callback", e);
+      // we still return redirectRes
+    }
+
+    return redirectRes;
   } catch (e: any) {
     console.error("google callback error", e);
     return NextResponse.json(
