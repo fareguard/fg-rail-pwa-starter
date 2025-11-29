@@ -1,54 +1,47 @@
 // app/api/trips/route.ts
-import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { NextRequest, NextResponse } from "next/server";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
-export const fetchCache = "force-no-store";
+export const runtime = "nodejs";
 
-function getServerClient() {
-  const cookieStore = cookies();
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get(name: string) {
-          return cookieStore.get(name)?.value;
-        },
-        set(name: string, value: string, options: CookieOptions) {
-          cookieStore.set({ name, value, ...options });
-        },
-        remove(name: string, options: CookieOptions) {
-          cookieStore.set({ name, value: "", ...options });
-        },
-      },
-    }
-  );
+function noStoreJson(body: any, status = 200) {
+  const res = NextResponse.json(body, { status });
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  return res;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const supabase = getServerClient();
-    const { data: auth } = await supabase.auth.getUser();
-    const email = auth?.user?.email ?? null;
+    const session = await getSessionFromRequest(req);
+    const email = session?.email;
 
-    if (!email) return NextResponse.json({ trips: [] }, { status: 200 });
+    if (!email) {
+      return noStoreJson(
+        { ok: false, error: "Not authenticated", trips: [] },
+        401
+      );
+    }
 
-    const { data, error } = await supabase
+    const supa = getSupabaseAdmin();
+    const { searchParams } = new URL(req.url);
+    const sortDir = searchParams.get("sort") === "asc" ? "asc" : "desc";
+
+    const { data, error } = await supa
       .from("trips")
-      .select(
-        "id, origin, destination, operator, retailer, booking_ref, depart_planned, arrive_planned, is_ticket, status, created_at"
-      )
+      .select("*")
       .eq("user_email", email)
-      .order("created_at", { ascending: false })
-      .limit(50);
+      .order("depart_planned", { ascending: sortDir === "asc" });
 
-    if (error) return NextResponse.json({ trips: [] }, { status: 200 });
+    if (error) throw error;
 
-    return NextResponse.json({ trips: data ?? [] }, { status: 200 });
-  } catch {
-    return NextResponse.json({ trips: [] }, { status: 200 });
+    return noStoreJson({ ok: true, trips: data ?? [] });
+  } catch (e: any) {
+    console.error("trips api error", e);
+    return noStoreJson(
+      { ok: false, error: String(e?.message || e), trips: [] },
+      500
+    );
   }
 }
