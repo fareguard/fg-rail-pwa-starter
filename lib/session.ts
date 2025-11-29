@@ -1,92 +1,55 @@
 // lib/session.ts
-import { NextResponse } from "next/server";
 import crypto from "crypto";
 
-const SESSION_COOKIE_NAME = "fg_session";
-const SESSION_SECRET = process.env.SESSION_SECRET;
+export const SESSION_COOKIE_NAME = "fg_session";
 
+const SESSION_SECRET = process.env.SESSION_SECRET;
 if (!SESSION_SECRET) {
   throw new Error("SESSION_SECRET env var is required");
 }
 
 type SessionPayload = {
   email: string;
-  iat: number;
 };
 
-function base64url(input: Buffer | string): string {
-  const buf = Buffer.isBuffer(input) ? input : Buffer.from(input);
-  return buf
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+function sign(value: string): string {
+  return crypto.createHmac("sha256", SESSION_SECRET!).update(value).digest("hex");
 }
 
-function fromBase64url(input: string): Buffer {
-  const pad = input.length % 4;
-  const base64 =
-    input.replace(/-/g, "+").replace(/_/g, "/") +
-    (pad ? "=".repeat(4 - pad) : "");
-  return Buffer.from(base64, "base64");
+// Encode { email } into a signed cookie string
+export function encodeSession(payload: SessionPayload): string {
+  const raw = JSON.stringify(payload);
+  const b64 = Buffer.from(raw, "utf8").toString("base64url");
+  const sig = sign(b64);
+  return `${b64}.${sig}`;
 }
 
-function sign(payloadB64: string): string {
-  const h = crypto.createHmac("sha256", SESSION_SECRET as string);
-  h.update(payloadB64);
-  return base64url(h.digest());
-}
+// Decode + verify cookie string back into { email } or null
+export function decodeSession(cookieValue?: string | null): SessionPayload | null {
+  if (!cookieValue) return null;
+  const parts = cookieValue.split(".");
+  if (parts.length !== 2) return null;
 
-/**
- * Read & verify the fg_session cookie from an API Request.
- * Returns { email } or null if missing/invalid.
- */
-export async function getSessionFromRequest(
-  req: Request
-): Promise<{ email: string } | null> {
-  const cookieHeader = req.headers.get("cookie") || "";
-  if (!cookieHeader) return null;
-
-  const cookies = cookieHeader.split(";").map((c) => c.trim());
-  const match = cookies.find((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
-  if (!match) return null;
-
-  const rawValue = decodeURIComponent(match.split("=").slice(1).join("="));
-  const [payloadB64, sig] = rawValue.split(".");
-  if (!payloadB64 || !sig) return null;
-
-  const expectedSig = sign(payloadB64);
-  if (sig !== expectedSig) {
-    // signature mismatch → treat as no session
+  const [b64, sig] = parts;
+  const expected = sign(b64);
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
     return null;
   }
 
   try {
-    const json = fromBase64url(payloadB64).toString("utf8");
-    const data = JSON.parse(json) as SessionPayload;
-    if (!data.email || typeof data.email !== "string") return null;
-    return { email: data.email };
+    const json = Buffer.from(b64, "base64url").toString("utf8");
+    const parsed = JSON.parse(json);
+    if (!parsed?.email || typeof parsed.email !== "string") return null;
+    return { email: parsed.email };
   } catch {
     return null;
   }
 }
 
-/**
- * Set a signed fg_session cookie on the response for the given email.
- */
-export function createSessionCookie(res: NextResponse, email: string): void {
-  const payload: SessionPayload = {
-    email,
-    iat: Math.floor(Date.now() / 1000),
-  };
-
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const sig = sign(payloadB64);
-  const value = `${payloadB64}.${sig}`;
-
-  res.cookies.set({
-    name: SESSION_COOKIE_NAME,
-    value,
+// Helper used in API routes that return a NextResponse
+export function createSessionCookie(res: import("next/server").NextResponse, email: string) {
+  const value = encodeSession({ email });
+  res.cookies.set(SESSION_COOKIE_NAME, value, {
     httpOnly: true,
     secure: true,
     sameSite: "lax",
@@ -95,17 +58,20 @@ export function createSessionCookie(res: NextResponse, email: string): void {
   });
 }
 
-/**
- * Clear the fg_session cookie (log out).
- */
-export function clearSessionCookie(res: NextResponse): void {
-  res.cookies.set({
-    name: SESSION_COOKIE_NAME,
-    value: "",
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 0,
-  });
+// Helper to read session from any Request (Node or Edge)
+export async function getSessionFromRequest(req: Request): Promise<SessionPayload | null> {
+  const header = req.headers.get("cookie") || "";
+  const cookies = Object.fromEntries(
+    header
+      .split(";")
+      .map((c) => c.trim())
+      .filter(Boolean)
+      .map((c) => {
+        const idx = c.indexOf("=");
+        if (idx === -1) return [c, ""];
+        return [c.slice(0, idx), decodeURIComponent(c.slice(idx + 1))];
+      })
+  );
+  const raw = cookies[SESSION_COOKIE_NAME];
+  return decodeSession(raw);
 }
