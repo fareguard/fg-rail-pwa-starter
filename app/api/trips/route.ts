@@ -1,7 +1,8 @@
 // app/api/trips/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { getSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -14,7 +15,9 @@ function noStoreJson(body: any, status = 200) {
 
 export async function GET(req: NextRequest) {
   try {
-    const session = await getSessionFromRequest(req);
+    const cookieStore = cookies();
+    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
+    const session = decodeSession(raw);
     const email = session?.email;
 
     if (!email) {
