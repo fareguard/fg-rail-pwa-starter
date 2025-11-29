@@ -576,9 +576,9 @@ export default function TripsLive() {
     }
   }, [sortOrder]);
 
-  // ✅ Call /dashboard/trips with the current sort order
+  // ✅ Call /api/trips with the current sort order
   const { data, error, isValidating } = useSWR<TripsResponse>(
-    `/dashboard/trips?sort=${sortOrder}`,
+    `/api/trips?sort=${sortOrder}`,
     fetcher,
     {
       refreshInterval: 60_000,
