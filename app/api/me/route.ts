@@ -1,7 +1,7 @@
 // app/api/me/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import { SESSION_COOKIE_NAME, decodeSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -16,8 +16,8 @@ function noStoreJson(body: any, status = 200) {
 export async function GET() {
   try {
     const cookieStore = cookies();
-    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
-    const session = decodeSession(raw);
+    const token = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
+    const session = decodeSession(token);
 
     if (!session?.email) {
       return noStoreJson({ authenticated: false });
