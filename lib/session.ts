@@ -71,6 +71,3 @@ export function getSessionFromRequest(req: Request): SessionPayload | null {
   }
   return decodeSession(token);
 }
-
-// Convenience for code that already imported this earlier
-export { decodeSession };
