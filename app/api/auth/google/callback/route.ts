@@ -153,13 +153,19 @@ export async function GET(req: Request) {
       // We still continue, because the session is useful even if tokens fail
     }
 
-    // (Optional) basic profiles table – safe insert on email
-    try {
-      await supa.from("profiles").insert({ email }).onConflict("email");
-    } catch (e) {
-      // Non-fatal if profiles table isn't exactly this shape
-      console.warn("profiles insert failed (non-fatal):", e);
-    }
+   // (Optional) basic profiles table – safe upsert on email
+try {
+  await supa
+    .from("profiles")
+    .upsert(
+      { email },
+      // TS types for `onConflict` are a bit picky, so cast options
+      { onConflict: "email", ignoreDuplicates: true } as any
+    );
+} catch (e) {
+  // Non-fatal if profiles table isn't exactly this shape
+  console.warn("profiles upsert failed (non-fatal):", e);
+}
 
     // 4) Create the session cookie from Gmail address
     await createSessionCookie(email);
