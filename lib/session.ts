@@ -2,58 +2,75 @@
 import crypto from "crypto";
 
 export const SESSION_COOKIE_NAME = "fg_session";
+const SESSION_SECRET = process.env.SESSION_SECRET || "dev-secret-change-me";
 
-const SESSION_SECRET = process.env.SESSION_SECRET;
-if (!SESSION_SECRET) {
-  throw new Error("SESSION_SECRET env var is required");
-}
-
-type SessionPayload = {
+export type SessionPayload = {
   email: string;
+  iat: number;
 };
 
-function sign(value: string): string {
-  return crypto.createHmac("sha256", SESSION_SECRET!).update(value).digest("hex");
+// --- small helpers ---------------------------------------------------------
+
+function base64url(buffer: Buffer) {
+  return buffer
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }
 
-// Encode { email } into a signed cookie string
+function sign(data: string): string {
+  const h = crypto.createHmac("sha256", SESSION_SECRET);
+  h.update(data);
+  return base64url(h.digest());
+}
+
+// ---------------------------------------------------------------------------
+// Encode / decode
+// ---------------------------------------------------------------------------
+
 export function encodeSession(payload: SessionPayload): string {
-  const raw = JSON.stringify(payload);
-  const b64 = Buffer.from(raw, "utf8").toString("base64url");
-  const sig = sign(b64);
-  return `${b64}.${sig}`;
+  const json = JSON.stringify(payload);
+  const body = base64url(Buffer.from(json, "utf8"));
+  const signature = sign(body);
+  return `${body}.${signature}`;
 }
 
-// Decode + verify cookie string back into { email } or null
-export function decodeSession(cookieValue?: string | null): SessionPayload | null {
-  if (!cookieValue) return null;
-  const parts = cookieValue.split(".");
+export function decodeSession(token: string | null | undefined): SessionPayload | null {
+  if (!token) return null;
+  const parts = token.split(".");
   if (parts.length !== 2) return null;
-
-  const [b64, sig] = parts;
-  const expected = sign(b64);
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
-    return null;
-  }
+  const [body, sig] = parts;
+  if (sign(body) !== sig) return null;
 
   try {
-    const json = Buffer.from(b64, "base64url").toString("utf8");
+    const json = Buffer.from(body, "base64").toString("utf8");
     const parsed = JSON.parse(json);
-    if (!parsed?.email || typeof parsed.email !== "string") return null;
-    return { email: parsed.email };
+    if (!parsed || typeof parsed.email !== "string") return null;
+    return { email: parsed.email, iat: parsed.iat ?? 0 };
   } catch {
     return null;
   }
 }
 
-// Helper used in API routes that return a NextResponse
-export function createSessionCookie(res: any, email: string) {
-  const value = encodeSession({ email });
-  res.cookies.set(SESSION_COOKIE_NAME, value, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 365, // 1 year
-  });
+// ---------------------------------------------------------------------------
+// Read session from a Request (for Route Handlers)
+// ---------------------------------------------------------------------------
+
+export function getSessionFromRequest(req: Request): SessionPayload | null {
+  const cookieHeader = req.headers.get("cookie") || "";
+  const parts = cookieHeader.split(";");
+
+  let token: string | null = null;
+  for (const part of parts) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === SESSION_COOKIE_NAME) {
+      token = decodeURIComponent(rest.join("="));
+      break;
+    }
+  }
+  return decodeSession(token);
 }
+
+// Convenience for code that already imported this earlier
+export { decodeSession };
