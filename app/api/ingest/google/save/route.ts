@@ -1,11 +1,10 @@
 // app/api/ingest/google/save/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getFreshAccessToken } from "@/lib/google";
 import { isTrainEmail } from "@/lib/trainEmailFilter";
 import { ingestEmail } from "@/lib/ingestEmail";
-import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import getSessionFromRequest from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -104,13 +103,10 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
 
 export async function GET(req: NextRequest) {
   try {
-    // 🔑 1) Read session from cookie
-    const cookieStore = cookies();
-    const rawSession = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
-    const session = decodeSession(rawSession);
-    const email = session?.email;
+    const session = await getSessionFromRequest(req);
+    const user_email = session?.email;
 
-    if (!email) {
+    if (!user_email) {
       return noStoreJson(
         { ok: false, error: "Not authenticated", scanned: 0, saved_trips: 0 },
         401
@@ -118,7 +114,7 @@ export async function GET(req: NextRequest) {
     }
 
     const supa = getSupabaseAdmin();
-    const accessToken = await getFreshAccessToken(email);
+    const accessToken = await getFreshAccessToken(user_email);
 
     // 2) Build Gmail search query
     const SEARCH_QUERY =
@@ -155,7 +151,7 @@ export async function GET(req: NextRequest) {
         saved_raw: 0,
         saved_trips: 0,
         nextPageToken: list.nextPageToken ?? null,
-        user_email: email,
+        user_email,
         trip_errors: [],
       });
     }
@@ -199,7 +195,7 @@ export async function GET(req: NextRequest) {
           const { error: rawErr } = await supa.from("raw_emails").upsert(
             {
               provider: "google",
-              user_email: email,
+              user_email,
               message_id: id,
               subject,
               sender: from,
@@ -265,7 +261,7 @@ export async function GET(req: NextRequest) {
             const { data: existingRows, error: existingErr } = await supa
               .from("trips")
               .select("id, depart_planned")
-              .eq("user_email", email)
+              .eq("user_email", user_email)
               .eq("booking_ref", parsed.booking_ref)
               .eq("origin", parsed.origin)
               .eq("destination", parsed.destination)
@@ -286,7 +282,7 @@ export async function GET(req: NextRequest) {
           }
 
           const baseRecord = {
-            user_email: email,
+            user_email,
             retailer,
             email_id: id,
             operator,
@@ -338,7 +334,7 @@ export async function GET(req: NextRequest) {
       saved_raw: savedRaw,
       saved_trips: savedTrips,
       nextPageToken: list.nextPageToken ?? null,
-      user_email: email,
+      user_email,
       trip_errors: tripErrors,
     });
   } catch (e: any) {
