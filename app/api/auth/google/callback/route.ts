@@ -1,29 +1,57 @@
 // app/api/auth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { encodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import { createSessionCookie } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI!;
+const GOOGLE_REDIRECT_URI =
+  process.env.GOOGLE_REDIRECT_URI ||
+  `${process.env.NEXT_PUBLIC_SITE_URL}/api/auth/google/callback`;
+
+function noStoreRedirect(url: string) {
+  const res = NextResponse.redirect(url);
+  res.headers.set(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, max-age=0"
+  );
+  return res;
+}
+
+function noStoreJson(body: any, status = 200) {
+  const res = NextResponse.json(body, { status });
+  res.headers.set(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, max-age=0"
+  );
+  return res;
+}
 
 export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const code = url.searchParams.get("code");
-  const stateStr = url.searchParams.get("state") || "";
-
-  const stateParams = new URLSearchParams(stateStr);
-  const nextPath = stateParams.get("next") || "/dashboard";
-
-  if (!code) {
-    // Nothing we can do – just bounce back
-    return NextResponse.redirect(nextPath);
-  }
-
   try {
-    // 1) Exchange code for tokens
+    const { searchParams } = new URL(req.url);
+    const code = searchParams.get("code");
+    const state = searchParams.get("state") || "";
+
+    // Fallback if something weird happens
+    let nextPath = "/dashboard";
+    const m = state.match(/next=([^&]+)/);
+    if (m) {
+      try {
+        nextPath = decodeURIComponent(m[1]);
+      } catch {
+        nextPath = "/dashboard";
+      }
+    }
+
+    if (!code) {
+      // If Google hits us without a code, just bounce to dashboard
+      return noStoreRedirect(nextPath);
+    }
+
+    // 1) Exchange auth code for tokens
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -36,90 +64,113 @@ export async function GET(req: Request) {
       }),
     });
 
-    const tokenJson = await tokenRes.json();
+    const tokenJson: any = await tokenRes.json();
 
     if (!tokenRes.ok) {
       console.error("Google token exchange failed", tokenRes.status, tokenJson);
-      return NextResponse.redirect(nextPath);
+      return noStoreJson(
+        {
+          ok: false,
+          step: "token",
+          error: "google_token_exchange_failed",
+          detail: tokenJson,
+        },
+        500
+      );
     }
 
-    const access_token: string = tokenJson.access_token;
+    const access_token: string | undefined = tokenJson.access_token;
     const refresh_token: string | undefined = tokenJson.refresh_token;
     const expires_in: number | undefined = tokenJson.expires_in;
     const scope: string | undefined = tokenJson.scope;
     const token_type: string | undefined = tokenJson.token_type;
 
     if (!access_token) {
-      console.error("No access_token from Google", tokenJson);
-      return NextResponse.redirect(nextPath);
-    }
-
-    // 2) Fetch user info → email
-    const userinfoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-      headers: { Authorization: `Bearer ${access_token}` },
-    });
-    const userinfo = await userinfoRes.json();
-
-    if (!userinfoRes.ok || !userinfo.email) {
-      console.error("Failed to fetch userinfo", userinfoRes.status, userinfo);
-      return NextResponse.redirect(nextPath);
-    }
-
-    const email: string = userinfo.email;
-
-    // 3) Upsert tokens into oauth_staging (per email!)
-    const supa = getSupabaseAdmin();
-    const now = Math.floor(Date.now() / 1000);
-    const expires_at = expires_in ? now + expires_in : null;
-
-    const { error: oauthErr } = await supa
-      .from("oauth_staging")
-      .upsert(
-        {
-          provider: "google",
-          user_email: email,
-          access_token,
-          refresh_token: refresh_token ?? null,
-          expires_at,
-          scope: scope ?? null,
-          token_type: token_type ?? null,
-        },
-        { onConflict: "provider,user_email" } as any
+      console.error("No access_token in token response", tokenJson);
+      return noStoreJson(
+        { ok: false, step: "token", error: "no_access_token" },
+        500
       );
+    }
+
+    // 2) Use access_token to get the user's email
+    const userinfoRes = await fetch(
+      "https://openidconnect.googleapis.com/v1/userinfo",
+      {
+        headers: {
+          Authorization: `Bearer ${access_token}`,
+        },
+      }
+    );
+
+    const userinfo: any = await userinfoRes.json();
+    if (!userinfoRes.ok) {
+      console.error(
+        "Google userinfo failed",
+        userinfoRes.status,
+        userinfo
+      );
+      return noStoreJson(
+        {
+          ok: false,
+          step: "userinfo",
+          error: "google_userinfo_failed",
+          detail: userinfo,
+        },
+        500
+      );
+    }
+
+    const email: string | undefined = userinfo.email;
+    if (!email) {
+      console.error("No email in userinfo payload", userinfo);
+      return noStoreJson(
+        { ok: false, step: "userinfo", error: "no_email" },
+        500
+      );
+    }
+
+    // 3) Persist tokens in oauth_staging for this Gmail address
+    const supa = getSupabaseAdmin();
+
+    const expires_at =
+      typeof expires_in === "number"
+        ? Math.floor(Date.now() / 1000) + expires_in
+        : null;
+
+    const { error: oauthErr } = await supa.from("oauth_staging").insert({
+      provider: "google",
+      user_email: email,
+      access_token,
+      refresh_token: refresh_token ?? null,
+      expires_at,
+      scope: scope ?? null,
+      token_type: token_type ?? "Bearer",
+    });
 
     if (oauthErr) {
-      console.error("Supabase oauth_staging upsert failed", oauthErr);
+      console.error("Failed to insert into oauth_staging", oauthErr);
+      // We still continue, because the session is useful even if tokens fail
     }
 
-    // 4) Optional: upsert into profiles table
+    // (Optional) basic profiles table – safe insert on email
     try {
-      await supa
-        .from("profiles")
-        .upsert(
-          { email },
-          { onConflict: "email" } as any
-        );
+      await supa.from("profiles").insert({ email }).onConflict("email");
     } catch (e) {
-      console.error("profiles upsert failed (non-fatal)", e);
+      // Non-fatal if profiles table isn't exactly this shape
+      console.warn("profiles insert failed (non-fatal):", e);
     }
 
-    // 5) Create session cookie
-    const sessionToken = encodeSession({ email, iat: now });
+    // 4) Create the session cookie from Gmail address
+    await createSessionCookie(email);
 
-    const redirectUrl = new URL(nextPath, process.env.NEXT_PUBLIC_SITE_URL || url.origin);
-    const res = NextResponse.redirect(redirectUrl.toString());
-
-    res.cookies.set(SESSION_COOKIE_NAME, sessionToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 365, // 1 year
-    });
-
-    return res;
-  } catch (e) {
-    console.error("Unhandled Google callback error", e);
-    return NextResponse.redirect(nextPath);
+    // 5) Redirect back to dashboard (or the requested next path)
+    return noStoreRedirect(nextPath);
+  } catch (e: any) {
+    console.error("OAuth callback fatal error", e);
+    return noStoreJson(
+      { ok: false, step: "fatal", error: String(e?.message || e) },
+      500
+    );
   }
 }
