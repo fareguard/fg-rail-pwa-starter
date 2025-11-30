@@ -26,7 +26,16 @@ type TripsResponse = {
   error?: string;
 };
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const fetcher = async (url: string): Promise<TripsResponse> => {
+  const res = await fetch(url);
+  const json = await res.json();
+  const authenticated = res.status !== 401;
+
+  return {
+    authenticated,
+    ...json,
+  };
+};
 
 // -------------------------------------------------------------
 // Sorting helpers
@@ -576,9 +585,11 @@ export default function TripsLive() {
     }
   }, [sortOrder]);
 
-  // ✅ Call /api/trips with the current sort order
+  const sortParam = sortOrder === "earliest" ? "asc" : "desc";
+
+  // ✅ Call /dashboard/trips with the current sort order
   const { data, error, isValidating } = useSWR<TripsResponse>(
-    `/api/trips?sort=${sortOrder}`,
+    `/dashboard/trips?sort=${sortParam}`,
     fetcher,
     {
       refreshInterval: 60_000,
