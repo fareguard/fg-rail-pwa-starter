@@ -1,16 +1,27 @@
 // app/api/ingest/google/save/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getFreshAccessToken } from "@/lib/google";
-
 import { isTrainEmail } from "@/lib/trainEmailFilter";
 import { ingestEmail } from "@/lib/ingestEmail";
-import { getSessionFromRequest } from "@/lib/session";
+import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 const CONCURRENCY = 5;
+
+function noStoreJson(body: any, status = 200) {
+  const res = NextResponse.json(body, { status });
+  res.headers.set(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, max-age=0"
+  );
+  return res;
+}
 
 function b64ToUtf8(b64: string) {
   const s = b64.replace(/-/g, "+").replace(/_/g, "/");
@@ -59,10 +70,6 @@ function headerValue(payload: any, name: string): string | undefined {
   return h?.value;
 }
 
-// ------------------------------------------------------------
-// Helpers
-// ------------------------------------------------------------
-
 function safeTimestamp(value: string | null | undefined): string | null {
   if (!value) return null;
   const d = new Date(value);
@@ -72,26 +79,18 @@ function safeTimestamp(value: string | null | undefined): string | null {
   return d.toISOString();
 }
 
-/**
- * Normalise operator names so the UI doesn’t get a bunch of
- * slightly different labels for the same thing.
- */
+/** Normalise operator names (small UX thing) */
 function normaliseOperatorName(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const s = raw.trim();
   const lower = s.toLowerCase();
 
-  // West Midlands
-  if (lower.startsWith("west midlands")) {
-    return "West Midlands Railway";
-  }
+  if (lower.startsWith("west midlands")) return "West Midlands Railway";
 
-  // CrossCountry brands
   if (lower === "crosscountry trains" || lower === "cross country trains") {
     return "CrossCountry";
   }
 
-  // Northern variants
   if (
     lower === "northern rail" ||
     lower === "northern railway" ||
@@ -103,49 +102,25 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
   return s;
 }
 
-// ------------------------------------------------------------------
-
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
+    // 🔑 1) Read session from cookie
+    const cookieStore = cookies();
+    const rawSession = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
+    const session = decodeSession(rawSession);
+    const email = session?.email;
+
+    if (!email) {
+      return noStoreJson(
+        { ok: false, error: "Not authenticated", scanned: 0, saved_trips: 0 },
+        401
+      );
+    }
+
     const supa = getSupabaseAdmin();
+    const accessToken = await getFreshAccessToken(email);
 
-    // 0) Get SESSION email – this is the logged-in user
-    const session = await getSessionFromRequest(req);
-    const sessionEmail = session?.email;
-
-    if (!sessionEmail) {
-      return NextResponse.json(
-        { ok: false, error: "Not authenticated; no session email" },
-        { status: 401 }
-      );
-    }
-
-    // 1) Find this user's Google OAuth tokens
-    const { data: oauthRows, error: oErr } = await supa
-      .from("oauth_staging")
-      .select("*")
-      .eq("provider", "google")
-      .eq("user_email", sessionEmail)
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (oErr) throw oErr;
-    if (!oauthRows?.length) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "No Gmail connection found for this user",
-        },
-        { status: 400 }
-      );
-    }
-
-    const { user_email, user_id: userId } = oauthRows[0] as any;
-    // NOTE: user_email should be the same as sessionEmail,
-    // but we keep it in case the DB row has a canonical casing.
-    const accessToken = await getFreshAccessToken(user_email);
-
-    // 2) Gmail search query – restricted to this user's mailbox via access token
+    // 2) Build Gmail search query
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
@@ -155,7 +130,6 @@ export async function GET(req: Request) {
     url.searchParams.set("q", SEARCH_QUERY);
     url.searchParams.set("maxResults", "50");
 
-    // Optional pageToken passed in as query param
     const reqUrl = new URL(req.url);
     const requestPageToken = reqUrl.searchParams.get("pageToken");
     if (requestPageToken) {
@@ -175,23 +149,22 @@ export async function GET(req: Request) {
     const scanned = messageIds.length;
 
     if (!messageIds.length) {
-      return NextResponse.json({
+      return noStoreJson({
         ok: true,
         scanned: 0,
         saved_raw: 0,
         saved_trips: 0,
         nextPageToken: list.nextPageToken ?? null,
-        user_email,
+        user_email: email,
         trip_errors: [],
       });
     }
 
-    // 3) Hydrate, store raw, parse trips (with batched concurrency)
     let savedRaw = 0;
     let savedTrips = 0;
     const tripErrors: { email_id: string; message: string }[] = [];
 
-    // Chunk message IDs so we only have CONCURRENCY in flight at once
+    // Chunk IDs for limited concurrency
     const chunks: string[][] = [];
     for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
       chunks.push(messageIds.slice(i, i + CONCURRENCY));
@@ -200,20 +173,18 @@ export async function GET(req: Request) {
     for (const chunk of chunks) {
       const results = await Promise.allSettled(
         chunk.map(async (id) => {
-          // Skip messages we've already fully parsed for THIS user
-          const { data: existing } = await supa
+          // Skip if already in debug table (means already parsed)
+          const { data: existingDebug } = await supa
             .from("debug_llm_outputs")
             .select("id")
             .eq("email_id", id)
-            .eq("from_addr", user_email)
             .limit(1)
             .maybeSingle();
 
-          if (existing) {
+          if (existingDebug) {
             return;
           }
 
-          // Fetch full Gmail message
           const fullMsg = await fetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
             { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -224,11 +195,11 @@ export async function GET(req: Request) {
           const body = extractBody(fullMsg.payload);
           const snippet = fullMsg.snippet || "";
 
-          // ---- Save raw email (idempotent upsert) ----
+          // Save raw email (idempotent on provider+message_id)
           const { error: rawErr } = await supa.from("raw_emails").upsert(
             {
               provider: "google",
-              user_email,
+              user_email: email,
               message_id: id,
               subject,
               sender: from,
@@ -240,12 +211,11 @@ export async function GET(req: Request) {
 
           if (!rawErr) savedRaw++;
 
-          // ---- Filter non-train emails BEFORE parsing ----
+          // filter before calling the LLM parser
           if (!isTrainEmail({ from, subject, body })) {
             return;
           }
 
-          // ---- Call ingestEmail (LLM parser + gating) ----
           const parsed: any = await ingestEmail({
             id,
             from,
@@ -254,7 +224,7 @@ export async function GET(req: Request) {
             snippet,
           });
 
-          // ---- Log into debug_llm_outputs for inspection ----
+          // Log parser output for debugging
           try {
             await supa.from("debug_llm_outputs").insert({
               email_id: id,
@@ -264,19 +234,15 @@ export async function GET(req: Request) {
               raw_output: JSON.stringify(parsed),
             });
           } catch {
-            // swallow debug errors
+            // ignore debug errors
           }
 
-          // If ingestEmail says "not a usable ticket", skip
           if (!parsed?.is_ticket) {
             return;
           }
 
-          // ------------------------------- 
-          // Normalised fields for insert
-          // -------------------------------
-          const operatorRaw =
-            parsed.operator ?? parsed.provider ?? null;
+          // Normalisation for DB
+          const operatorRaw = parsed.operator ?? parsed.provider ?? null;
           const operator = normaliseOperatorName(operatorRaw);
           const retailer = parsed.retailer ?? parsed.provider ?? null;
 
@@ -290,7 +256,7 @@ export async function GET(req: Request) {
           const arriveIso = safeTimestamp(arriveStr);
           const outboundIso = safeTimestamp(outboundStr);
 
-          // De-duplication for THIS user: same booking_ref + route
+          // Check for existing trip by booking_ref + origin + destination
           let existingTrip:
             | { id: string; depart_planned: string | null }
             | null = null;
@@ -299,7 +265,7 @@ export async function GET(req: Request) {
             const { data: existingRows, error: existingErr } = await supa
               .from("trips")
               .select("id, depart_planned")
-              .eq("user_email", user_email)
+              .eq("user_email", email)
               .eq("booking_ref", parsed.booking_ref)
               .eq("origin", parsed.origin)
               .eq("destination", parsed.destination)
@@ -310,7 +276,6 @@ export async function GET(req: Request) {
             }
           }
 
-          // If we already have a trip, keep the earliest depart_planned
           let finalDepart = departIso;
           if (existingTrip?.depart_planned && finalDepart) {
             const existingDate = new Date(existingTrip.depart_planned);
@@ -321,8 +286,7 @@ export async function GET(req: Request) {
           }
 
           const baseRecord = {
-            user_id: userId ?? null,
-            user_email,  // <= this is the Gmail address tied to this session
+            user_email: email,
             retailer,
             email_id: id,
             operator,
@@ -368,20 +332,20 @@ export async function GET(req: Request) {
       }
     }
 
-    return NextResponse.json({
+    return noStoreJson({
       ok: true,
       scanned,
       saved_raw: savedRaw,
       saved_trips: savedTrips,
       nextPageToken: list.nextPageToken ?? null,
-      user_email,
+      user_email: email,
       trip_errors: tripErrors,
     });
   } catch (e: any) {
-    console.error("Ingest error", e);
-    return NextResponse.json(
+    console.error("ingest/google/save error", e);
+    return noStoreJson(
       { ok: false, error: e?.message || String(e) },
-      { status: 500 }
+      500
     );
   }
 }
