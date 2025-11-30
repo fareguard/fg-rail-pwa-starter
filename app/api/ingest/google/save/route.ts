@@ -4,7 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getFreshAccessToken } from "@/lib/google";
 import { isTrainEmail } from "@/lib/trainEmailFilter";
 import { ingestEmail } from "@/lib/ingestEmail";
-import getSessionFromRequest from "@/lib/session";
+import { getSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
