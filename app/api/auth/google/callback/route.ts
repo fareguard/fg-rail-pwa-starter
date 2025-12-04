@@ -7,51 +7,44 @@ export const dynamic = "force-dynamic";
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
-const GOOGLE_REDIRECT_URI =
-  process.env.GOOGLE_REDIRECT_URI ||
-  `${process.env.NEXT_PUBLIC_SITE_URL}/api/auth/google/callback`;
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI!;
+const PUBLIC_SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL || "https://www.fareguard.co.uk";
 
-function noStoreRedirect(url: string) {
-  const res = NextResponse.redirect(url);
-  res.headers.set(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, max-age=0"
-  );
-  return res;
-}
-
-function noStoreJson(body: any, status = 200) {
+function json(body: any, status = 200) {
   const res = NextResponse.json(body, { status });
-  res.headers.set(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, max-age=0"
-  );
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
   return res;
 }
 
 export async function GET(req: Request) {
+  const supa = getSupabaseAdmin();
+  const url = new URL(req.url);
+
+  const code = url.searchParams.get("code");
+  const stateRaw = url.searchParams.get("state") ?? "";
+
+  if (!code) {
+    return json({ ok: false, step: "no_code", error: "Missing ?code" }, 400);
+  }
+
+  // --- 1) Decode state → next path (defaults to /dashboard) ---
+  let nextPath = "/dashboard";
   try {
-    const { searchParams } = new URL(req.url);
-    const code = searchParams.get("code");
-    const state = searchParams.get("state") || "";
-
-    // Fallback if something weird happens
-    let nextPath = "/dashboard";
-    const m = state.match(/next=([^&]+)/);
-    if (m) {
-      try {
-        nextPath = decodeURIComponent(m[1]);
-      } catch {
-        nextPath = "/dashboard";
-      }
+    // state is like "next=%2Fdashboard" but double-encoded in the URL
+    const stateDecoded = decodeURIComponent(stateRaw); // "next=/dashboard"
+    const params = new URLSearchParams(stateDecoded);
+    const n = params.get("next");
+    if (n && n.startsWith("/")) {
+      nextPath = n;
     }
+  } catch (e) {
+    // non-fatal – we just fall back to /dashboard
+    console.warn("Failed to parse OAuth state:", e);
+  }
 
-    if (!code) {
-      // If Google hits us without a code, just bounce to dashboard
-      return noStoreRedirect(nextPath);
-    }
-
-    // 1) Exchange auth code for tokens
+  try {
+    // --- 2) Exchange code for tokens ---
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -64,119 +57,108 @@ export async function GET(req: Request) {
       }),
     });
 
-    const tokenJson: any = await tokenRes.json();
+    const tokens = await tokenRes.json();
 
     if (!tokenRes.ok) {
-      console.error("Google token exchange failed", tokenRes.status, tokenJson);
-      return noStoreJson(
-        {
-          ok: false,
-          step: "token",
-          error: "google_token_exchange_failed",
-          detail: tokenJson,
-        },
-        500
-      );
+      console.error("Google token error:", tokens);
+      return json({
+        ok: false,
+        step: "token_exchange",
+        error: "Google token endpoint failed",
+        detail: tokens,
+      }, 400);
     }
 
-    const access_token: string | undefined = tokenJson.access_token;
-    const refresh_token: string | undefined = tokenJson.refresh_token;
-    const expires_in: number | undefined = tokenJson.expires_in;
-    const scope: string | undefined = tokenJson.scope;
-    const token_type: string | undefined = tokenJson.token_type;
+    const accessToken: string | undefined = tokens.access_token;
+    const refreshToken: string | undefined = tokens.refresh_token;
+    const expiresIn: number | undefined = tokens.expires_in;
 
-    if (!access_token) {
-      console.error("No access_token in token response", tokenJson);
-      return noStoreJson(
-        { ok: false, step: "token", error: "no_access_token" },
-        500
-      );
+    if (!accessToken) {
+      return json({
+        ok: false,
+        step: "token_exchange",
+        error: "No access_token in Google response",
+      }, 400);
     }
 
-    // 2) Use access_token to get the user's email
-    const userinfoRes = await fetch(
-      "https://openidconnect.googleapis.com/v1/userinfo",
-      {
-        headers: {
-          Authorization: `Bearer ${access_token}`,
-        },
-      }
+    // --- 3) Fetch user info to get Gmail address ---
+    const profileRes = await fetch(
+      "https://www.googleapis.com/oauth2/v2/userinfo",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
     );
+    const profile = await profileRes.json();
 
-    const userinfo: any = await userinfoRes.json();
-    if (!userinfoRes.ok) {
-      console.error(
-        "Google userinfo failed",
-        userinfoRes.status,
-        userinfo
-      );
-      return noStoreJson(
+    if (!profileRes.ok || !profile?.email) {
+      console.error("Google profile error:", profile);
+      return json({
+        ok: false,
+        step: "userinfo",
+        error: "Failed to fetch Google profile / email",
+        detail: profile,
+      }, 400);
+    }
+
+    const email: string = profile.email;
+
+    // --- 4) Upsert tokens into oauth_staging for this Gmail ---
+    const now = Math.floor(Date.now() / 1000);
+
+    const { error: upsertErr } = await supa
+      .from("oauth_staging")
+      .upsert(
         {
-          ok: false,
-          step: "userinfo",
-          error: "google_userinfo_failed",
-          detail: userinfo,
+          provider: "google",
+          user_email: email,
+          access_token: accessToken,
+          refresh_token: refreshToken ?? null,
+          expires_at: expiresIn ? now + expiresIn : null,
+          scope: tokens.scope ?? null,
+          token_type: tokens.token_type ?? "Bearer",
         },
-        500
+        // composite conflict target – adjust to your table definition
+        { onConflict: "provider,user_email" } as any
       );
+
+    if (upsertErr) {
+      console.error("oauth_staging upsert error:", upsertErr);
+      return json({
+        ok: false,
+        step: "oauth_staging",
+        error: upsertErr.message ?? String(upsertErr),
+      }, 500);
     }
 
-    const email: string | undefined = userinfo.email;
-    if (!email) {
-      console.error("No email in userinfo payload", userinfo);
-      return noStoreJson(
-        { ok: false, step: "userinfo", error: "no_email" },
-        500
-      );
+    // --- 5) Optional: basic profiles table by email ---
+    try {
+      await supa
+        .from("profiles")
+        .upsert(
+          { email },
+          { onConflict: "email", ignoreDuplicates: true } as any
+        );
+    } catch (e) {
+      console.warn("profiles upsert failed (non-fatal):", e);
     }
 
-    // 3) Persist tokens in oauth_staging for this Gmail address
-    const supa = getSupabaseAdmin();
+    // --- 6) Build absolute redirect URL ---
+    const redirectUrl = new URL(nextPath, PUBLIC_SITE_URL);
 
-    const expires_at =
-      typeof expires_in === "number"
-        ? Math.floor(Date.now() / 1000) + expires_in
-        : null;
+    // --- 7) Set session cookie + redirect ---
+    const res = NextResponse.redirect(redirectUrl);
 
-    const { error: oauthErr } = await supa.from("oauth_staging").insert({
-      provider: "google",
-      user_email: email,
-      access_token,
-      refresh_token: refresh_token ?? null,
-      expires_at,
-      scope: scope ?? null,
-      token_type: token_type ?? "Bearer",
-    });
+    // If your helper signature is (res, email) swap the order here:
+    // createSessionCookie(res, email);
+    createSessionCookie(email, res);
 
-    if (oauthErr) {
-      console.error("Failed to insert into oauth_staging", oauthErr);
-      // We still continue, because the session is useful even if tokens fail
-    }
-
-   // (Optional) basic profiles table – safe upsert on email
-try {
-  await supa
-    .from("profiles")
-    .upsert(
-      { email },
-      // TS types for `onConflict` are a bit picky, so cast options
-      { onConflict: "email", ignoreDuplicates: true } as any
-    );
-} catch (e) {
-  // Non-fatal if profiles table isn't exactly this shape
-  console.warn("profiles upsert failed (non-fatal):", e);
-}
-
-    // 4) Create the session cookie from Gmail address
-    await createSessionCookie(email);
-
-    // 5) Redirect back to dashboard (or the requested next path)
-    return noStoreRedirect(nextPath);
+    return res;
   } catch (e: any) {
-    console.error("OAuth callback fatal error", e);
-    return noStoreJson(
-      { ok: false, step: "fatal", error: String(e?.message || e) },
-      500
-    );
+    console.error("Fatal error in Google callback:", e);
+    return json({
+      ok: false,
+      step: "fatal",
+      error: e?.message || String(e),
+    }, 500);
   }
 }
+
+export const POST = GET;
