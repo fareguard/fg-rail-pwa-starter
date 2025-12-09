@@ -1,5 +1,4 @@
 // lib/session.ts
-"use server";
 
 import { cookies } from "next/headers";
 import type { NextRequest, NextResponse } from "next/server";
@@ -26,12 +25,12 @@ export function decodeSession(raw: string | null | undefined): SessionData | nul
       return { email: parsed.email };
     }
   } catch {
-    // ignore
+    // ignore bad cookie
   }
   return null;
 }
 
-// ----- Reading the session in a Route Handler from Request -----
+// ----- Read session in a Route Handler from Request -----
 export async function getSessionFromRequest(
   req: Request | NextRequest
 ): Promise<SessionData | null> {
@@ -47,19 +46,20 @@ export async function getSessionFromRequest(
   return decodeSession(value);
 }
 
-// ----- Reading the session via next/headers in server code -----
+// ----- Read session via next/headers in server code -----
 export function getSessionFromCookies(): SessionData | null {
   const jar = cookies();
   const raw = jar.get(SESSION_COOKIE_NAME)?.value ?? null;
   return decodeSession(raw);
 }
 
-// ----- Writing the session cookie on a NextResponse -----
-// IMPORTANT: signature is (email, res) and we don't return anything.
+// ----- Write the session cookie on a NextResponse -----
+// Signature: (email, res)
 export function createSessionCookie(email: string, res: NextResponse): void {
   const value = encodeSession({ email });
 
-  // @ts-ignore – NextResponse has .cookies at runtime
+  // NextResponse has .cookies in the runtime env
+  // @ts-ignore
   res.cookies.set({
     name: SESSION_COOKIE_NAME,
     value,
