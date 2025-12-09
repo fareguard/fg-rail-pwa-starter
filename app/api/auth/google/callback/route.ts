@@ -61,12 +61,15 @@ export async function GET(req: Request) {
 
     if (!tokenRes.ok) {
       console.error("Google token error:", tokens);
-      return json({
-        ok: false,
-        step: "token_exchange",
-        error: "Google token endpoint failed",
-        detail: tokens,
-      }, 400);
+      return json(
+        {
+          ok: false,
+          step: "token_exchange",
+          error: "Google token endpoint failed",
+          detail: tokens,
+        },
+        400
+      );
     }
 
     const accessToken: string | undefined = tokens.access_token;
@@ -74,11 +77,14 @@ export async function GET(req: Request) {
     const expiresIn: number | undefined = tokens.expires_in;
 
     if (!accessToken) {
-      return json({
-        ok: false,
-        step: "token_exchange",
-        error: "No access_token in Google response",
-      }, 400);
+      return json(
+        {
+          ok: false,
+          step: "token_exchange",
+          error: "No access_token in Google response",
+        },
+        400
+      );
     }
 
     // --- 3) Fetch user info to get Gmail address ---
@@ -90,12 +96,15 @@ export async function GET(req: Request) {
 
     if (!profileRes.ok || !profile?.email) {
       console.error("Google profile error:", profile);
-      return json({
-        ok: false,
-        step: "userinfo",
-        error: "Failed to fetch Google profile / email",
-        detail: profile,
-      }, 400);
+      return json(
+        {
+          ok: false,
+          step: "userinfo",
+          error: "Failed to fetch Google profile / email",
+          detail: profile,
+        },
+        400
+      );
     }
 
     const email: string = profile.email;
@@ -103,29 +112,30 @@ export async function GET(req: Request) {
     // --- 4) Upsert tokens into oauth_staging for this Gmail ---
     const now = Math.floor(Date.now() / 1000);
 
-    const { error: upsertErr } = await supa
-      .from("oauth_staging")
-      .upsert(
-        {
-          provider: "google",
-          user_email: email,
-          access_token: accessToken,
-          refresh_token: refreshToken ?? null,
-          expires_at: expiresIn ? now + expiresIn : null,
-          scope: tokens.scope ?? null,
-          token_type: tokens.token_type ?? "Bearer",
-        },
-        // composite conflict target – adjust to your table definition
-        { onConflict: "provider,user_email" } as any
-      );
+    const { error: upsertErr } = await supa.from("oauth_staging").upsert(
+      {
+        provider: "google",
+        user_email: email,
+        access_token: accessToken,
+        refresh_token: refreshToken ?? null,
+        expires_at: expiresIn ? now + expiresIn : null,
+        scope: tokens.scope ?? null,
+        token_type: tokens.token_type ?? "Bearer",
+      },
+      // composite conflict target – adjust to your table definition
+      { onConflict: "provider,user_email" } as any
+    );
 
     if (upsertErr) {
       console.error("oauth_staging upsert error:", upsertErr);
-      return json({
-        ok: false,
-        step: "oauth_staging",
-        error: upsertErr.message ?? String(upsertErr),
-      }, 500);
+      return json(
+        {
+          ok: false,
+          step: "oauth_staging",
+          error: upsertErr.message ?? String(upsertErr),
+        },
+        500
+      );
     }
 
     // --- 5) Optional: basic profiles table by email ---
@@ -146,18 +156,20 @@ export async function GET(req: Request) {
     // --- 7) Set session cookie + redirect ---
     const res = NextResponse.redirect(redirectUrl);
 
-    // If your helper signature is (res, email) swap the order here:
-    // createSessionCookie(res, email);
+    // Our helper signature is (email, res)
     createSessionCookie(email, res);
 
     return res;
   } catch (e: any) {
     console.error("Fatal error in Google callback:", e);
-    return json({
-      ok: false,
-      step: "fatal",
-      error: e?.message || String(e),
-    }, 500);
+    return json(
+      {
+        ok: false,
+        step: "fatal",
+        error: e?.message || String(e),
+      },
+      500
+    );
   }
 }
 
