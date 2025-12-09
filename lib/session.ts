@@ -1,89 +1,72 @@
 // lib/session.ts
+"use server";
+
 import { cookies } from "next/headers";
-import crypto from "crypto";
+import type { NextRequest, NextResponse } from "next/server";
 
 export const SESSION_COOKIE_NAME = "fg_session";
-const SESSION_SECRET = process.env.SESSION_SECRET || "dev-session-secret";
+const SESSION_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
 
-/**
- * Sign a value with HMAC so we can detect tampering.
- */
-function sign(value: string): string {
-  return crypto
-    .createHmac("sha256", SESSION_SECRET)
-    .update(value)
-    .digest("base64url");
+export type SessionData = {
+  email: string;
+};
+
+// Encode { email } into a compact cookie value
+export function encodeSession(data: SessionData): string {
+  return Buffer.from(JSON.stringify(data), "utf8").toString("base64url");
 }
 
-/**
- * Encode a simple session payload { email } into a cookie string.
- */
-export function encodeSession(payload: { email: string }): string {
-  const body = JSON.stringify({
-    email: payload.email,
-    iat: Date.now(),
-  });
-  const b64 = Buffer.from(body, "utf8").toString("base64url");
-  const sig = sign(b64);
-  return `${b64}.${sig}`;
-}
-
-/**
- * Decode and verify a session cookie value.
- * Returns { email } or null if invalid / missing.
- */
-export function decodeSession(
-  cookieValue: string | undefined | null
-): { email: string } | null {
-  if (!cookieValue) return null;
-  const parts = cookieValue.split(".");
-  if (parts.length !== 2) return null;
-
-  const [b64, sig] = parts;
-  const expectedSig = sign(b64);
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
-    return null;
-  }
-
-  let json: any;
+// Decode cookie value back into { email } or null
+export function decodeSession(raw: string | null | undefined): SessionData | null {
+  if (!raw) return null;
   try {
-    const raw = Buffer.from(b64, "base64url").toString("utf8");
-    json = JSON.parse(raw);
+    const json = Buffer.from(raw, "base64url").toString("utf8");
+    const parsed = JSON.parse(json);
+    if (typeof parsed?.email === "string") {
+      return { email: parsed.email };
+    }
   } catch {
-    return null;
+    // ignore
   }
-
-  if (!json || typeof json.email !== "string") return null;
-  return { email: json.email as string };
+  return null;
 }
 
-/**
- * Create / overwrite the session cookie for the given email.
- * Used in the Google OAuth callback.
- */
-export async function createSessionCookie(email: string): Promise<void> {
-  const cookieStore = cookies();
+// ----- Reading the session in a Route Handler from Request -----
+export async function getSessionFromRequest(
+  req: Request | NextRequest
+): Promise<SessionData | null> {
+  const cookieHeader = (req as any).headers?.get?.("cookie") ?? "";
+  const match = cookieHeader
+    .split(";")
+    .map((c: string) => c.trim())
+    .find((c: string) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
+
+  if (!match) return null;
+
+  const value = decodeURIComponent(match.split("=").slice(1).join("="));
+  return decodeSession(value);
+}
+
+// ----- Reading the session via next/headers in server code -----
+export function getSessionFromCookies(): SessionData | null {
+  const jar = cookies();
+  const raw = jar.get(SESSION_COOKIE_NAME)?.value ?? null;
+  return decodeSession(raw);
+}
+
+// ----- Writing the session cookie on a NextResponse -----
+// IMPORTANT: signature is (email, res) and we don't return anything.
+export function createSessionCookie(email: string, res: NextResponse): void {
   const value = encodeSession({ email });
 
-  cookieStore.set(SESSION_COOKIE_NAME, value, {
+  // @ts-ignore – NextResponse has .cookies at runtime
+  res.cookies.set({
+    name: SESSION_COOKIE_NAME,
+    value,
     httpOnly: true,
-    secure: true,
     sameSite: "lax",
+    secure: true,
     path: "/",
-    // 1 year – you can tune this later
-    maxAge: 60 * 60 * 24 * 365,
+    maxAge: SESSION_MAX_AGE,
   });
-}
-
-/**
- * Helper for API routes: read the session from the incoming request.
- * Right now we just use next/headers cookies(), which is already
- * scoped to the current request, so the req param is unused.
- */
-export async function getSessionFromRequest(
-  _req: Request
-): Promise<{ email: string } | null> {
-  const cookieStore = cookies();
-  const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value;
-  return decodeSession(raw ?? null);
 }
