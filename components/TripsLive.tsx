@@ -528,14 +528,21 @@ function TripCard({ trip }: { trip: Trip }) {
 // Button styles for sort toggle
 // -------------------------------------------------------------
 
+const sortToggleStyle = {
+  display: "inline-flex",
+  padding: 2,
+  borderRadius: 999,
+  background: "#f0f4f7",
+};
+
 const buttonBase = {
   borderRadius: 999,
-  border: "1px solid #e5e7eb",
+  border: "none",
   padding: "4px 10px",
   fontSize: 11,
   textTransform: "uppercase" as const,
   letterSpacing: "0.08em",
-  background: "#ffffff",
+  background: "transparent",
   color: "var(--fg-muted)",
   cursor: "pointer",
 };
@@ -544,7 +551,6 @@ const activeButton = {
   ...buttonBase,
   background: "var(--fg-navy)",
   color: "#ffffff",
-  borderColor: "var(--fg-navy)",
 };
 
 // -------------------------------------------------------------
@@ -561,20 +567,18 @@ function MetricPill({ label, value }: MetricPillProps) {
     <div
       style={{
         borderRadius: 999,
-        padding: "6px 10px",
+        padding: "8px 14px",
         background: "rgba(15, 118, 110, 0.06)", // subtle teal-ish tint
         display: "flex",
         flexDirection: "column",
         gap: 2,
         minWidth: 0,
-        flex: "1 1 110px",
+        flex: "1 1 140px",
       }}
     >
       <span
         style={{
           fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: 0.08,
           color: "var(--fg-muted)",
           whiteSpace: "nowrap",
           overflow: "hidden",
@@ -585,8 +589,9 @@ function MetricPill({ label, value }: MetricPillProps) {
       </span>
       <span
         style={{
-          fontSize: 13,
+          fontSize: 16,
           fontWeight: 600,
+          color: "var(--fg-navy)",
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -746,25 +751,26 @@ export default function TripsLive() {
         <div
           style={{
             display: "flex",
-            gap: 8,
             justifyContent: "flex-end",
             flexShrink: 0,
           }}
         >
-          <button
-            type="button"
-            style={sortOrder === "latest" ? activeButton : buttonBase}
-            onClick={() => setSortOrder("latest")}
-          >
-            Newest first
-          </button>
-          <button
-            type="button"
-            style={sortOrder === "earliest" ? activeButton : buttonBase}
-            onClick={() => setSortOrder("earliest")}
-          >
-            Oldest first
-          </button>
+          <div style={sortToggleStyle}>
+            <button
+              type="button"
+              style={sortOrder === "latest" ? activeButton : buttonBase}
+              onClick={() => setSortOrder("latest")}
+            >
+              Newest first
+            </button>
+            <button
+              type="button"
+              style={sortOrder === "earliest" ? activeButton : buttonBase}
+              onClick={() => setSortOrder("earliest")}
+            >
+              Oldest first
+            </button>
+          </div>
         </div>
       </div>
 
