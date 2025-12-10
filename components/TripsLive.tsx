@@ -563,12 +563,32 @@ type MetricPillProps = {
 };
 
 function MetricPill({ label, value }: MetricPillProps) {
+  // per-metric colours
+  let background = "rgba(15, 118, 110, 0.06)";
+  let valueColor = "var(--fg-navy)";
+
+  const key = label.toLowerCase();
+
+  if (key.includes("claims in progress")) {
+    // soft amber
+    background = "#FEF3C7";
+    valueColor = "#92400E";
+  } else if (key.includes("refunds paid")) {
+    // soft green
+    background = "#DCFCE7";
+    valueColor = "#166534";
+  } else if (key.includes("potential refunds")) {
+    // calm blue/teal
+    background = "#E0F2FE";
+    valueColor = "#075985";
+  }
+
   return (
     <div
       style={{
         borderRadius: 999,
         padding: "8px 14px",
-        background: "rgba(15, 118, 110, 0.06)", // subtle teal-ish tint
+        background,
         display: "flex",
         flexDirection: "column",
         gap: 2,
@@ -580,6 +600,8 @@ function MetricPill({ label, value }: MetricPillProps) {
         style={{
           fontSize: 11,
           color: "var(--fg-muted)",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -591,7 +613,7 @@ function MetricPill({ label, value }: MetricPillProps) {
         style={{
           fontSize: 16,
           fontWeight: 600,
-          color: "var(--fg-navy)",
+          color: valueColor,
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
