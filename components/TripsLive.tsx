@@ -548,6 +548,57 @@ const activeButton = {
 };
 
 // -------------------------------------------------------------
+// Metric pill
+// -------------------------------------------------------------
+
+type MetricPillProps = {
+  label: string;
+  value: string;
+};
+
+function MetricPill({ label, value }: MetricPillProps) {
+  return (
+    <div
+      style={{
+        borderRadius: 999,
+        padding: "6px 10px",
+        background: "rgba(15, 118, 110, 0.06)", // subtle teal-ish tint
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+        minWidth: 0,
+        flex: "1 1 110px",
+      }}
+    >
+      <span
+        style={{
+          fontSize: 11,
+          textTransform: "uppercase",
+          letterSpacing: 0.08,
+          color: "var(--fg-muted)",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          fontSize: 13,
+          fontWeight: 600,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+// -------------------------------------------------------------
 // Main component
 // -------------------------------------------------------------
 
@@ -669,25 +720,52 @@ export default function TripsLive() {
       <div
         style={{
           display: "flex",
-          justifyContent: "flex-end",
-          marginBottom: 8,
+          flexWrap: "wrap",
+          alignItems: "center",
+          justifyContent: "space-between",
           gap: 8,
+          marginBottom: 8,
         }}
       >
-        <button
-          type="button"
-          style={sortOrder === "latest" ? activeButton : buttonBase}
-          onClick={() => setSortOrder("latest")}
+        {/* Metrics row – stubbed values for now */}
+        <div
+          style={{
+            display: "flex",
+            flex: "1 1 auto",
+            gap: 8,
+            flexWrap: "wrap",
+            minWidth: 0,
+          }}
         >
-          Newest first
-        </button>
-        <button
-          type="button"
-          style={sortOrder === "earliest" ? activeButton : buttonBase}
-          onClick={() => setSortOrder("earliest")}
+          <MetricPill label="Potential refunds" value="—" />
+          <MetricPill label="Claims in progress" value="0" />
+          <MetricPill label="Refunds paid" value="£0.00" />
+        </div>
+
+        {/* Sort controls – same behaviour as before */}
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            justifyContent: "flex-end",
+            flexShrink: 0,
+          }}
         >
-          Oldest first
-        </button>
+          <button
+            type="button"
+            style={sortOrder === "latest" ? activeButton : buttonBase}
+            onClick={() => setSortOrder("latest")}
+          >
+            Newest first
+          </button>
+          <button
+            type="button"
+            style={sortOrder === "earliest" ? activeButton : buttonBase}
+            onClick={() => setSortOrder("earliest")}
+          >
+            Oldest first
+          </button>
+        </div>
       </div>
 
       <ul
