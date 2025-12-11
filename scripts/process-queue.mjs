@@ -2,7 +2,6 @@
 // Pulls one queued claim, runs provider, updates both claim_queue and claims.
 // Assumes Supabase service key via env.
 
-import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 
 // Provider entry points (drop these files into /scripts/)
