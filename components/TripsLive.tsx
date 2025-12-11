@@ -19,10 +19,17 @@ type Trip = {
   outbound_departure?: string | null;
 };
 
+type DashboardMetrics = {
+  potential_refunds: number;
+  claims_in_progress: number;
+  refunds_paid_gbp: number;
+};
+
 type TripsResponse = {
   ok: boolean;
   authenticated: boolean;
   trips: Trip[];
+  metrics?: DashboardMetrics | null;
   error?: string;
 };
 
@@ -727,6 +734,23 @@ export default function TripsLive() {
     );
   }
 
+  const metrics = data?.metrics ?? null;
+
+  const potentialRefundsDisplay =
+    typeof metrics?.potential_refunds === "number"
+      ? String(metrics.potential_refunds)
+      : "—";
+
+  const claimsInProgressDisplay =
+    typeof metrics?.claims_in_progress === "number"
+      ? String(metrics.claims_in_progress)
+      : "0";
+
+  const refundsPaidDisplay =
+    typeof metrics?.refunds_paid_gbp === "number"
+      ? `£${metrics.refunds_paid_gbp.toFixed(2)}`
+      : "£0.00";
+
   return (
     <div style={{ marginTop: 16 }}>
       {isValidating && (
@@ -744,58 +768,147 @@ export default function TripsLive() {
         </p>
       )}
 
+      {/* Metrics row */}
       <div
         style={{
           display: "flex",
           flexWrap: "wrap",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
-          marginBottom: 8,
+          gap: 12,
+          marginBottom: 12,
         }}
       >
-        {/* Metrics row – stubbed values for now */}
+        {/* Potential refunds */}
         <div
           style={{
+            flex: 1,
+            minWidth: 180,
+            padding: "12px 16px",
+            borderRadius: 999,
+            background: "#e4f0fa",
             display: "flex",
-            flex: "1 1 auto",
-            gap: 8,
-            flexWrap: "wrap",
-            minWidth: 0,
+            flexDirection: "column",
+            justifyContent: "center",
           }}
         >
-          <MetricPill label="Potential refunds" value="—" />
-          <MetricPill label="Claims in progress" value="0" />
-          <MetricPill label="Refunds paid" value="£0.00" />
+          <span
+            style={{
+              fontSize: 11,
+              letterSpacing: 0.12,
+              textTransform: "uppercase",
+              color: "var(--fg-muted)",
+              marginBottom: 4,
+            }}
+          >
+            Potential refunds
+          </span>
+          <span
+            style={{
+              fontSize: 18,
+              fontWeight: 600,
+              color: "#0f172a",
+            }}
+          >
+            {potentialRefundsDisplay}
+          </span>
         </div>
 
-        {/* Sort controls – same behaviour as before */}
+        {/* Claims in progress */}
         <div
           style={{
+            flex: 1,
+            minWidth: 180,
+            padding: "12px 16px",
+            borderRadius: 999,
+            background: "#fff4ce",
             display: "flex",
-            justifyContent: "flex-end",
-            flexShrink: 0,
+            flexDirection: "column",
+            justifyContent: "center",
           }}
         >
-          <div style={sortToggleStyle}>
-            <button
-              type="button"
-              style={sortOrder === "latest" ? activeButton : buttonBase}
-              onClick={() => setSortOrder("latest")}
-            >
-              Newest first
-            </button>
-            <button
-              type="button"
-              style={sortOrder === "earliest" ? activeButton : buttonBase}
-              onClick={() => setSortOrder("earliest")}
-            >
-              Oldest first
-            </button>
-          </div>
+          <span
+            style={{
+              fontSize: 11,
+              letterSpacing: 0.12,
+              textTransform: "uppercase",
+              color: "var(--fg-muted)",
+              marginBottom: 4,
+            }}
+          >
+            Claims in progress
+          </span>
+          <span
+            style={{
+              fontSize: 18,
+              fontWeight: 600,
+              color: "#92400e",
+            }}
+          >
+            {claimsInProgressDisplay}
+          </span>
+        </div>
+
+        {/* Refunds paid */}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 180,
+            padding: "12px 16px",
+            borderRadius: 999,
+            background: "#dcfce7",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+          }}
+        >
+          <span
+            style={{
+              fontSize: 11,
+              letterSpacing: 0.12,
+              textTransform: "uppercase",
+              color: "var(--fg-muted)",
+              marginBottom: 4,
+            }}
+          >
+            Refunds paid
+          </span>
+          <span
+            style={{
+              fontSize: 18,
+              fontWeight: 600,
+              color: "#166534",
+            }}
+          >
+            {refundsPaidDisplay}
+          </span>
         </div>
       </div>
 
+      {/* Sort buttons */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          marginBottom: 8,
+          gap: 8,
+        }}
+      >
+        <button
+          type="button"
+          style={sortOrder === "latest" ? activeButton : buttonBase}
+          onClick={() => setSortOrder("latest")}
+        >
+          Newest first
+        </button>
+        <button
+          type="button"
+          style={sortOrder === "earliest" ? activeButton : buttonBase}
+          onClick={() => setSortOrder("earliest")}
+        >
+          Oldest first
+        </button>
+      </div>
+
+      {/* Trips list */}
       <ul
         style={{
           padding: 0,
