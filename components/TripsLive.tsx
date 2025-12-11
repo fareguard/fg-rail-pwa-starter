@@ -792,7 +792,7 @@ const refundsPaidDisplay =
           marginBottom: 12,
         }}
       >
-       {/* Potential refunds */}
+ {/* Potential refunds */}
 <div
   style={{
     flex: 1,
@@ -816,16 +816,30 @@ const refundsPaidDisplay =
   >
     Potential refunds
   </span>
+
+  {/* £ amount */}
   <span
     style={{
       fontSize: 18,
       fontWeight: 600,
       color: "#0f172a",
+      marginBottom: 2,
     }}
   >
-    {potentialRefundsDisplay}
+    {potentialRefundAmountDisplay}
+  </span>
+
+  {/* how many trips that £ comes from */}
+  <span
+    style={{
+      fontSize: 12,
+      color: "var(--fg-muted)",
+    }}
+  >
+    {potentialRefundTripsDisplay}
   </span>
 </div>
+
         {/* Claims in progress */}
         <div
           style={{
