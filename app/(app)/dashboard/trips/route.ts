@@ -12,10 +12,16 @@ function noStoreJson(body: any, status = 200) {
   const res = NextResponse.json(body, { status });
   res.headers.set(
     "Cache-Control",
-    "no-store, no-cache, must-revalidate, max-age=0"
+    "no-store, no-cache, must-revalidate, max-age=0",
   );
   return res;
 }
+
+type DashboardMetrics = {
+  potential_refunds: number;
+  claims_in_progress: number;
+  refunds_paid_gbp: number;
+};
 
 export async function GET(req: NextRequest) {
   try {
@@ -28,8 +34,14 @@ export async function GET(req: NextRequest) {
     if (!email) {
       // no valid session cookie
       return noStoreJson(
-        { ok: false, error: "Not authenticated", trips: [] },
-        401
+        {
+          ok: false,
+          authenticated: false,
+          error: "Not authenticated",
+          trips: [],
+          metrics: null as DashboardMetrics | null,
+        },
+        401,
       );
     }
 
@@ -39,7 +51,8 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const sortDir = searchParams.get("sort") === "asc" ? "asc" : "desc";
 
-    const { data, error } = await supa
+    // ---- 1) Load trips for this user ----
+    const { data: trips, error } = await supa
       .from("trips")
       .select("*")
       .eq("user_email", email) // 👈 filter by logged-in Gmail
@@ -47,15 +60,72 @@ export async function GET(req: NextRequest) {
 
     if (error) throw error;
 
+    const safeTrips = trips ?? [];
+
+    // ---- 2) Compute dashboard metrics from trips + claims ----
+    let metrics: DashboardMetrics | null = null;
+
+    try {
+      const { data: claims, error: claimsError } = await supa
+        .from("claims")
+        .select("id, trip_id, status")
+        .eq("user_email", email);
+
+      if (claimsError) {
+        console.error("claims query error", claimsError);
+      } else {
+        const safeClaims = claims ?? [];
+
+        // claim_trip_ids = all trip_ids that already have a claim
+        const claimTripIds = new Set(
+          safeClaims
+            .map((c: any) => c.trip_id)
+            .filter((id: any): id is string => Boolean(id)),
+        );
+
+        // Potential refunds:
+        // trips marked eligible that *do not* yet have a claim row
+        const potential_refunds = safeTrips.filter(
+          (t: any) => t.eligible && !claimTripIds.has(t.id),
+        ).length;
+
+        // Claims in progress: pending or submitted
+        const claims_in_progress = safeClaims.filter((c: any) =>
+          ["pending", "submitted"].includes(c.status),
+        ).length;
+
+        // Refunds paid: no money field yet – keep at 0.00 for now
+        const refunds_paid_gbp = 0;
+
+        metrics = {
+          potential_refunds,
+          claims_in_progress,
+          refunds_paid_gbp,
+        };
+      }
+    } catch (metricsErr) {
+      console.error("dashboard metrics error", metricsErr);
+      metrics = null;
+    }
+
+    // ---- 3) Final response ----
     return noStoreJson({
       ok: true,
-      trips: data ?? [],
+      authenticated: true,
+      trips: safeTrips,
+      metrics,
     });
   } catch (e: any) {
     console.error("dashboard/trips route error", e);
     return noStoreJson(
-      { ok: false, error: String(e?.message || e), trips: [] },
-      500
+      {
+        ok: false,
+        authenticated: false,
+        error: String(e?.message || e),
+        trips: [],
+        metrics: null as DashboardMetrics | null,
+      },
+      500,
     );
   }
 }
