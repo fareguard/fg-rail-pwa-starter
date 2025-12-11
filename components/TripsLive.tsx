@@ -20,7 +20,8 @@ type Trip = {
 };
 
 type DashboardMetrics = {
-  potential_refunds: number;
+  potential_refunds: number;       // trips count
+  potential_refunds_gbp: number;   // ticket value
   claims_in_progress: number;
   refunds_paid_gbp: number;
 };
@@ -736,20 +737,34 @@ export default function TripsLive() {
 
   const metrics = data?.metrics ?? null;
 
-  const potentialRefundsDisplay =
-    typeof metrics?.potential_refunds === "number"
-      ? String(metrics.potential_refunds)
-      : "—";
+// trips count
+const potentialRefundTrips =
+  typeof metrics?.potential_refunds === "number"
+    ? metrics.potential_refunds
+    : 0;
 
-  const claimsInProgressDisplay =
-    typeof metrics?.claims_in_progress === "number"
-      ? String(metrics.claims_in_progress)
-      : "0";
+// ticket value (£)
+const potentialRefundAmount =
+  typeof metrics?.potential_refunds_gbp === "number"
+    ? metrics.potential_refunds_gbp
+    : 0;
 
-  const refundsPaidDisplay =
-    typeof metrics?.refunds_paid_gbp === "number"
-      ? `£${metrics.refunds_paid_gbp.toFixed(2)}`
-      : "£0.00";
+const potentialRefundAmountDisplay = `£${potentialRefundAmount.toFixed(2)}`;
+
+const potentialRefundTripsDisplay =
+  potentialRefundTrips === 0
+    ? "No eligible trips yet"
+    : `${potentialRefundTrips} trip${potentialRefundTrips === 1 ? "" : "s"}`;
+
+const claimsInProgressDisplay =
+  typeof metrics?.claims_in_progress === "number"
+    ? String(metrics.claims_in_progress)
+    : "0";
+
+const refundsPaidDisplay =
+  typeof metrics?.refunds_paid_gbp === "number"
+    ? `£${metrics.refunds_paid_gbp.toFixed(2)}`
+    : "£0.00";
 
   return (
     <div style={{ marginTop: 16 }}>
@@ -777,41 +792,40 @@ export default function TripsLive() {
           marginBottom: 12,
         }}
       >
-        {/* Potential refunds */}
-        <div
-          style={{
-            flex: 1,
-            minWidth: 180,
-            padding: "12px 16px",
-            borderRadius: 999,
-            background: "#e4f0fa",
-            display: "flex",
-            flexDirection: "column",
-            justifyContent: "center",
-          }}
-        >
-          <span
-            style={{
-              fontSize: 11,
-              letterSpacing: 0.12,
-              textTransform: "uppercase",
-              color: "var(--fg-muted)",
-              marginBottom: 4,
-            }}
-          >
-            Potential refunds
-          </span>
-          <span
-            style={{
-              fontSize: 18,
-              fontWeight: 600,
-              color: "#0f172a",
-            }}
-          >
-            {potentialRefundsDisplay}
-          </span>
-        </div>
-
+       {/* Potential refunds */}
+<div
+  style={{
+    flex: 1,
+    minWidth: 180,
+    padding: "12px 16px",
+    borderRadius: 999,
+    background: "#e4f0fa",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "center",
+  }}
+>
+  <span
+    style={{
+      fontSize: 11,
+      letterSpacing: 0.12,
+      textTransform: "uppercase",
+      color: "var(--fg-muted)",
+      marginBottom: 4,
+    }}
+  >
+    Potential refunds
+  </span>
+  <span
+    style={{
+      fontSize: 18,
+      fontWeight: 600,
+      color: "#0f172a",
+    }}
+  >
+    {potentialRefundsDisplay}
+  </span>
+</div>
         {/* Claims in progress */}
         <div
           style={{
