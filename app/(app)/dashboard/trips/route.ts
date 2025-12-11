@@ -18,7 +18,8 @@ function noStoreJson(body: any, status = 200) {
 }
 
 type DashboardMetrics = {
-  potential_refunds: number;
+  potential_refunds: number;       // count of eligible, unclaimed trips
+  potential_refunds_gbp: number;   // sum of ticket value for those trips
   claims_in_progress: number;
   refunds_paid_gbp: number;
 };
@@ -62,10 +63,11 @@ export async function GET(req: NextRequest) {
 
     const safeTrips = trips ?? [];
 
-    // ---- 2) Compute dashboard metrics from trips + claims ----
+    // ---- 2) Compute dashboard metrics from trips + claims + tickets ----
     let metrics: DashboardMetrics | null = null;
 
     try {
+      // 2a) claims for this user
       const { data: claims, error: claimsError } = await supa
         .from("claims")
         .select("id, trip_id, status")
@@ -83,22 +85,61 @@ export async function GET(req: NextRequest) {
             .filter((id: any): id is string => Boolean(id)),
         );
 
-        // Potential refunds:
-        // trips marked eligible that *do not* yet have a claim row
-        const potential_refunds = safeTrips.filter(
+        // Eligible, unclaimed trips
+        const eligibleTrips = safeTrips.filter(
           (t: any) => t.eligible && !claimTripIds.has(t.id),
-        ).length;
+        );
 
-        // Claims in progress: pending or submitted
+        const potential_refunds = eligibleTrips.length;
+
+        // 2b) claims in progress: pending or submitted
         const claims_in_progress = safeClaims.filter((c: any) =>
           ["pending", "submitted"].includes(c.status),
         ).length;
 
-        // Refunds paid: no money field yet – keep at 0.00 for now
+        // 2c) Sum ticket value (total_paid_gbp) for those eligible trips
+        // We look up tickets by booking_ref, but only using refs that came
+        // from this user's own trips → no cross-user leakage.
+        const bookingRefs = Array.from(
+          new Set(
+            eligibleTrips
+              .map((t: any) => (t.booking_ref || "").trim())
+              .filter(
+                (br: string) => br && br.toUpperCase() !== "UNKNOWN",
+              ),
+          ),
+        );
+
+        let potential_refunds_gbp = 0;
+
+        if (bookingRefs.length > 0) {
+          const { data: tickets, error: ticketsError } = await supa
+            .from("tickets")
+            .select("booking_ref, total_paid_gbp")
+            .in("booking_ref", bookingRefs);
+
+          if (ticketsError) {
+            console.error("tickets query error", ticketsError);
+          } else {
+            for (const row of tickets ?? []) {
+              const rawVal = (row as any).total_paid_gbp;
+              const n =
+                typeof rawVal === "number"
+                  ? rawVal
+                  : Number(rawVal ?? 0);
+              if (!Number.isNaN(n)) {
+                potential_refunds_gbp += n;
+              }
+            }
+          }
+        }
+
+        // 2d) Refunds actually paid: still 0 until we track payouts
         const refunds_paid_gbp = 0;
 
         metrics = {
           potential_refunds,
+          potential_refunds_gbp,
           claims_in_progress,
           refunds_paid_gbp,
         };
