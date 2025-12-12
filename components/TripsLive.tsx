@@ -35,14 +35,20 @@ type TripsResponse = {
 };
 
 const fetcher = async (url: string): Promise<TripsResponse> => {
-  const res = await fetch(url);
-  const json = await res.json();
-  const authenticated = res.status !== 401;
+  const res = await fetch(url, { cache: "no-store" });
 
-  return {
-    authenticated,
-    ...json,
-  };
+  if (res.status === 401) {
+    const json = await res.json().catch(() => ({}));
+    return { authenticated: false, ok: false, trips: [], ...json };
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Trips API ${res.status}: ${text || res.statusText}`);
+  }
+
+  const json = await res.json();
+  return { authenticated: true, ...json };
 };
 
 // -------------------------------------------------------------
