@@ -20,8 +20,8 @@ type Trip = {
 };
 
 type DashboardMetrics = {
-  potential_refunds: number;       // trips count
-  potential_refunds_gbp: number;   // ticket value
+  potential_refunds_count: number;
+  potential_refunds_gbp_max: number;
   claims_in_progress: number;
   refunds_paid_gbp: number;
 };
@@ -683,10 +683,7 @@ export default function TripsLive() {
   );
 
   // 4) Derived data – keep hooks ABOVE any early returns
-  const trips = useMemo(
-    () => dedupeTrips(data?.trips ?? []),
-    [data],
-  );
+  const trips = useMemo(() => dedupeTrips(data?.trips ?? []), [data]);
 
   const sortedTrips = useMemo(() => {
     const copy = [...trips];
@@ -737,34 +734,27 @@ export default function TripsLive() {
 
   const metrics = data?.metrics ?? null;
 
-// trips count
-const potentialRefundTrips =
-  typeof metrics?.potential_refunds === "number"
-    ? metrics.potential_refunds
-    : 0;
+  const potentialRefundsValue =
+    typeof metrics?.potential_refunds_gbp_max === "number"
+      ? `£${metrics.potential_refunds_gbp_max.toFixed(2)}`
+      : "£0.00";
 
-// ticket value (£)
-const potentialRefundAmount =
-  typeof metrics?.potential_refunds_gbp === "number"
-    ? metrics.potential_refunds_gbp
-    : 0;
+  const potentialRefundsSub =
+    typeof metrics?.potential_refunds_count === "number"
+      ? metrics.potential_refunds_count === 1
+        ? "1 eligible trip"
+        : `${metrics.potential_refunds_count} eligible trips`
+      : "No eligible trips yet";
 
-const potentialRefundAmountDisplay = `£${potentialRefundAmount.toFixed(2)}`;
+  const claimsInProgressDisplay =
+    typeof metrics?.claims_in_progress === "number"
+      ? String(metrics.claims_in_progress)
+      : "0";
 
-const potentialRefundTripsDisplay =
-  potentialRefundTrips === 0
-    ? "No eligible trips yet"
-    : `${potentialRefundTrips} trip${potentialRefundTrips === 1 ? "" : "s"}`;
-
-const claimsInProgressDisplay =
-  typeof metrics?.claims_in_progress === "number"
-    ? String(metrics.claims_in_progress)
-    : "0";
-
-const refundsPaidDisplay =
-  typeof metrics?.refunds_paid_gbp === "number"
-    ? `£${metrics.refunds_paid_gbp.toFixed(2)}`
-    : "£0.00";
+  const refundsPaidDisplay =
+    typeof metrics?.refunds_paid_gbp === "number"
+      ? `£${metrics.refunds_paid_gbp.toFixed(2)}`
+      : "£0.00";
 
   return (
     <div style={{ marginTop: 16 }}>
@@ -792,53 +782,51 @@ const refundsPaidDisplay =
           marginBottom: 12,
         }}
       >
- {/* Potential refunds */}
-<div
-  style={{
-    flex: 1,
-    minWidth: 180,
-    padding: "12px 16px",
-    borderRadius: 999,
-    background: "#e4f0fa",
-    display: "flex",
-    flexDirection: "column",
-    justifyContent: "center",
-  }}
->
-  <span
-    style={{
-      fontSize: 11,
-      letterSpacing: 0.12,
-      textTransform: "uppercase",
-      color: "var(--fg-muted)",
-      marginBottom: 4,
-    }}
-  >
-    Potential refunds
-  </span>
+        {/* Potential refunds */}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 180,
+            padding: "12px 16px",
+            borderRadius: 999,
+            background: "#e4f0fa",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+          }}
+        >
+          <span
+            style={{
+              fontSize: 11,
+              letterSpacing: 0.12,
+              textTransform: "uppercase",
+              color: "var(--fg-muted)",
+              marginBottom: 4,
+            }}
+          >
+            Potential refunds
+          </span>
 
-  {/* £ amount */}
-  <span
-    style={{
-      fontSize: 18,
-      fontWeight: 600,
-      color: "#0f172a",
-      marginBottom: 2,
-    }}
-  >
-    {potentialRefundAmountDisplay}
-  </span>
+          <span
+            style={{
+              fontSize: 18,
+              fontWeight: 600,
+              color: "#0f172a",
+              marginBottom: 2,
+            }}
+          >
+            {potentialRefundsValue}
+          </span>
 
-  {/* how many trips that £ comes from */}
-  <span
-    style={{
-      fontSize: 12,
-      color: "var(--fg-muted)",
-    }}
-  >
-    {potentialRefundTripsDisplay}
-  </span>
-</div>
+          <span
+            style={{
+              fontSize: 12,
+              color: "var(--fg-muted)",
+            }}
+          >
+            {potentialRefundsSub}
+          </span>
+        </div>
 
         {/* Claims in progress */}
         <div
