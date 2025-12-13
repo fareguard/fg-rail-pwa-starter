@@ -19,16 +19,16 @@ function isAuthorized(request: Request) {
 async function getUserIdForEmail(db: any, email: string | null) {
   if (!email) return null;
 
-  // Try profiles table
+  // profiles has: id + email + user_email
   const { data: prof } = await db
     .from("profiles")
-    .select("user_id")
-    .eq("user_email", email)
+    .select("id")
+    .or(`email.eq.${email},user_email.eq.${email}`)
     .maybeSingle();
 
-  if (prof?.user_id) return prof.user_id;
+  if (prof?.id) return prof.id;
 
-  // Fallback: Supabase RPC function
+  // Optional fallback: Supabase RPC function (keep if you want)
   try {
     const { data: authRow } = await db
       .rpc("get_auth_user_id_by_email", { p_email: email })
@@ -52,7 +52,24 @@ export async function GET(req: Request) {
   const { data: trips, error } = await db
     .from("trips")
     .select(
-      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at"
+      [
+        "id",
+        "user_email",
+        "operator",
+        "retailer",
+        "origin",
+        "destination",
+        "booking_ref",
+        "depart_planned",
+        "arrive_planned",
+        "status",
+        "created_at",
+        // ✅ required eligibility fields
+        "eligible",
+        "eligibility_reason",
+        // ✅ optional (if exists on trips)
+        "delay_minutes",
+      ].join(",")
     )
     .eq("is_ticket", true)
     .order("created_at", { ascending: false })
@@ -66,6 +83,21 @@ export async function GET(req: Request) {
 
   for (const t of trips || []) {
     if (!t.origin || !t.destination) continue;
+
+    // ----- Past-trip guard (arrive preferred + 1hr buffer) -----
+    const now = Date.now();
+    const departMs = t.depart_planned ? new Date(t.depart_planned).getTime() : 0;
+    const arriveMs = t.arrive_planned ? new Date(t.arrive_planned).getTime() : 0;
+
+    // only process past trips (prefer arrive time) with a buffer
+    const finishedMs = arriveMs || departMs;
+    const bufferMs = 60 * 60 * 1000; // 1 hour safety
+    const isPast = finishedMs > 0 && finishedMs < now - bufferMs;
+
+    // ✅ DO NOT create claims unless it's proven eligible
+    if (t.eligible !== true) continue;
+    if (!isPast) continue;
+    // -------------------------------------------
 
     // skip if claim already exists for this trip
     const { data: existing } = await db
@@ -97,6 +129,8 @@ export async function GET(req: Request) {
           arrive_planned: t.arrive_planned,
           operator: t.operator,
           retailer: t.retailer,
+          eligibility_reason: t.eligibility_reason ?? null,
+          delay_minutes: t.delay_minutes ?? null,
         },
       })
       .select("id")
@@ -132,7 +166,9 @@ export async function GET(req: Request) {
           destination: t.destination ?? null,
           depart_planned: t.depart_planned ?? null,
           arrive_planned: t.arrive_planned ?? null,
-          delay_minutes: null,
+          // ✅ carry through if present; otherwise null
+          delay_minutes: t.delay_minutes ?? null,
+          eligibility_reason: t.eligibility_reason ?? null,
         },
       });
 
