@@ -22,7 +22,7 @@ export async function GET() {
       .from("trips")
       .update({
         eligible: looksClaimable ? true : null,
-        eligible_reason: looksClaimable ? "Has operator + timings (MVP rule)" : null,
+        eligibility_reason: looksClaimable ? "Has operator + timings (MVP rule)" : null,
         status: "review",
       })
       .eq("id", t.id);
