@@ -107,7 +107,7 @@ export async function GET(req: Request) {
   const { data: trips, error } = await db
     .from("trips")
     .select(
-      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at, is_ticket"
+      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at, is_ticket, eligible, eligibility_reason"
     )
     .order("created_at", { ascending: false })
     .limit(200);
