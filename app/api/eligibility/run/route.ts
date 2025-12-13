@@ -33,17 +33,33 @@ type TripRow = {
   is_ticket?: any;
 };
 
-async function getProfileIdForEmail(db: any, email: string | null) {
+async function getUserIdForEmail(db: any, email: string | null) {
   if (!email) return null;
 
-  const { data: prof, error } = await db
+  // Try profiles table (support both possible column names)
+  const { data: prof, error: profErr } = await db
     .from("profiles")
-    .select("id")
-    .eq("email", email)
+    .select("user_id, email, user_email")
+    .or(`email.eq.${email},user_email.eq.${email}`)
     .maybeSingle();
 
-  if (error) throw error;
-  return (prof?.id as string | null) ?? null;
+  if (profErr) return null;
+
+  // If profiles has user_id (common)
+  if (prof?.user_id) return prof.user_id;
+
+  // If you ever add id later, this keeps it safe
+  if ((prof as any)?.id) return (prof as any).id;
+
+  // Fallback: Supabase RPC function (optional)
+  try {
+    const { data: authRow } = await db
+      .rpc("get_auth_user_id_by_email", { p_email: email })
+      .maybeSingle();
+    if (authRow?.user_id) return authRow.user_id;
+  } catch (_) {}
+
+  return null;
 }
 
 function isPastTrip(t: TripRow) {
@@ -152,7 +168,7 @@ export async function GET(req: Request) {
     }
 
     // resolve profile id (uuid)
-    const userId = await getProfileIdForEmail(db, t.user_email);
+    const userId = await getUserIdForEmail(db, t.user_email);
     if (!userId) {
       skippedNoUser++;
       continue;
