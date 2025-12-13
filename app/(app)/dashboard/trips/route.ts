@@ -9,28 +9,24 @@ export const revalidate = 0;
 export const fetchCache = "force-no-store";
 export const runtime = "nodejs";
 
+type DashboardMetrics = {
+  potential_refunds_count: number;
+  potential_refunds_gbp_max: number;
+  claims_in_progress: number;
+  refunds_paid_gbp: number;
+};
+
 function noStoreJson(body: any, status = 200) {
   const res = NextResponse.json(body, { status });
   res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   return res;
 }
 
-function toNumberOrZero(v: unknown): number {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string") {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return 0;
-}
-
 export async function GET(req: NextRequest) {
   try {
-    // 1) Read session
-    const cookieStore = cookies();
-    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
+    const raw = cookies().get(SESSION_COOKIE_NAME)?.value ?? null;
     const session = decodeSession(raw);
-    const email = session?.email;
+    const email = session?.email?.trim();
 
     if (!email) {
       return noStoreJson({ ok: false, error: "Not authenticated", trips: [] }, 401);
@@ -41,7 +37,7 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const sortDir = searchParams.get("sort") === "asc" ? "asc" : "desc";
 
-    // 2) Trips list (as before)
+    // 1) Trips list (primary)
     const { data: trips, error: tripsErr } = await supa
       .from("trips")
       .select("*")
@@ -50,22 +46,16 @@ export async function GET(req: NextRequest) {
 
     if (tripsErr) throw tripsErr;
 
-    // 3) Find profile id (for tickets.user_id join)
-    const { data: profile, error: profErr } = await supa
-      .from("profiles")
-      .select("id")
-      .eq("email", email)
-      .maybeSingle();
+    // 2) Metrics (best-effort but should not depend on profiles.id)
+    const metrics: DashboardMetrics = {
+      potential_refunds_count: 0,
+      potential_refunds_gbp_max: 0, // until we confirm tickets schema
+      claims_in_progress: 0,
+      refunds_paid_gbp: 0, // until claims.amount_paid_gbp exists
+    };
 
-    if (profErr) throw profErr;
-
-    const userId: string | null = profile?.id ?? null;
-
-    // 4) Claims in progress (real)
-    // Define "in progress" = anything not resolved/paid/failed.
-    // Adjust these statuses as your pipeline evolves.
+    // Claims in progress
     const inProgressStatuses = ["pending", "queued", "processing", "submitted"];
-
     const { count: inProgressCount, error: cipErr } = await supa
       .from("claims")
       .select("id", { count: "exact", head: true })
@@ -73,23 +63,17 @@ export async function GET(req: NextRequest) {
       .in("status", inProgressStatuses);
 
     if (cipErr) throw cipErr;
+    metrics.claims_in_progress = inProgressCount ?? 0;
 
-    // 5) Refunds paid (real, but you currently have no amount column)
-    // Until you store payout amount, this must be 0.00 (truthful).
-    // When you add `claims.amount_paid_gbp`, we’ll sum it here.
-    const refundsPaidGbp = 0;
-
-    // 6) Potential refunds (real)
-    // Based on trips.eligible = true, excluding trips that already have a non-failed claim.
+    // Potential refunds count (real): eligible trips not already claimed (non-failed)
     const eligibleTrips = (trips ?? []).filter((t: any) => t?.eligible === true);
-
     const eligibleTripIds = eligibleTrips
       .map((t: any) => String(t?.id || "").trim())
       .filter(Boolean);
 
-    let alreadyClaimedTripIds = new Set<string>();
+    const alreadyClaimedTripIds = new Set<string>();
 
-    if (eligibleTripIds.length > 0) {
+    if (eligibleTripIds.length) {
       const { data: existingClaims, error: ecErr } = await supa
         .from("claims")
         .select("trip_id,status")
@@ -101,7 +85,6 @@ export async function GET(req: NextRequest) {
       for (const c of existingClaims ?? []) {
         const tid = String((c as any)?.trip_id || "").trim();
         const st = String((c as any)?.status || "").trim().toLowerCase();
-        // Treat anything not "failed" as already claimed / in flight / done.
         if (tid && st !== "failed") alreadyClaimedTripIds.add(tid);
       }
     }
@@ -110,43 +93,14 @@ export async function GET(req: NextRequest) {
       (t: any) => !alreadyClaimedTripIds.has(String(t?.id || "").trim())
     );
 
-    const potentialRefundsCount = eligibleUnclaimed.length;
+    metrics.potential_refunds_count = eligibleUnclaimed.length;
 
-    // 7) Potential £ (real upper-bound): sum ticket total_paid_gbp matched by booking_ref (when available)
-    // This is "up to" because delay repay compensation is <= ticket price.
-    let potentialRefundsGbpMax = 0;
+    // Potential £ max:
+    // We will make this real once we standardize tickets linkage.
+    // Returning 0 is truthful and prevents breaking trips.
+    metrics.potential_refunds_gbp_max = 0;
 
-    const bookingRefs = eligibleUnclaimed
-      .map((t: any) => String(t?.booking_ref || "").trim())
-      .filter((br) => br && br.toUpperCase() !== "UNKNOWN");
-
-    if (userId && bookingRefs.length > 0) {
-      // Deduplicate to avoid double counting
-      const uniqueRefs = Array.from(new Set(bookingRefs));
-
-      const { data: tickets, error: tkErr } = await supa
-        .from("tickets")
-        .select("booking_ref,total_paid_gbp")
-        .eq("user_id", userId)
-        .in("booking_ref", uniqueRefs);
-
-      if (tkErr) throw tkErr;
-
-      for (const tk of tickets ?? []) {
-        potentialRefundsGbpMax += toNumberOrZero((tk as any)?.total_paid_gbp);
-      }
-    }
-
-    return noStoreJson({
-      ok: true,
-      trips: trips ?? [],
-      metrics: {
-        potential_refunds_count: potentialRefundsCount,
-        potential_refunds_gbp_max: Number(potentialRefundsGbpMax.toFixed(2)),
-        claims_in_progress: inProgressCount ?? 0,
-        refunds_paid_gbp: refundsPaidGbp,
-      },
-    });
+    return noStoreJson({ ok: true, trips: trips ?? [], metrics });
   } catch (e: any) {
     console.error("dashboard/trips route error", e);
     return noStoreJson(
