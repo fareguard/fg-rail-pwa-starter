@@ -28,8 +28,9 @@ type TripRow = {
   arrive_planned: string | null;
   status: string | null;
   created_at: string | null;
-  eligible: boolean | null;
-  eligibility_reason: string | null;
+  eligible?: boolean | null;
+  eligibility_reason?: string | null;
+  is_ticket?: any;
 };
 
 async function getProfileIdForEmail(db: any, email: string | null) {
@@ -73,28 +74,43 @@ export async function GET(req: Request) {
 
   const db = getSupabaseAdmin();
 
-  const { count: totalTrips } = await db
+  // ===== DEBUG COUNTS (keep for now) =====
+  const { count: totalTrips, error: c1 } = await db
     .from("trips")
     .select("id", { count: "exact", head: true });
 
-  const { count: ticketTrips } = await db
+  const { count: ticketTripsBool, error: c2 } = await db
     .from("trips")
     .select("id", { count: "exact", head: true })
     .eq("is_ticket", true);
 
-  console.log("[eligibility/run] trips total:", totalTrips, "tickets:", ticketTrips);
+  // Detect wrong type: is_ticket stored as text "true"
+  const { count: ticketTripsText, error: c3 } = await db
+    .from("trips")
+    .select("id", { count: "exact", head: true })
+    .eq("is_ticket", "true" as any);
 
-  // ✅ Only eligible, past, ticket-like trips
+  console.log(
+    "[eligibility/run] totalTrips=",
+    totalTrips,
+    "ticketTripsBool=",
+    ticketTripsBool,
+    "ticketTripsText=",
+    ticketTripsText,
+    "errs=",
+    c1?.message,
+    c2?.message,
+    c3?.message
+  );
+
+  // ===== ACTUAL TRIPS FETCH =====
   const { data: trips, error } = await db
     .from("trips")
     .select(
-      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at, eligible, eligibility_reason"
+      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at, is_ticket"
     )
-    .eq("is_ticket", true)
-    .eq("eligible", true)
     .order("created_at", { ascending: false })
-    .limit(200)
-    .returns<TripRow[]>();
+    .limit(200);
 
   if (error) {
     return NextResponse.json(
@@ -111,6 +127,8 @@ export async function GET(req: Request) {
 
   for (const t of trips || []) {
     examined++;
+
+    if (t.is_ticket !== true) continue;
 
     if (!t.origin || !t.destination) continue;
 
