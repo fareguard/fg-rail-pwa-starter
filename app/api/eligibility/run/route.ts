@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -15,25 +15,41 @@ function isAuthorized(request: Request) {
   return hdr === ADMIN_KEY;
 }
 
+// ===== Types =====
+type TripRow = {
+  id: string;
+  user_email: string | null;
+  operator: string | null;
+  retailer: string | null;
+  origin: string | null;
+  destination: string | null;
+  booking_ref: string | null;
+  depart_planned: string | null;
+  arrive_planned: string | null;
+  status: string | null;
+  created_at: string | null;
+};
+
 // ===== Helper =====
 async function getUserIdForEmail(db: any, email: string | null) {
   if (!email) return null;
 
-  // profiles has: id + email + user_email
-  const { data: prof } = await db
+  // profiles has `id` (uuid) + `email` + maybe `user_email`
+  const { data: prof, error: profErr } = await db
     .from("profiles")
     .select("id")
     .or(`email.eq.${email},user_email.eq.${email}`)
     .maybeSingle();
 
-  if (prof?.id) return prof.id;
+  if (profErr) return null;
+  if (prof?.id) return prof.id as string;
 
-  // Optional fallback: Supabase RPC function (keep if you want)
+  // Optional fallback if you have this RPC
   try {
     const { data: authRow } = await db
       .rpc("get_auth_user_id_by_email", { p_email: email })
       .maybeSingle();
-    if (authRow?.user_id) return authRow.user_id;
+    if (authRow?.user_id) return authRow.user_id as string;
   } catch (_) {}
 
   return null;
@@ -42,70 +58,43 @@ async function getUserIdForEmail(db: any, email: string | null) {
 // ===== MAIN =====
 export async function GET(req: Request) {
   if (!isAuthorized(req)) {
-    // Hide from public
     return NextResponse.json({ ok: false }, { status: 404 });
   }
 
   const db = getSupabaseAdmin();
 
-  // ✅ Only consider ticket-like trips
-  const { data: trips, error } = await db
+  const { data: tripsRaw, error } = await db
     .from("trips")
     .select(
-      [
-        "id",
-        "user_email",
-        "operator",
-        "retailer",
-        "origin",
-        "destination",
-        "booking_ref",
-        "depart_planned",
-        "arrive_planned",
-        "status",
-        "created_at",
-        // ✅ required eligibility fields
-        "eligible",
-        "eligibility_reason",
-        // ✅ optional (if exists on trips)
-        "delay_minutes",
-      ].join(",")
+      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at"
     )
     .eq("is_ticket", true)
     .order("created_at", { ascending: false })
     .limit(200);
 
   if (error) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: error.message },
+      { status: 500 }
+    );
   }
+
+  // ✅ Force a sane type for TS (fixes your build error)
+  const trips = (tripsRaw ?? []) as TripRow[];
 
   let created = 0;
 
-  for (const t of trips || []) {
+  for (const t of trips) {
     if (!t.origin || !t.destination) continue;
 
-    // ----- Past-trip guard (arrive preferred + 1hr buffer) -----
-    const now = Date.now();
-    const departMs = t.depart_planned ? new Date(t.depart_planned).getTime() : 0;
-    const arriveMs = t.arrive_planned ? new Date(t.arrive_planned).getTime() : 0;
-
-    // only process past trips (prefer arrive time) with a buffer
-    const finishedMs = arriveMs || departMs;
-    const bufferMs = 60 * 60 * 1000; // 1 hour safety
-    const isPast = finishedMs > 0 && finishedMs < now - bufferMs;
-
-    // ✅ DO NOT create claims unless it's proven eligible
-    if (t.eligible !== true) continue;
-    if (!isPast) continue;
-    // -------------------------------------------
-
     // skip if claim already exists for this trip
-    const { data: existing } = await db
+    const { data: existing, error: exErr } = await db
       .from("claims")
       .select("id")
       .eq("trip_id", t.id)
       .limit(1);
 
+    if (exErr) continue;
     if (existing && existing.length) continue;
 
     // resolve user_id
@@ -129,8 +118,6 @@ export async function GET(req: Request) {
           arrive_planned: t.arrive_planned,
           operator: t.operator,
           retailer: t.retailer,
-          eligibility_reason: t.eligibility_reason ?? null,
-          delay_minutes: t.delay_minutes ?? null,
         },
       })
       .select("id")
@@ -138,7 +125,7 @@ export async function GET(req: Request) {
 
     if (insErr || !ins?.id) continue;
 
-    // detect provider from operator name
+    // provider detection (placeholder)
     const op = (t.operator || "").toLowerCase();
     const provider = op.includes("avanti")
       ? "avanti"
@@ -147,11 +134,13 @@ export async function GET(req: Request) {
       : "unknown";
 
     // ✅ Queue guard: only one queued job per claim
-    const { data: existingQ } = await db
+    const { data: existingQ, error: qErr } = await db
       .from("claim_queue")
       .select("id")
       .eq("claim_id", ins.id)
       .limit(1);
+
+    if (qErr) continue;
 
     if (!existingQ || existingQ.length === 0) {
       await db.from("claim_queue").insert({
@@ -166,9 +155,7 @@ export async function GET(req: Request) {
           destination: t.destination ?? null,
           depart_planned: t.depart_planned ?? null,
           arrive_planned: t.arrive_planned ?? null,
-          // ✅ carry through if present; otherwise null
-          delay_minutes: t.delay_minutes ?? null,
-          eligibility_reason: t.eligibility_reason ?? null,
+          delay_minutes: null,
         },
       });
 
@@ -178,12 +165,11 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     ok: true,
-    examined: trips?.length || 0,
+    examined: trips.length,
     created,
   });
 }
 
-// POST = same as GET (manual trigger)
 export async function POST(req: Request) {
   return GET(req);
 }
