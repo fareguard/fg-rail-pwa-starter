@@ -21,8 +21,8 @@ export async function GET() {
     const { error: uerr } = await supa
       .from("trips")
       .update({
-        eligible: looksClaimable ? true : null,
-        eligibility_reason: looksClaimable ? "Has operator + timings (MVP rule)" : null,
+        eligible: null,
+        eligibility_reason: "Pending Darwin check",
         status: "review",
       })
       .eq("id", t.id);
