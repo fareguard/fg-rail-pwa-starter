@@ -73,6 +73,17 @@ export async function GET(req: Request) {
 
   const db = getSupabaseAdmin();
 
+  const { count: totalTrips } = await db
+    .from("trips")
+    .select("id", { count: "exact", head: true });
+
+  const { count: ticketTrips } = await db
+    .from("trips")
+    .select("id", { count: "exact", head: true })
+    .eq("is_ticket", true);
+
+  console.log("[eligibility/run] trips total:", totalTrips, "tickets:", ticketTrips);
+
   // ✅ Only eligible, past, ticket-like trips
   const { data: trips, error } = await db
     .from("trips")
