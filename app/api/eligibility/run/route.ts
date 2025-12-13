@@ -1,3 +1,4 @@
+// app/api/eligibility/run/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
@@ -15,7 +16,6 @@ function isAuthorized(request: Request) {
   return hdr === ADMIN_KEY;
 }
 
-// ===== Types =====
 type TripRow = {
   id: string;
   user_email: string | null;
@@ -28,34 +28,44 @@ type TripRow = {
   arrive_planned: string | null;
   status: string | null;
   created_at: string | null;
+  eligible: boolean | null;
+  eligibility_reason: string | null;
 };
 
-// ===== Helper =====
-async function getUserIdForEmail(db: any, email: string | null) {
+async function getProfileIdForEmail(db: any, email: string | null) {
   if (!email) return null;
 
-  // profiles has `id` (uuid) + `email` + maybe `user_email`
-  const { data: prof, error: profErr } = await db
+  const { data: prof, error } = await db
     .from("profiles")
     .select("id")
-    .or(`email.eq.${email},user_email.eq.${email}`)
+    .eq("email", email)
     .maybeSingle();
 
-  if (profErr) return null;
-  if (prof?.id) return prof.id as string;
-
-  // Optional fallback if you have this RPC
-  try {
-    const { data: authRow } = await db
-      .rpc("get_auth_user_id_by_email", { p_email: email })
-      .maybeSingle();
-    if (authRow?.user_id) return authRow.user_id as string;
-  } catch (_) {}
-
-  return null;
+  if (error) throw error;
+  return (prof?.id as string | null) ?? null;
 }
 
-// ===== MAIN =====
+function isPastTrip(t: TripRow) {
+  // Prefer arrive_planned if present (more reliable), else depart_planned
+  const ref = t.arrive_planned || t.depart_planned;
+  if (!ref) return false;
+  const ms = Date.parse(ref);
+  if (!Number.isFinite(ms)) return false;
+
+  // 1 hour buffer to avoid edge cases
+  return ms < Date.now() - 60 * 60 * 1000;
+}
+
+function providerFromOperator(opRaw: string | null) {
+  const op = (opRaw || "").toLowerCase();
+  if (op.includes("avanti")) return "avanti";
+  if (op.includes("west midlands")) return "wmt";
+  if (op.includes("gwr") || op.includes("great western")) return "gwr";
+  if (op.includes("lner")) return "lner";
+  if (op.includes("thameslink") || op.includes("gtr")) return "gtr";
+  return "unknown";
+}
+
 export async function GET(req: Request) {
   if (!isAuthorized(req)) {
     return NextResponse.json({ ok: false }, { status: 404 });
@@ -63,14 +73,17 @@ export async function GET(req: Request) {
 
   const db = getSupabaseAdmin();
 
-  const { data: tripsRaw, error } = await db
+  // ✅ Only eligible, past, ticket-like trips
+  const { data: trips, error } = await db
     .from("trips")
     .select(
-      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at"
+      "id, user_email, operator, retailer, origin, destination, booking_ref, depart_planned, arrive_planned, status, created_at, eligible, eligibility_reason"
     )
     .eq("is_ticket", true)
+    .eq("eligible", true)
     .order("created_at", { ascending: false })
-    .limit(200);
+    .limit(200)
+    .returns<TripRow[]>();
 
   if (error) {
     return NextResponse.json(
@@ -79,13 +92,22 @@ export async function GET(req: Request) {
     );
   }
 
-  // ✅ Force a sane type for TS (fixes your build error)
-  const trips = (tripsRaw ?? []) as TripRow[];
-
+  let examined = 0;
   let created = 0;
+  let skippedNotPast = 0;
+  let skippedNoUser = 0;
+  let skippedHasClaim = 0;
 
-  for (const t of trips) {
+  for (const t of trips || []) {
+    examined++;
+
     if (!t.origin || !t.destination) continue;
+
+    // Only past trips (real-world rule)
+    if (!isPastTrip(t)) {
+      skippedNotPast++;
+      continue;
+    }
 
     // skip if claim already exists for this trip
     const { data: existing, error: exErr } = await db
@@ -94,12 +116,18 @@ export async function GET(req: Request) {
       .eq("trip_id", t.id)
       .limit(1);
 
-    if (exErr) continue;
-    if (existing && existing.length) continue;
+    if (exErr) throw exErr;
+    if (existing && existing.length) {
+      skippedHasClaim++;
+      continue;
+    }
 
-    // resolve user_id
-    const userId = await getUserIdForEmail(db, t.user_email);
-    if (!userId) continue;
+    // resolve profile id (uuid)
+    const userId = await getProfileIdForEmail(db, t.user_email);
+    if (!userId) {
+      skippedNoUser++;
+      continue;
+    }
 
     // insert claim
     const { data: ins, error: insErr } = await db
@@ -118,6 +146,7 @@ export async function GET(req: Request) {
           arrive_planned: t.arrive_planned,
           operator: t.operator,
           retailer: t.retailer,
+          eligibility_reason: t.eligibility_reason,
         },
       })
       .select("id")
@@ -125,13 +154,7 @@ export async function GET(req: Request) {
 
     if (insErr || !ins?.id) continue;
 
-    // provider detection (placeholder)
-    const op = (t.operator || "").toLowerCase();
-    const provider = op.includes("avanti")
-      ? "avanti"
-      : op.includes("west midlands")
-      ? "wmt"
-      : "unknown";
+    const provider = providerFromOperator(t.operator);
 
     // ✅ Queue guard: only one queued job per claim
     const { data: existingQ, error: qErr } = await db
@@ -140,7 +163,7 @@ export async function GET(req: Request) {
       .eq("claim_id", ins.id)
       .limit(1);
 
-    if (qErr) continue;
+    if (qErr) throw qErr;
 
     if (!existingQ || existingQ.length === 0) {
       await db.from("claim_queue").insert({
@@ -165,8 +188,13 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     ok: true,
-    examined: trips.length,
+    examined,
     created,
+    skipped: {
+      not_past: skippedNotPast,
+      no_user: skippedNoUser,
+      has_claim: skippedHasClaim,
+    },
   });
 }
 
