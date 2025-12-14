@@ -1,31 +1,24 @@
 import { NextResponse } from "next/server";
-import { openLdbwsCall } from "@/lib/openldbws";
+import { getDepartureBoard } from "@/lib/openldbws";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Simple sanity check: departure board for a CRS code (e.g. "EUS", "BHM", etc)
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const crs = (searchParams.get("crs") || "EUS").toUpperCase();
-  const numRows = Number(searchParams.get("rows") || "5");
-
-  const soapAction =
-    "http://thalesgroup.com/RTTI/2017-10-01/ldb/GetDepartureBoard";
-
-  const body = `
-<ldb:GetDepartureBoardRequest>
-  <ldb:numRows>${Number.isFinite(numRows) ? numRows : 5}</ldb:numRows>
-  <ldb:crs>${crs}</ldb:crs>
-</ldb:GetDepartureBoardRequest>`;
-
   try {
-    const xml = await openLdbwsCall(soapAction, body);
-    return NextResponse.json({ ok: true, crs, xml_preview: xml.slice(0, 1200) });
+    const url = new URL(req.url);
+    const crs = (url.searchParams.get("crs") || "EUS").toUpperCase();
+    const xml = await getDepartureBoard(crs, 10);
+
+    return NextResponse.json({
+      ok: true,
+      crs,
+      preview: xml.slice(0, 1200),
+    });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message || String(e) },
-      { status: 500 }
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 },
     );
   }
 }
