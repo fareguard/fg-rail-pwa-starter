@@ -73,14 +73,21 @@ function isPastTrip(t: TripRow) {
   return ms < Date.now() - 60 * 60 * 1000;
 }
 
-function providerFromOperator(opRaw: string | null) {
+function providerFromOperatorRetailer(opRaw: string | null, rtRaw: string | null) {
   const op = (opRaw || "").toLowerCase();
-  if (op.includes("avanti")) return "avanti";
-  if (op.includes("west midlands")) return "wmt";
-  if (op.includes("gwr") || op.includes("great western")) return "gwr";
-  if (op.includes("lner")) return "lner";
-  if (op.includes("thameslink") || op.includes("gtr")) return "gtr";
-  return "unknown";
+  const rt = (rtRaw || "").toLowerCase();
+  const brand = `${op} ${rt}`;
+
+  const provider =
+    brand.includes("great western") || brand.includes("gwr")
+      ? "gwr"
+      : brand.includes("avanti")
+      ? "avanti"
+      : brand.includes("west midlands")
+      ? "wmt"
+      : "unknown";
+
+  return provider;
 }
 
 export async function GET(req: Request) {
@@ -199,7 +206,10 @@ export async function GET(req: Request) {
 
     if (insErr || !ins?.id) continue;
 
-    const provider = providerFromOperator(t.operator);
+    const provider = providerFromOperatorRetailer(t.operator, t.retailer);
+
+    // don’t queue “unknown”
+    if (provider === "unknown") continue;
 
     // ✅ Queue guard: only one queued job per claim
     const { data: existingQ, error: qErr } = await db
