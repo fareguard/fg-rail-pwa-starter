@@ -306,78 +306,86 @@ async function processOneTrip(db: any, t: TripRow) {
 }
 
 export async function GET(req: Request) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ ok: false }, { status: 404 });
-  }
-
-  const db = getSupabaseAdmin();
-
-  const now = new Date();
-  const tMin = new Date(now.getTime() - WINDOW_PAST_HOURS * 60 * 60 * 1000);
-  const tMax = new Date(now.getTime() + WINDOW_FUTURE_HOURS * 60 * 60 * 1000);
-
-  // Only ticket-like trips, within a window OpenLDBWS can realistically help with
-  const { data: trips, error } = await db
-    .from("trips")
-    .select(
-      "id,user_email,origin,destination,origin_crs,destination_crs,depart_planned,arrive_planned,eligible,eligibility_reason,delay_minutes,delay_checked_at,service_id"
-    )
-    .eq("is_ticket", true)
-    .gte("depart_planned", toIso(tMin))
-    .lte("depart_planned", toIso(tMax))
-    .order("depart_planned", { ascending: true })
-    .limit(200);
-
-  if (error) return json({ ok: false, error: error.message }, 500);
-
-  let examined = 0;
-  let updated = 0;
-  let lockedEligible = 0;
-  let lockedIneligible = 0;
-
-  const skipped: Record<string, number> = {
-    no_crs: 0,
-    no_times: 0,
-    cooldown: 0,
-    no_services: 0,
-    no_match: 0,
-    db_update_failed: 0,
-  };
-
-  for (const t of (trips || []) as TripRow[]) {
-    examined++;
-
-    const r = await processOneTrip(db, t);
-
-    if (!r.ok) {
-      const key = (r as any).skipped || "unknown";
-      skipped[key] = (skipped[key] ?? 0) + 1;
-      continue;
+  try {
+    if (!isAuthorized(req)) {
+      return NextResponse.json({ ok: false }, { status: 404 });
     }
 
-    updated++;
+    const db = getSupabaseAdmin();
 
-    if (r.locked) {
-      if (r.eligible === true) lockedEligible++;
-      if (r.eligible === false) lockedIneligible++;
+    const now = new Date();
+    const tMin = new Date(now.getTime() - WINDOW_PAST_HOURS * 60 * 60 * 1000);
+    const tMax = new Date(now.getTime() + WINDOW_FUTURE_HOURS * 60 * 60 * 1000);
+
+    // Only ticket-like trips, within a window OpenLDBWS can realistically help with
+    const { data: trips, error } = await db
+      .from("trips")
+      .select(
+        "id,user_email,origin,destination,origin_crs,destination_crs,depart_planned,arrive_planned,eligible,eligibility_reason,delay_minutes,delay_checked_at,service_id"
+      )
+      .eq("is_ticket", true)
+      .gte("depart_planned", toIso(tMin))
+      .lte("depart_planned", toIso(tMax))
+      .order("depart_planned", { ascending: true })
+      .limit(200);
+
+    if (error) return json({ ok: false, error: error.message }, 500);
+
+    let examined = 0;
+    let updated = 0;
+    let lockedEligible = 0;
+    let lockedIneligible = 0;
+
+    const skipped: Record<string, number> = {
+      no_crs: 0,
+      no_times: 0,
+      cooldown: 0,
+      no_services: 0,
+      no_match: 0,
+      db_update_failed: 0,
+    };
+
+    for (const t of (trips || []) as TripRow[]) {
+      examined++;
+
+      const r = await processOneTrip(db, t);
+
+      if (!r.ok) {
+        const key = (r as any).skipped || "unknown";
+        skipped[key] = (skipped[key] ?? 0) + 1;
+        continue;
+      }
+
+      updated++;
+
+      if (r.locked) {
+        if (r.eligible === true) lockedEligible++;
+        if (r.eligible === false) lockedIneligible++;
+      }
     }
-  }
 
-  return json({
-    ok: true,
-    window: { from: toIso(tMin), to: toIso(tMax) },
-    examined,
-    updated,
-    locked: { eligible: lockedEligible, ineligible: lockedIneligible },
-    skipped,
-    config: {
-      WINDOW_PAST_HOURS,
-      WINDOW_FUTURE_HOURS,
-      CHECK_COOLDOWN_MIN,
-      ARRIVAL_BUFFER_MIN,
-      MIN_DELAY_MINUTES,
-    },
-  });
+    return json({
+      ok: true,
+      window: { from: toIso(tMin), to: toIso(tMax) },
+      examined,
+      updated,
+      locked: { eligible: lockedEligible, ineligible: lockedIneligible },
+      skipped,
+      config: {
+        WINDOW_PAST_HOURS,
+        WINDOW_FUTURE_HOURS,
+        CHECK_COOLDOWN_MIN,
+        ARRIVAL_BUFFER_MIN,
+        MIN_DELAY_MINUTES,
+      },
+    });
+  } catch (e: any) {
+    console.error("[openldbws cron] error", e);
+    return NextResponse.json(
+      { ok: false, error: e?.message || String(e) },
+      { status: 500 }
+    );
+  }
 }
 
 export async function POST(req: Request) {
