@@ -1,3 +1,4 @@
+// app/api/cron/eligibility/openldbws/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { openLdbwsCall } from "@/lib/openldbws";
@@ -53,7 +54,7 @@ function normalizeCrs(crs: any): string | null {
   return s.length === 3 ? s : null;
 }
 
-// ===== XML parsing (minimal, but works with OpenLDBWS service blocks) =====
+// ===== XML parsing (minimal) =====
 function pickTag(block: string, tag: string): string | null {
   const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i");
   const m = block.match(re);
@@ -62,7 +63,6 @@ function pickTag(block: string, tag: string): string | null {
 }
 
 function pickAllServiceBlocks(xml: string): string[] {
-  // OpenLDBWS services are typically <service>...</service>
   const blocks: string[] = [];
   const re = /<service\b[\s\S]*?<\/service>/gi;
   let m: RegExpExecArray | null;
@@ -71,12 +71,9 @@ function pickAllServiceBlocks(xml: string): string[] {
 }
 
 function pickDestinationName(serviceBlock: string): string | null {
-  // destination often appears as <destination><location><locationName>...</locationName>
-  // We’ll just grab the first <locationName> inside destination.
   const destBlock = pickTag(serviceBlock, "destination");
   if (!destBlock) return null;
-  const locName = pickTag(destBlock, "locationName");
-  return locName;
+  return pickTag(destBlock, "locationName");
 }
 
 function parseTimeHHMM(hhmm: string | null): { h: number; m: number } | null {
@@ -96,8 +93,7 @@ function sameMinuteClose(planned: Date, candidate: Date, toleranceMin = 20) {
 }
 
 function buildBoardRequestXml(crs: string, numRows = 20) {
-  // SOAP body for GetDepartureBoard (OpenLDBWS)
-  // The token is injected by your openLdbwsCall helper in SOAP header (as you already did in /test).
+  // Using timeOffset/timeWindow makes the request more "standard" for LDBWS.
   return `<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
                xmlns:ldb="http://thalesgroup.com/RTTI/2016-02-16/ldb/">
@@ -105,6 +101,8 @@ function buildBoardRequestXml(crs: string, numRows = 20) {
     <ldb:GetDepartureBoardRequest>
       <ldb:numRows>${numRows}</ldb:numRows>
       <ldb:crs>${crs}</ldb:crs>
+      <ldb:timeOffset>0</ldb:timeOffset>
+      <ldb:timeWindow>120</ldb:timeWindow>
     </ldb:GetDepartureBoardRequest>
   </soap:Body>
 </soap:Envelope>`;
@@ -150,14 +148,29 @@ async function processOneTrip(db: any, t: TripRow) {
     }
   }
 
-  // 1) fetch board
+  // 1) fetch board (NON-FATAL if OpenLDBWS errors)
   const bodyXml = buildBoardRequestXml(originCrs, 30);
-  const xml = await openLdbwsCall(bodyXml);
+
+  let xml: string;
+  try {
+    xml = await openLdbwsCall(bodyXml);
+  } catch (e: any) {
+    // mark checked so we don't hammer
+    await db
+      .from("trips")
+      .update({
+        delay_checked_at: toIso(now),
+        delay_source: "openldbws",
+        eligibility_reason: `OpenLDBWS error: ${String(e?.message || e).slice(0, 180)}`,
+      })
+      .eq("id", t.id);
+
+    return { ok: false, skipped: "openldbws_error" as const };
+  }
 
   // 2) parse services
   const services = pickAllServiceBlocks(xml);
   if (!services.length) {
-    // still update checked_at so we don't hammer
     await db
       .from("trips")
       .update({
@@ -169,47 +182,34 @@ async function processOneTrip(db: any, t: TripRow) {
     return { ok: false, skipped: "no_services" as const };
   }
 
-  // 3) find best matching service by destination + planned departure close
-  // Prefer:
-  // - destination name includes the destination CRS *name isn't present*, so we match by time first
-  // - match std (scheduled depart) near planned depart
-  const plannedDepartLocal = plannedDepart;
-
+  // 3) find best matching service by destination hint + time closeness
   let best: { block: string; score: number } | null = null;
 
   for (const s of services) {
-    const serviceID = pickTag(s, "serviceID");
     const std = pickTag(s, "std"); // scheduled depart
-    const etd = pickTag(s, "etd"); // expected depart
-    const sta = pickTag(s, "sta"); // scheduled arrive (sometimes present)
-    const eta = pickTag(s, "eta"); // expected arrive
     const destName = pickDestinationName(s);
 
-    // score
     let score = 0;
 
     // time closeness on std (best signal)
     const stdTime = parseTimeHHMM(std);
     if (stdTime) {
-      const cand = new Date(plannedDepartLocal);
+      const cand = new Date(plannedDepart);
       cand.setUTCHours(stdTime.h, stdTime.m, 0, 0);
-      if (sameMinuteClose(plannedDepartLocal, cand, 30)) score += 5;
+      if (sameMinuteClose(plannedDepart, cand, 30)) score += 5;
     }
 
-    // destination hint (weak signal, but helps)
+    // destination hint
     if (destName && t.destination) {
       const a = destName.toLowerCase();
       const b = t.destination.toLowerCase();
       if (a.includes(b) || b.includes(a)) score += 2;
     }
 
-    // if we have booking refs later, we can match even better; for now keep it simple
-
     if (!best || score > best.score) best = { block: s, score };
   }
 
   if (!best || best.score < 3) {
-    // no confident match, just mark checked
     await db
       .from("trips")
       .update({
@@ -224,19 +224,12 @@ async function processOneTrip(db: any, t: TripRow) {
   const chosen = best.block;
 
   const serviceID = pickTag(chosen, "serviceID");
-  const std = pickTag(chosen, "std");
   const etd = pickTag(chosen, "etd");
-  const sta = pickTag(chosen, "sta");
   const eta = pickTag(chosen, "eta");
-  const ata = pickTag(chosen, "ata"); // actual arrival (if present)
-  const status = pickTag(chosen, "status"); // may exist
+  const ata = pickTag(chosen, "ata");
+  const status = pickTag(chosen, "status");
 
-  // 4) compute delay minutes (prefer arrival-based if we can)
-  // We compare planned arrival timestamp vs:
-  // - ATA time if available
-  // - else ETA time if available
-  // - else if only "On time"/"Delayed", we can't compute reliably => delay null
-
+  // 4) compute delay minutes (arrival-based if possible)
   let delayMinutes: number | null = null;
 
   const pickActualOrExpectedArrival = ata || eta;
@@ -246,19 +239,17 @@ async function processOneTrip(db: any, t: TripRow) {
     const actualArrive = new Date(plannedArrive);
     actualArrive.setUTCHours(arrivalHHMM.h, arrivalHHMM.m, 0, 0);
 
-    // handle midnight-ish wrap: if computed time is "before" planned by a lot, add a day
+    // midnight wrap guard
     if (actualArrive.getTime() + 6 * 60 * 60 * 1000 < plannedArrive.getTime()) {
       actualArrive.setUTCDate(actualArrive.getUTCDate() + 1);
     }
 
     delayMinutes = Math.max(0, minutesDiff(actualArrive, plannedArrive));
   } else {
-    // Sometimes ETA/ATA is "On time" or "Cancelled" etc.
-    // We’ll treat Cancelled specially (eligible true, reason cancelled) once in past.
     delayMinutes = null;
   }
 
-  // 5) update trip with fresh tracking fields
+  // 5) update trip with tracking fields
   const patch: any = {
     delay_checked_at: toIso(now),
     delay_source: "openldbws",
@@ -266,12 +257,11 @@ async function processOneTrip(db: any, t: TripRow) {
     delay_minutes: delayMinutes,
   };
 
-  // 6) decide if we should lock eligibility yet
+  // 6) lock eligibility once arrival + buffer is passed
   const arriveBufferAt = new Date(plannedArrive.getTime() + ARRIVAL_BUFFER_MIN * 60000);
   const isPastWithBuffer = now.getTime() >= arriveBufferAt.getTime();
 
   if (isPastWithBuffer) {
-    // cancelled?
     const lowerStatus = String(status || "").toLowerCase();
     const isCancelled =
       lowerStatus.includes("cancel") ||
@@ -287,7 +277,6 @@ async function processOneTrip(db: any, t: TripRow) {
         ? `Delayed ${delayMinutes} min (OpenLDBWS)`
         : `Delayed ${delayMinutes} min (<${MIN_DELAY_MINUTES} min threshold, OpenLDBWS)`;
     } else {
-      // we couldn't compute: be truthful
       patch.eligible = false;
       patch.eligibility_reason = "Unable to compute delay from OpenLDBWS (no ETA/ATA)";
     }
@@ -317,7 +306,6 @@ export async function GET(req: Request) {
     const tMin = new Date(now.getTime() - WINDOW_PAST_HOURS * 60 * 60 * 1000);
     const tMax = new Date(now.getTime() + WINDOW_FUTURE_HOURS * 60 * 60 * 1000);
 
-    // Only ticket-like trips, within a window OpenLDBWS can realistically help with
     const { data: trips, error } = await db
       .from("trips")
       .select(
@@ -340,14 +328,15 @@ export async function GET(req: Request) {
       no_crs: 0,
       no_times: 0,
       cooldown: 0,
+      openldbws_error: 0,
       no_services: 0,
       no_match: 0,
       db_update_failed: 0,
+      unknown: 0,
     };
 
     for (const t of (trips || []) as TripRow[]) {
       examined++;
-
       const r = await processOneTrip(db, t);
 
       if (!r.ok) {
