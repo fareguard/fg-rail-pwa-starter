@@ -124,7 +124,7 @@ export async function GET(req: Request) {
           .insert({
             topic,
             partition,
-            offset: Number(message.offset),
+            kafka_offset: Number(message.offset),
             message_key,
             payload,
             headers: Object.keys(headersObj).length ? headersObj : null,
