@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Kafka } from "kafkajs";
+import { Kafka, IHeaders } from "kafkajs";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const dynamic = "force-dynamic";
@@ -30,21 +30,29 @@ function mustEnv(name: string) {
   return String(v).trim();
 }
 
-function headersToJson(h?: Record<string, Buffer>) {
+function headerValueToString(v: any): string {
+  if (v == null) return "";
+  if (Buffer.isBuffer(v)) return v.toString("utf8");
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v.map(headerValueToString).join(",");
+  // KafkaJS types can be weird; last resort:
+  try {
+    return String(v);
+  } catch {
+    return "";
+  }
+}
+
+function headersToJson(h?: IHeaders) {
   if (!h) return null;
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(h)) {
-    try {
-      out[k] = v?.toString("utf8") ?? "";
-    } catch {
-      out[k] = "";
-    }
+  for (const k of Object.keys(h)) {
+    out[k] = headerValueToString((h as any)[k]);
   }
   return out;
 }
 
 // ===== CONFIG (env vars) =====
-// Recommended names (use what you already set, but these are the ones this file expects):
 // DARWIN_KAFKA_BOOTSTRAP=pkc-....confluent.cloud:9092
 // DARWIN_KAFKA_USERNAME=xxxxx
 // DARWIN_KAFKA_PASSWORD=xxxxx
@@ -72,11 +80,7 @@ export async function GET(req: Request) {
       clientId: "fareguard-darwin-ingest",
       brokers: [bootstrap],
       ssl: true,
-      sasl: {
-        mechanism: "plain",
-        username,
-        password,
-      },
+      sasl: { mechanism: "plain", username, password },
       connectionTimeout: 15000,
       authenticationTimeout: 15000,
       requestTimeout: 30000,
@@ -86,14 +90,12 @@ export async function GET(req: Request) {
 
     let received = 0;
     let inserted = 0;
-    let dupes = 0;
 
     await consumer.connect();
     await consumer.subscribe({ topic, fromBeginning: false });
 
     const startedAt = Date.now();
 
-    // We wrap run() so we can stop after a short time/batch (serverless-safe)
     const runPromise = consumer.run({
       autoCommit: true,
       eachBatchAutoResolve: false,
@@ -105,20 +107,20 @@ export async function GET(req: Request) {
 
           received++;
 
+          const valueStr = message.value ? message.value.toString("utf8") : "";
+          let payload: any;
+          try {
+            payload = JSON.parse(valueStr);
+          } catch {
+            payload = { raw: valueStr };
+          }
+
           const row = {
             topic: batch.topic,
             partition: batch.partition,
             kafka_offset: Number(message.offset),
             message_key: message.key ? message.key.toString("utf8") : null,
-            payload: (() => {
-              const s = message.value ? message.value.toString("utf8") : "";
-              // Darwin push port payload is JSON; but be defensive
-              try {
-                return JSON.parse(s);
-              } catch {
-                return { raw: s };
-              }
-            })(),
+            payload,
             headers: headersToJson(message.headers),
           };
 
@@ -129,13 +131,8 @@ export async function GET(req: Request) {
               ignoreDuplicates: true,
             });
 
-          if (error) {
-            // If this fails, stop fast and surface the DB error
-            throw new Error(`Supabase upsert failed: ${error.message}`);
-          }
+          if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
 
-          // If ignoreDuplicates is true we can’t directly know insert vs dupe
-          // so we’ll approximate: count as inserted
           inserted++;
 
           resolveOffset(message.offset);
@@ -145,16 +142,12 @@ export async function GET(req: Request) {
           if (Date.now() - startedAt > MAX_MS) break;
         }
 
-        // Stop conditions
         if (received >= MAX_MESSAGES || Date.now() - startedAt > MAX_MS) {
-          // mark the batch as processed
-          // resolve the last offset if any (already done per-message above)
           await consumer.stop();
         }
       },
     });
 
-    // Safety stop: even if no messages arrive, stop after MAX_MS
     const timeoutPromise = new Promise<void>((resolve) =>
       setTimeout(async () => {
         try {
@@ -174,7 +167,6 @@ export async function GET(req: Request) {
       groupId,
       received,
       inserted,
-      dupes, // kept for future (we’re not reliably counting dupes yet)
       max: { messages: MAX_MESSAGES, ms: MAX_MS },
     });
   } catch (e: any) {
