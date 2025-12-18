@@ -44,7 +44,7 @@ export async function GET(req: Request) {
     const from = clean(url.searchParams.get("from") || "latest").toLowerCase(); // earliest|latest
     const groupOverride = clean(url.searchParams.get("group") || "");
     const maxMessages = Math.min(Number(url.searchParams.get("max") || "200"), 500);
-    const maxMs = Math.min(Number(url.searchParams.get("ms") || "60000"), 120000);
+    const maxMs = Math.min(Number(url.searchParams.get("ms") || "90000"), 120000);
 
     const bootstrap = clean(must("DARWIN_KAFKA_BOOTSTRAP"));
     const username = must("DARWIN_KAFKA_USERNAME");
@@ -54,46 +54,53 @@ export async function GET(req: Request) {
     const groupId = groupOverride || baseGroupId;
 
     const kafka = new Kafka({
-      clientId: "fareguard-darwin-ingest",
+      clientId: `fareguard-darwin-ingest-${Date.now()}`,
       brokers: [bootstrap],
       ssl: true,
       sasl: { mechanism: "plain", username, password },
       logLevel: logLevel.NOTHING,
     });
 
-    const db = getSupabaseAdmin();
-
-    // ---- debug: admin offsets (proves topic exists + has data) ----
+    // Prove broker reachable + topic exists
     const admin = kafka.admin();
     await admin.connect();
     const offsets = await admin.fetchTopicOffsets(topic);
     await admin.disconnect();
 
-    // ---- consume burst ----
+    const db = getSupabaseAdmin();
+
     const consumer = kafka.consumer({
       groupId,
-      // helps serverless environments
       sessionTimeout: 30000,
       heartbeatInterval: 3000,
-      retry: { retries: 3 },
+      retry: { retries: 2 },
     });
 
     let joined = false;
-    let assigned: any[] = [];
+    let assigned: any = null;
     let received = 0;
     let inserted = 0;
     let batchesSeen = 0;
-    const errors: any[] = [];
 
-    // kafkajs event name string (safe)
-    consumer.on((consumer as any).events.GROUP_JOIN, (e: any) => {
+    const errors: any[] = [];
+    const events = (consumer as any).events;
+
+    // IMPORTANT: capture crashes (this is what you’re missing)
+    consumer.on(events.CRASH, (e: any) => {
+      errors.push({
+        type: "CRASH",
+        message: e?.payload?.error?.message || e?.payload?.error?.name || "consumer crash",
+        stack: e?.payload?.error?.stack,
+      });
+    });
+
+    consumer.on(events.GROUP_JOIN, (e: any) => {
       joined = true;
-      assigned = e?.payload?.memberAssignment
-        ? Object.entries(e.payload.memberAssignment).map(([t, parts]: any) => ({
-            topic: t,
-            partitions: parts,
-          }))
-        : [];
+      assigned = e?.payload?.memberAssignment || null;
+    });
+
+    consumer.on(events.REQUEST_TIMEOUT, () => {
+      errors.push({ type: "REQUEST_TIMEOUT" });
     });
 
     await consumer.connect();
@@ -101,18 +108,19 @@ export async function GET(req: Request) {
 
     const start = Date.now();
 
-    const runPromise = consumer.run({
-      // eachBatch gives us more certainty than eachMessage
-      eachBatchAutoResolve: true,
-      eachBatch: async ({ batch, resolveOffset, heartbeat, isRunning, isStale }) => {
-        if (!isRunning() || isStale()) return;
-        batchesSeen++;
+    // Don’t swallow run errors — capture them
+    const runPromise = consumer
+      .run({
+        eachBatchAutoResolve: true,
+        eachBatch: async ({ batch, resolveOffset, heartbeat, isRunning, isStale }) => {
+          if (!isRunning() || isStale()) return;
 
-        for (const message of batch.messages) {
-          received++;
-          if (received > maxMessages) break;
+          batchesSeen++;
 
-          try {
+          for (const message of batch.messages) {
+            received++;
+            if (received > maxMessages) break;
+
             const payloadStr = message.value ? message.value.toString("utf8") : "{}";
             let payload: any;
             try {
@@ -134,24 +142,29 @@ export async function GET(req: Request) {
               .from("darwin_messages")
               .upsert(row, { onConflict: "topic,partition,kafka_offset" });
 
-            if (!error) inserted++;
-            else errors.push({ where: "db", message: error.message });
-          } catch (e: any) {
-            errors.push({ where: "eachBatch", message: e?.message || String(e) });
+            if (error) {
+              errors.push({ type: "DB", message: error.message });
+            } else {
+              inserted++;
+            }
+
+            resolveOffset(message.offset);
+            await heartbeat();
           }
+        },
+      })
+      .catch((e: any) => {
+        errors.push({ type: "RUN_THROW", message: e?.message || String(e), stack: e?.stack });
+      });
 
-          resolveOffset(message.offset);
-          await heartbeat();
-        }
-      },
-    });
-
+    // Wait for either messages, a crash, or timeout
     while (Date.now() - start < maxMs && received < maxMessages) {
+      if (errors.length) break;
       await new Promise((r) => setTimeout(r, 250));
     }
 
     await consumer.disconnect().catch(() => {});
-    await runPromise.catch(() => {});
+    await runPromise;
 
     return NextResponse.json({
       ok: true,
@@ -165,15 +178,13 @@ export async function GET(req: Request) {
       received,
       inserted,
       max: { messages: maxMessages, ms: maxMs },
+      errors,
       hint:
-        !joined
-          ? "Not joining the consumer group before exit. Try longer ms or check network restrictions."
-          : assigned?.length === 0
-          ? "Joined but no partitions assigned (rare)."
-          : inserted === 0
-          ? "Assigned partitions but still inserted=0; likely no fetch before exit or auth/ACL issue (check errors)."
-          : "Ingest working.",
-      errors: errors.slice(0, 5),
+        errors.length
+          ? "See errors[] — that’s the real reason it never joins."
+          : !joined
+          ? "Still not joining and no crash reported (rare). Try ms=120000 and paste offsets + response."
+          : "Joined but no batches yet (possible if fetch not happening before exit).",
     });
   } catch (e: any) {
     console.error("[darwin ingest] error", e);
