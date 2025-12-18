@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getFreshAccessToken } from "@/lib/google";
 import { isTrainEmail } from "@/lib/trainEmailFilter";
-import { ingestEmail } from "@/lib/ingestEmail";
+// ✅ IMPORTANT: DO NOT import ingestEmail at top-level (it may init OpenAI during build)
 import { getSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -116,6 +116,9 @@ export async function GET(req: NextRequest) {
     const supa = getSupabaseAdmin();
     const accessToken = await getFreshAccessToken(user_email);
 
+    // ✅ If key missing (e.g. local build / Codespaces), skip LLM parsing safely.
+    const OPENAI_ENABLED = !!process.env.OPENAI_API_KEY?.trim();
+
     // 2) Build Gmail search query
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
@@ -153,6 +156,7 @@ export async function GET(req: NextRequest) {
         nextPageToken: list.nextPageToken ?? null,
         user_email,
         trip_errors: [],
+        note: OPENAI_ENABLED ? null : "OPENAI_API_KEY missing; LLM parsing skipped",
       });
     }
 
@@ -211,6 +215,14 @@ export async function GET(req: NextRequest) {
           if (!isTrainEmail({ from, subject, body })) {
             return;
           }
+
+          // ✅ If OpenAI key missing, we stop here (raw email still saved).
+          if (!OPENAI_ENABLED) {
+            return;
+          }
+
+          // ✅ Lazy import at runtime only (prevents build-time OpenAI init)
+          const { ingestEmail } = await import("@/lib/ingestEmail");
 
           const parsed: any = await ingestEmail({
             id,
@@ -336,13 +348,11 @@ export async function GET(req: NextRequest) {
       nextPageToken: list.nextPageToken ?? null,
       user_email,
       trip_errors: tripErrors,
+      note: OPENAI_ENABLED ? null : "OPENAI_API_KEY missing; LLM parsing skipped",
     });
   } catch (e: any) {
     console.error("ingest/google/save error", e);
-    return noStoreJson(
-      { ok: false, error: e?.message || String(e) },
-      500
-    );
+    return noStoreJson({ ok: false, error: e?.message || String(e) }, 500);
   }
 }
 
