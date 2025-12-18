@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+     "darwin:worker": "node workers/darwin-consumer.mjs"
   },
   "dependencies": {
     "googleapis": "^131.0.0",
