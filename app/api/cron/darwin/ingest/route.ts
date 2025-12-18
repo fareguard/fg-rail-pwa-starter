@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Kafka, IHeaders } from "kafkajs";
+import { Kafka, logLevel } from "kafkajs";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const dynamic = "force-dynamic";
@@ -7,117 +7,96 @@ export const runtime = "nodejs";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
-// ===== SECURITY GATE =====
+// Security gate
 const DEV_ONLY = process.env.NODE_ENV !== "production";
 const ADMIN_KEY = process.env.ADMIN_API_KEY || "";
-
-function isAuthorized(request: Request) {
+function isAuthorized(req: Request) {
   if (DEV_ONLY) return true;
   if (!ADMIN_KEY) return false;
-  const hdr = request.headers.get("x-admin-key") || "";
-  return hdr === ADMIN_KEY;
+  return (req.headers.get("x-admin-key") || "") === ADMIN_KEY;
 }
 
-function json(body: any, status = 200) {
-  const res = NextResponse.json(body, { status });
-  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-  return res;
-}
-
-function mustEnv(name: string) {
+function must(name: string) {
   const v = process.env[name];
-  if (!v || !String(v).trim()) throw new Error(`Missing env var: ${name}`);
-  return String(v).trim();
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
 }
+const clean = (s: string) => String(s || "").trim();
 
-function headerValueToString(v: any): string {
-  if (v == null) return "";
-  if (Buffer.isBuffer(v)) return v.toString("utf8");
-  if (typeof v === "string") return v;
-  if (Array.isArray(v)) return v.map(headerValueToString).join(",");
-  // KafkaJS types can be weird; last resort:
-  try {
-    return String(v);
-  } catch {
-    return "";
-  }
-}
-
-function headersToJson(h?: IHeaders) {
-  if (!h) return null;
-  const out: Record<string, string> = {};
-  for (const k of Object.keys(h)) {
-    out[k] = headerValueToString((h as any)[k]);
+function headersToJson(h: any) {
+  // kafkajs headers are Record<string, Buffer | string | (Buffer|string)[] | undefined>
+  const out: Record<string, any> = {};
+  if (!h) return out;
+  for (const [k, v] of Object.entries(h)) {
+    if (Buffer.isBuffer(v)) out[k] = v.toString("utf8");
+    else if (Array.isArray(v)) out[k] = v.map((x) => (Buffer.isBuffer(x) ? x.toString("utf8") : String(x)));
+    else if (typeof v === "string") out[k] = v;
+    else if (v == null) out[k] = null;
+    else out[k] = String(v);
   }
   return out;
 }
 
-// ===== CONFIG (env vars) =====
-// DARWIN_KAFKA_BOOTSTRAP=pkc-....confluent.cloud:9092
-// DARWIN_KAFKA_USERNAME=xxxxx
-// DARWIN_KAFKA_PASSWORD=xxxxx
-// DARWIN_KAFKA_TOPIC=prod-....
-// DARWIN_KAFKA_GROUP_ID=fareguard-....
-// Optional:
-// DARWIN_INGEST_MAX_MESSAGES=50
-// DARWIN_INGEST_MAX_MS=15000
 export async function GET(req: Request) {
   try {
-    if (!isAuthorized(req)) return json({ ok: false }, 404);
+    if (!isAuthorized(req)) return NextResponse.json({ ok: false }, { status: 404 });
 
-    const bootstrap = mustEnv("DARWIN_KAFKA_BOOTSTRAP");
-    const username = mustEnv("DARWIN_KAFKA_USERNAME");
-    const password = mustEnv("DARWIN_KAFKA_PASSWORD");
-    const topic = mustEnv("DARWIN_KAFKA_TOPIC");
-    const groupId = mustEnv("DARWIN_KAFKA_GROUP_ID");
+    const url = new URL(req.url);
 
-    const MAX_MESSAGES = Number(process.env.DARWIN_INGEST_MAX_MESSAGES ?? "50");
-    const MAX_MS = Number(process.env.DARWIN_INGEST_MAX_MS ?? "15000");
+    // query params for testing
+    const from = (url.searchParams.get("from") || "latest").toLowerCase(); // earliest|latest
+    const groupOverride = url.searchParams.get("group");
+    const maxMessages = Math.min(Number(url.searchParams.get("max") || "200"), 500);
+    const maxMs = Math.min(Number(url.searchParams.get("ms") || "15000"), 60000);
 
-    const db = getSupabaseAdmin();
+    const bootstrap = clean(must("DARWIN_KAFKA_BOOTSTRAP"));
+    const username = must("DARWIN_KAFKA_USERNAME");
+    const password = must("DARWIN_KAFKA_PASSWORD");
+    const topic = clean(must("DARWIN_KAFKA_TOPIC"));
+    const baseGroupId = clean(must("DARWIN_KAFKA_GROUP_ID"));
+
+    const groupId = clean(groupOverride || baseGroupId);
 
     const kafka = new Kafka({
       clientId: "fareguard-darwin-ingest",
       brokers: [bootstrap],
       ssl: true,
       sasl: { mechanism: "plain", username, password },
-      connectionTimeout: 15000,
-      authenticationTimeout: 15000,
-      requestTimeout: 30000,
+      logLevel: logLevel.NOTHING,
     });
+
+    const db = getSupabaseAdmin();
 
     const consumer = kafka.consumer({ groupId });
 
     let received = 0;
     let inserted = 0;
+    const errors: any[] = [];
+
+    const start = Date.now();
 
     await consumer.connect();
-    await consumer.subscribe({ topic, fromBeginning: false });
+    await consumer.subscribe({ topic, fromBeginning: from === "earliest" });
 
-    const startedAt = Date.now();
-
+    // Run and stop after limits
     const runPromise = consumer.run({
       autoCommit: true,
-      eachBatchAutoResolve: false,
-      eachBatch: async ({ batch, resolveOffset, heartbeat, isRunning, isStale }) => {
-        if (!isRunning() || isStale()) return;
+      eachMessage: async ({ topic, partition, message }) => {
+        received++;
+        if (received > maxMessages) return;
 
-        for (const message of batch.messages) {
-          if (!isRunning() || isStale()) break;
-
-          received++;
-
-          const valueStr = message.value ? message.value.toString("utf8") : "";
+        try {
+          const payloadStr = message.value ? message.value.toString("utf8") : "{}";
           let payload: any;
           try {
-            payload = JSON.parse(valueStr);
+            payload = JSON.parse(payloadStr);
           } catch {
-            payload = { raw: valueStr };
+            payload = { _raw: payloadStr };
           }
 
           const row = {
-            topic: batch.topic,
-            partition: batch.partition,
+            topic,
+            partition,
             kafka_offset: Number(message.offset),
             message_key: message.key ? message.key.toString("utf8") : null,
             payload,
@@ -126,55 +105,45 @@ export async function GET(req: Request) {
 
           const { error } = await db
             .from("darwin_messages")
-            .upsert([row], {
-              onConflict: "topic,partition,kafka_offset",
-              ignoreDuplicates: true,
-            });
+            .upsert(row, { onConflict: "topic,partition,kafka_offset" });
 
-          if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
-
-          inserted++;
-
-          resolveOffset(message.offset);
-          await heartbeat();
-
-          if (received >= MAX_MESSAGES) break;
-          if (Date.now() - startedAt > MAX_MS) break;
+          if (!error) inserted++;
+          else errors.push(error);
+        } catch (e: any) {
+          errors.push({ message: e?.message || String(e) });
         }
 
-        if (received >= MAX_MESSAGES || Date.now() - startedAt > MAX_MS) {
-          await consumer.stop();
+        // stop conditions
+        if (received >= maxMessages) {
+          // just let it exit naturally after disconnect below
         }
       },
     });
 
-    const timeoutPromise = new Promise<void>((resolve) =>
-      setTimeout(async () => {
-        try {
-          await consumer.stop();
-        } catch {}
-        resolve();
-      }, MAX_MS)
-    );
+    // wait until time limit
+    while (Date.now() - start < maxMs && received < maxMessages) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
 
-    await Promise.race([runPromise, timeoutPromise]);
+    await consumer.disconnect().catch(() => {});
+    await runPromise.catch(() => {}); // ignore after disconnect
 
-    await consumer.disconnect();
-
-    return json({
+    return NextResponse.json({
       ok: true,
       topic,
       groupId,
+      from,
       received,
       inserted,
-      max: { messages: MAX_MESSAGES, ms: MAX_MS },
+      max: { messages: maxMessages, ms: maxMs },
+      note:
+        inserted === 0
+          ? "If exists=true with high offsets, but inserted=0, use ?from=earliest&group=fresh-group-name to force reads."
+          : "Inserted messages into darwin_messages.",
+      errors: errors.slice(0, 3),
     });
   } catch (e: any) {
-    console.error("[darwin ingest] error", e?.stack || e?.message || e);
-    return json({ ok: false, error: String(e?.message || e) }, 500);
+    console.error("[darwin ingest] error", e);
+    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }
-}
-
-export async function POST(req: Request) {
-  return GET(req);
 }
