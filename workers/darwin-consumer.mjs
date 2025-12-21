@@ -7,11 +7,18 @@ function must(name) {
   return v;
 }
 
-const BROKERS = must("DARWIN_KAFKA_BROKERS").split(",").map(s => s.trim()).filter(Boolean);
-const TOPIC = must("DARWIN_KAFKA_TOPIC");
-const GROUP_ID = must("DARWIN_KAFKA_GROUP_ID");
-const USERNAME = must("DARWIN_KAFKA_USERNAME");
-const PASSWORD = must("DARWIN_KAFKA_PASSWORD");
+// --- required env
+const BROKERS_RAW = must("DARWIN_KAFKA_BROKERS");
+const topic = must("DARWIN_KAFKA_TOPIC");
+const groupId = must("DARWIN_KAFKA_GROUP_ID");
+const username = must("DARWIN_KAFKA_USERNAME");
+const password = must("DARWIN_KAFKA_PASSWORD");
+
+// IMPORTANT: brokers must be ["host:9092", ...] with no scheme
+const brokers = BROKERS_RAW.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .map((b) => b.replace(/^(sasl_ssl|ssl|plaintext):\/\//i, "")); // strip accidental schemes
 
 const SUPABASE_URL = must("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = must("SUPABASE_SERVICE_ROLE_KEY");
@@ -23,12 +30,61 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 });
 
 const kafka = new Kafka({
-  clientId: "fareguard-darwin-worker",
-  brokers: BROKERS,
-  ssl: true,
-  sasl: { mechanism: "plain", username: USERNAME, password: PASSWORD },
+  clientId: `fareguard-darwin-worker`,
+  brokers,
+  ssl: true, // Confluent Cloud
+  sasl: {
+    mechanism: "plain",
+    username,
+    password,
+  },
+  // Make KafkaJS less “twitchy” on remote cloud brokers
+  connectionTimeout: 30000,
+  authenticationTimeout: 30000,
+  requestTimeout: 60000,
+  retry: {
+    initialRetryTime: 300,
+    maxRetryTime: 5000,
+    retries: 20,
+  },
   logLevel: logLevel.INFO,
 });
+
+async function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function runConsumerOnce({ handleMessage }) {
+  const consumer = kafka.consumer({ groupId });
+
+  await consumer.connect();
+  console.log("[darwin] connected. topic=", topic, "group=", groupId);
+
+  await consumer.subscribe({ topic, fromBeginning: false });
+
+  await consumer.run({
+    autoCommit: true,
+    partitionsConsumedConcurrently: 1,
+    eachMessage: async ({ topic, partition, message }) => {
+      await handleMessage({ topic, partition, message });
+    },
+  });
+}
+
+// This loop prevents a single coordinator wobble from killing the container
+export async function startDarwinWorker({ handleMessage }) {
+  while (true) {
+    try {
+      console.log("[Consumer] Starting");
+      await runConsumerOnce({ handleMessage });
+      // runConsumerOnce normally never returns unless it errors/stops
+    } catch (err) {
+      console.error("[Consumer] Crash:", err?.message || err);
+      // Backoff then retry
+      await sleep(5000);
+    }
+  }
+}
 
 function headersToJson(h) {
   if (!h) return null;
@@ -55,59 +111,21 @@ async function insertRow(row) {
   throw error;
 }
 
-async function main() {
-  const consumer = kafka.consumer({ groupId: GROUP_ID });
+await startDarwinWorker({
+  handleMessage: async ({ topic, partition, message }) => {
+    let payload = null;
+    try {
+      const s = message.value ? message.value.toString("utf8") : "";
+      payload = s ? JSON.parse(s) : null;
+    } catch {
+      payload = { _raw: message.value ? message.value.toString("utf8") : null };
+    }
 
-  await consumer.connect();
-  await consumer.subscribe({ topic: TOPIC, fromBeginning: false });
-
-  console.log("[darwin] connected. topic=", TOPIC, "group=", GROUP_ID);
-
-  let inserted = 0;
-  let received = 0;
-
-  await consumer.run({
-    autoCommit: true,
-    eachBatchAutoResolve: true,
-    eachBatch: async ({ batch, resolveOffset, heartbeat, commitOffsetsIfNecessary }) => {
-      for (const message of batch.messages) {
-        received++;
-
-        let payload = null;
-        try {
-          const s = message.value ? message.value.toString("utf8") : "";
-          payload = s ? JSON.parse(s) : null;
-        } catch {
-          payload = { _raw: message.value ? message.value.toString("utf8") : null };
-        }
-
-        const row = {
-          topic: batch.topic,
-          partition: batch.partition,
-          kafka_offset: BigInt(message.offset).toString(), // store safely
-          message_key: message.key ? message.key.toString("utf8") : null,
-          payload,
-          headers: headersToJson(message.headers),
-        };
-
-        const didInsert = await insertRow(row);
-        if (didInsert) inserted++;
-
-        resolveOffset(message.offset);
-        await heartbeat();
-
-        if (inserted >= MAX_BATCH) break;
-      }
-
-      await commitOffsetsIfNecessary();
-    },
-  });
-
-  // never reaches here normally
-  console.log("[darwin] stopped", { received, inserted });
-}
-
-main().catch((e) => {
-  console.error("[darwin] fatal", e);
-  process.exit(1);
-});
+    const row = {
+      topic,
+      partition,
+      kafka_offset: BigInt(message.offset).toString(), // store safely
+      message_key: message.key ? message.key.toString("utf8") : null,
+      payload,
+      headers: headersToJson(message.headers),
+    };
