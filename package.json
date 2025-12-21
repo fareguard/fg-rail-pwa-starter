@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "darwin:worker": "node workers/darwin-consumer.mjs"
+    "worker:darwin": "node worker/darwin-consumer.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.7.0",
