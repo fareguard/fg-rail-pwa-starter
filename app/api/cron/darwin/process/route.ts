@@ -57,24 +57,20 @@ function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
   return Math.round((a.getTime() - b.getTime()) / 60000);
 }
 
-// ===== Drop-in helpers (paste above type DarwinMsgRow) =====
+// ===== Drop-in helpers =====
 function parseYMD(ymd: string) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
   if (!m) return null;
   return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) };
 }
 
-// Convert "Europe/London wall time" -> UTC ISO using Intl (no extra deps)
 function londonWallTimeToUtcIso(ssd: string, dayOffset: number, timeStr: string) {
   const ymd = parseYMD(ssd);
   const tt = parseDarwinTime(timeStr);
   if (!ymd || !tt) return null;
 
-  // Apply dayOffset in UTC space (safe for date arithmetic)
   const baseUtc = new Date(Date.UTC(ymd.y, ymd.mo - 1, ymd.d + dayOffset, tt.h, tt.m, tt.s, 0));
 
-  // Figure out what the London clock shows at that instant:
-  // If it doesn't match the requested wall time, adjust by the offset difference.
   const fmt = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",
     year: "numeric",
@@ -91,17 +87,16 @@ function londonWallTimeToUtcIso(ssd: string, dayOffset: number, timeStr: string)
     return acc;
   }, {});
 
-  // Build what London time actually was for baseUtc:
-  const londonY = Number(parts.year);
-  const londonMo = Number(parts.month);
-  const londonD = Number(parts.day);
-  const londonH = Number(parts.hour);
-  const londonM = Number(parts.minute);
-  const londonS = Number(parts.second);
-
-  // Desired London wall time:
   const desiredUtcAsIf = Date.UTC(ymd.y, ymd.mo - 1, ymd.d + dayOffset, tt.h, tt.m, tt.s, 0);
-  const actualLondonAsIf = Date.UTC(londonY, londonMo - 1, londonD, londonH, londonM, londonS, 0);
+  const actualLondonAsIf = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
+    0
+  );
 
   const deltaMs = desiredUtcAsIf - actualLondonAsIf;
   const corrected = new Date(baseUtc.getTime() + deltaMs);
@@ -109,7 +104,6 @@ function londonWallTimeToUtcIso(ssd: string, dayOffset: number, timeStr: string)
   return isNaN(corrected.getTime()) ? null : corrected.toISOString();
 }
 
-// Choose the “best available” time field
 function pickTime(...candidates: Array<string | null | undefined>) {
   for (const c of candidates) {
     if (typeof c === "string" && c.trim()) return c.trim();
@@ -117,7 +111,6 @@ function pickTime(...candidates: Array<string | null | undefined>) {
   return null;
 }
 
-// Detect midnight rollover between sequential times (in minutes-of-day)
 function minutesOfDay(t: string) {
   const p = parseDarwinTime(t);
   if (!p) return null;
@@ -138,11 +131,10 @@ export async function GET(req: Request) {
 
     const db = getSupabaseAdmin();
 
-    // Pull unprocessed messages
     const { data: msgs, error } = await db
       .from("darwin_messages")
       .select("id,received_at,topic,payload")
-      .is("processed_at", null) 
+      .is("processed_at", null)
       .order("received_at", { ascending: false })
       .limit(MAX_MESSAGES);
 
@@ -175,7 +167,6 @@ export async function GET(req: Request) {
       const bytes = m.payload?.bytes;
       if (!bytes) {
         skipped.no_bytes++;
-        // mark as processed so it doesn't loop forever (batched)
         processedIds.push(m.id);
         messagesMarked++;
         continue;
@@ -189,13 +180,22 @@ export async function GET(req: Request) {
         continue;
       }
 
+      // ===== FAST-PATH: non-TS messages =====
       const TS = decoded?.uR?.TS;
       if (!TS) {
         skipped.no_ts++;
-        processedIds.push(m.id);
-        messagesMarked++;
+
+        const { error: me } = await db
+          .from("darwin_messages")
+          .update({ processed_at: new Date().toISOString() })
+          .eq("id", m.id);
+
+        if (!me) messagesMarked++;
+        else skipped.mark_error++;
+
         continue;
       }
+      // ====================================
 
       const rid: string | null = TS.rid ?? null;
       const uid: string | null = TS.uid ?? null;
@@ -209,7 +209,6 @@ export async function GET(req: Request) {
         continue;
       }
 
-      // Build events for this message
       const rows: any[] = [];
 
       let dayOffset = 0;
@@ -219,26 +218,18 @@ export async function GET(req: Request) {
         const loc = locs[idx];
 
         const tiploc: string | null = loc.tpl ?? null;
-
-        // Prefer public times; fall back to working times if public missing
         const pta = pickTime(loc.pta, loc.wta);
         const ptd = pickTime(loc.ptd, loc.wtd);
-
-        const arrEt = pickTime(loc.arr?.et, loc.arr?.at); // if you ever get at
+        const arrEt = pickTime(loc.arr?.et, loc.arr?.at);
         const depEt = pickTime(loc.dep?.et, loc.dep?.at);
 
-        // Determine rollover based on the earliest available time at this location
         const anchor = pickTime(pta, ptd, arrEt, depEt);
         const anchorMin = anchor ? minutesOfDay(anchor) : null;
 
         if (anchorMin != null && lastMin != null) {
-          // If time jumps backwards by > 3 hours, assume crossed midnight
           if (anchorMin < lastMin - 180) dayOffset++;
         }
         if (anchorMin != null) lastMin = anchorMin;
-
-        // NOTE: we don’t have CRS here yet (only TIPLOC). We’ll add a mapping table next.
-        const crs: string | null = null;
 
         const plannedArr = ssd && pta ? londonWallTimeToUtcIso(ssd, dayOffset, pta) : null;
         const actualArr = ssd && arrEt ? londonWallTimeToUtcIso(ssd, dayOffset, arrEt) : null;
@@ -250,7 +241,7 @@ export async function GET(req: Request) {
             loc_index: idx,
             received_at: m.received_at,
             tiploc,
-            crs,
+            crs: null,
             rid,
             uid,
             event_type: "ARR",
@@ -271,7 +262,7 @@ export async function GET(req: Request) {
             loc_index: idx,
             received_at: m.received_at,
             tiploc,
-            crs,
+            crs: null,
             rid,
             uid,
             event_type: "DEP",
@@ -290,18 +281,15 @@ export async function GET(req: Request) {
 
         if (insErr) {
           skipped.insert_error++;
-          // don't mark processed if we failed inserting; you want retry
           continue;
         }
         eventsInserted += rows.length;
       }
 
-      // Mark message processed (batched)
       processedIds.push(m.id);
       messagesMarked++;
     }
 
-    // One DB call to mark processed
     if (processedIds.length) {
       const { error: markErr } = await db
         .from("darwin_messages")
