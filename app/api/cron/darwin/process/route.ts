@@ -142,8 +142,8 @@ export async function GET(req: Request) {
     const { data: msgs, error } = await db
       .from("darwin_messages")
       .select("id,received_at,topic,payload")
-      .is("processed_at", null)
-      .order("id", { ascending: true })
+      .is("processed_at", null) 
+      .order("received_at", { ascending: false })
       .limit(MAX_MESSAGES);
 
     if (error) return json({ ok: false, error: error.message }, 500);
