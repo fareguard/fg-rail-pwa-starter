@@ -132,7 +132,7 @@ export async function GET(req: Request) {
     const db = getSupabaseAdmin();
 
     const { data: msgs, error } = await db
-      .from("darwin_messages")
+      .from("darwin_messages_ready")
       .select("id,received_at,topic,payload")
       .is("processed_at", null)
       .order("received_at", { ascending: false })
