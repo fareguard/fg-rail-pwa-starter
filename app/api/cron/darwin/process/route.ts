@@ -131,6 +131,7 @@ export async function GET(req: Request) {
 
     const db = getSupabaseAdmin();
 
+    // Step 2 — pull only “ready” messages from the view
     const { data: msgs, error } = await db
       .from("darwin_messages_ready")
       .select("id,received_at,topic,payload")
@@ -200,7 +201,13 @@ export async function GET(req: Request) {
       const rid: string | null = TS.rid ?? null;
       const uid: string | null = TS.uid ?? null;
       const ssd: string | null = TS.ssd ?? null;
-      const locs: any[] = Array.isArray(TS.Location) ? TS.Location : [];
+
+      // Step 1A — accept Location as array OR single object
+      const locs: any[] = Array.isArray(TS.Location)
+        ? TS.Location
+        : TS.Location
+          ? [TS.Location]
+          : [];
 
       if (!locs.length) {
         skipped.no_locations++;
@@ -218,12 +225,16 @@ export async function GET(req: Request) {
         const loc = locs[idx];
 
         const tiploc: string | null = loc.tpl ?? null;
+
+        // Optional but smart — if pta/ptd missing, fall back to wta/wtd
         const pta = pickTime(loc.pta, loc.wta);
         const ptd = pickTime(loc.ptd, loc.wtd);
-        const arrEt = pickTime(loc.arr?.et, loc.arr?.at);
-        const depEt = pickTime(loc.dep?.et, loc.dep?.at);
 
-        const anchor = pickTime(pta, ptd, arrEt, depEt);
+        // Step 1B — accept arr.at / dep.at as well as arr.et / dep.et
+        const arrTime: string | null = loc.arr?.at ?? loc.arr?.et ?? null;
+        const depTime: string | null = loc.dep?.at ?? loc.dep?.et ?? null;
+
+        const anchor = pickTime(pta, ptd, arrTime, depTime);
         const anchorMin = anchor ? minutesOfDay(anchor) : null;
 
         if (anchorMin != null && lastMin != null) {
@@ -231,11 +242,13 @@ export async function GET(req: Request) {
         }
         if (anchorMin != null) lastMin = anchorMin;
 
-        const plannedArr = ssd && pta ? londonWallTimeToUtcIso(ssd, dayOffset, pta) : null;
-        const actualArr = ssd && arrEt ? londonWallTimeToUtcIso(ssd, dayOffset, arrEt) : null;
+        const plannedArr = ssd
+          ? londonWallTimeToUtcIso(ssd, dayOffset, pta ?? loc.wta ?? null)
+          : null;
+        const actualArr = ssd && arrTime ? londonWallTimeToUtcIso(ssd, dayOffset, arrTime) : null;
         const lateArr = minutesDiffIso(actualArr, plannedArr);
 
-        if (pta || arrEt) {
+        if (pta || loc.wta || arrTime) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
@@ -252,11 +265,13 @@ export async function GET(req: Request) {
           });
         }
 
-        const plannedDep = ssd && ptd ? londonWallTimeToUtcIso(ssd, dayOffset, ptd) : null;
-        const actualDep = ssd && depEt ? londonWallTimeToUtcIso(ssd, dayOffset, depEt) : null;
+        const plannedDep = ssd
+          ? londonWallTimeToUtcIso(ssd, dayOffset, ptd ?? loc.wtd ?? null)
+          : null;
+        const actualDep = ssd && depTime ? londonWallTimeToUtcIso(ssd, dayOffset, depTime) : null;
         const lateDep = minutesDiffIso(actualDep, plannedDep);
 
-        if (ptd || depEt) {
+        if (ptd || loc.wtd || depTime) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
