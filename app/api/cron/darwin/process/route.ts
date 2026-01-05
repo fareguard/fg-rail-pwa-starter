@@ -58,6 +58,23 @@ function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
 }
 
 // ===== Drop-in helpers =====
+function looksLikeSchedule(bytes: string) {
+  // ultra-cheap prefilter: avoids JSON.parse for heartbeat/failure/etc
+  return (
+    bytes.includes('"uR"') &&
+    bytes.includes('"TS"') &&
+    bytes.includes('"ssd":"') &&
+    bytes.includes('"Location"')
+  );
+}
+
+function normalizeLocations(loc: any): any[] {
+  if (!loc) return [];
+  if (Array.isArray(loc)) return loc;
+  if (typeof loc === "object") return [loc]; // IMPORTANT: sometimes Location is an object
+  return [];
+}
+
 function parseYMD(ymd: string) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
   if (!m) return null;
@@ -146,7 +163,7 @@ export async function GET(req: Request) {
     let eventsInserted = 0;
     let messagesMarked = 0;
 
-    const processedIds: number[] = [];
+    const markIds: number[] = [];
 
     const skipped = {
       no_bytes: 0,
@@ -156,6 +173,7 @@ export async function GET(req: Request) {
       insert_error: 0,
       mark_error: 0,
       timebox: 0,
+      not_schedule: 0,
     };
 
     for (const m of (msgs || []) as DarwinMsgRow[]) {
@@ -167,18 +185,23 @@ export async function GET(req: Request) {
       examined++;
 
       const bytes = m.payload?.bytes;
+
       if (!bytes) {
         skipped.no_bytes++;
-        processedIds.push(m.id);
-        messagesMarked++;
+        markIds.push(m.id);
+        continue;
+      }
+
+      if (!looksLikeSchedule(bytes)) {
+        skipped.not_schedule++;
+        markIds.push(m.id);
         continue;
       }
 
       const decoded = mustParseJsonString(bytes);
       if (!decoded) {
         skipped.bad_json++;
-        processedIds.push(m.id);
-        messagesMarked++;
+        markIds.push(m.id);
         continue;
       }
 
@@ -186,15 +209,7 @@ export async function GET(req: Request) {
       const TS = decoded?.uR?.TS;
       if (!TS) {
         skipped.no_ts++;
-
-        const { error: me } = await db
-          .from("darwin_messages")
-          .update({ processed_at: new Date().toISOString() })
-          .eq("id", m.id);
-
-        if (!me) messagesMarked++;
-        else skipped.mark_error++;
-
+        markIds.push(m.id);
         continue;
       }
       // ====================================
@@ -204,12 +219,11 @@ export async function GET(req: Request) {
       const ssd: string | null = TS.ssd ?? null;
 
       // Step 1A — accept Location as array OR single object
-      const locs: any[] = Array.isArray(TS.Location) ? TS.Location : TS.Location ? [TS.Location] : [];
+      const locs: any[] = normalizeLocations(TS.Location);
 
       if (!locs.length) {
         skipped.no_locations++;
-        processedIds.push(m.id);
-        messagesMarked++;
+        markIds.push(m.id);
         continue;
       }
 
@@ -227,7 +241,7 @@ export async function GET(req: Request) {
         const pta = pickTime(loc.pta, loc.wta);
         const ptd = pickTime(loc.ptd, loc.wtd);
 
-        // Step 1B — accept arr.at / dep.at as well as arr.et / dep.et
+        // Step 4 — accept arr.at / dep.at as well as arr.et / dep.et
         const arrTime: string | null = loc.arr?.at ?? loc.arr?.et ?? null;
         const depTime: string | null = loc.dep?.at ?? loc.dep?.et ?? null;
 
@@ -293,27 +307,25 @@ export async function GET(req: Request) {
 
         if (insErr) {
           skipped.insert_error++;
+          // still mark message processed so we don't hot-loop it forever
+          markIds.push(m.id);
           continue;
         }
         eventsInserted += rows.length;
       }
 
-      processedIds.push(m.id);
-      messagesMarked++;
+      markIds.push(m.id);
     }
 
-    if (processedIds.length) {
-      const { error: markErr } = await db
+    // Step 5 — production-grade bulk marking
+    if (markIds.length) {
+      const { error: me } = await db
         .from("darwin_messages")
         .update({ processed_at: new Date().toISOString() })
-        .in("id", processedIds);
+        .in("id", markIds);
 
-      if (markErr) {
-        return json(
-          { ok: false, error: markErr.message, examined, eventsInserted, messagesMarked, skipped },
-          500
-        );
-      }
+      if (!me) messagesMarked += markIds.length;
+      else skipped.mark_error += markIds.length;
     }
 
     return json({
