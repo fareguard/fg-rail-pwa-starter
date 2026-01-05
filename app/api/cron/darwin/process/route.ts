@@ -131,12 +131,13 @@ export async function GET(req: Request) {
 
     const db = getSupabaseAdmin();
 
-    // Step 2 — pull only “ready” messages from the view
+    // Pull unprocessed messages (NEWEST FIRST). Do not call darwin_messages_ready.
     const { data: msgs, error } = await db
-      .from("darwin_messages_ready")
+      .from("darwin_messages")
       .select("id,received_at,topic,payload")
       .is("processed_at", null)
-      .order("received_at", { ascending: false })
+      .not("payload->>bytes", "is", null) // ensures bytes exists
+      .order("received_at", { ascending: false }) // NEWEST FIRST
       .limit(MAX_MESSAGES);
 
     if (error) return json({ ok: false, error: error.message }, 500);
@@ -203,11 +204,7 @@ export async function GET(req: Request) {
       const ssd: string | null = TS.ssd ?? null;
 
       // Step 1A — accept Location as array OR single object
-      const locs: any[] = Array.isArray(TS.Location)
-        ? TS.Location
-        : TS.Location
-          ? [TS.Location]
-          : [];
+      const locs: any[] = Array.isArray(TS.Location) ? TS.Location : TS.Location ? [TS.Location] : [];
 
       if (!locs.length) {
         skipped.no_locations++;
