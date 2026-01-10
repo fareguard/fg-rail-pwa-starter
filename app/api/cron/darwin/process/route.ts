@@ -134,6 +134,13 @@ function minutesOfDay(t: string) {
   return p.h * 60 + p.m + (p.s ? p.s / 60 : 0);
 }
 
+// IMPORTANT: normalize tiploc in code so we can upsert on a real column (tiploc_norm)
+function normalizeTiplocNorm(tiploc: any): string | null {
+  if (typeof tiploc !== "string") return null;
+  const v = tiploc.trim().toUpperCase();
+  return v ? v : null;
+}
+
 type DarwinMsgRow = {
   id: number;
   received_at: string;
@@ -236,6 +243,7 @@ export async function GET(req: Request) {
         const loc = locs[idx];
 
         const tiploc: string | null = loc.tpl ?? null;
+        const tiploc_norm: string | null = normalizeTiplocNorm(tiploc);
 
         // Optional but smart — if pta/ptd missing, fall back to wta/wtd
         const pta = pickTime(loc.pta, loc.wta);
@@ -265,6 +273,7 @@ export async function GET(req: Request) {
             loc_index: idx,
             received_at: m.received_at,
             tiploc,
+            tiploc_norm,
             crs: null,
             rid,
             uid,
@@ -288,6 +297,7 @@ export async function GET(req: Request) {
             loc_index: idx,
             received_at: m.received_at,
             tiploc,
+            tiploc_norm,
             crs: null,
             rid,
             uid,
@@ -301,9 +311,12 @@ export async function GET(req: Request) {
       }
 
       if (rows.length) {
-        const { error: insErr } = await db
-          .from("darwin_events")
-          .upsert(rows, { onConflict: "msg_id,loc_index,event_type" });
+        // Upsert on your *real* uniqueness key (rid,tiploc_norm,event_type,planned_time)
+        // and ignore duplicates so the worker never fails on replays/overlaps.
+        const { error: insErr } = await db.from("darwin_events").upsert(rows, {
+          onConflict: "rid,tiploc_norm,event_type,planned_time",
+          ignoreDuplicates: true,
+        });
 
         if (insErr) {
           skipped.insert_error++;
