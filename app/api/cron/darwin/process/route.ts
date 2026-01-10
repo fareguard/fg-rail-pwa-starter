@@ -37,6 +37,30 @@ function mustParseJsonString(s: any) {
   }
 }
 
+// ===== 2.1 helpers (top of file) =====
+function pickFirstString(...vals: any[]): string | null {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+// planned: prefer public (pt*) else working (wt*)
+function plannedArrStr(loc: any): string | null {
+  return pickFirstString(loc?.pta, loc?.wta);
+}
+function plannedDepStr(loc: any): string | null {
+  return pickFirstString(loc?.ptd, loc?.wtd);
+}
+
+// actual/estimated: prefer actual time (at) else estimate (et) else working estimate (wet)
+function actualArrStr(loc: any): string | null {
+  return pickFirstString(loc?.arr?.at, loc?.arr?.et, loc?.arr?.wet);
+}
+function actualDepStr(loc: any): string | null {
+  return pickFirstString(loc?.dep?.at, loc?.dep?.et, loc?.dep?.wet);
+}
+
 // Darwin time fields are like "20:55" or "21:01:30"
 function parseDarwinTime(t: any): { h: number; m: number; s: number } | null {
   if (!t || typeof t !== "string") return null;
@@ -57,6 +81,49 @@ function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
   return Math.round((a.getTime() - b.getTime()) / 60000);
 }
 
+// ===== 2.2 midnight rollover handling =====
+function toTs(ssd: string | null, timeStr: string | null) {
+  if (!ssd || !timeStr) return null;
+  const tt = parseDarwinTime(timeStr);
+  if (!tt) return null;
+
+  const base = new Date(`${ssd}T00:00:00.000Z`);
+  if (isNaN(base.getTime())) return null;
+
+  // Build candidate at ssd
+  const d = new Date(base);
+  d.setUTCHours(tt.h, tt.m, tt.s, 0);
+
+  // Rollover rule (conservative):
+  // For 00:00–02:59, assume next-day continuation
+  if (tt.h < 3) {
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// ===== 2.3 CRS cache / map =====
+let TIPLOC_TO_CRS: Map<string, string> | null = null;
+
+async function loadTiplocMap(db: any) {
+  if (TIPLOC_TO_CRS) return TIPLOC_TO_CRS;
+
+  const { data, error } = await db.from("tiploc_crs").select("tiploc, crs");
+
+  if (error) throw new Error("Failed loading tiploc_crs: " + error.message);
+
+  const m = new Map<string, string>();
+  for (const r of data || []) {
+    const k = String(r.tiploc || "").trim().toUpperCase();
+    const v = r.crs ? String(r.crs).trim().toUpperCase() : "";
+    if (k && v) m.set(k, v);
+  }
+
+  TIPLOC_TO_CRS = m;
+  return m;
+}
+
 // ===== Drop-in helpers =====
 function looksLikeSchedule(bytes: string) {
   // ultra-cheap prefilter: avoids JSON.parse for heartbeat/failure/etc
@@ -73,65 +140,6 @@ function normalizeLocations(loc: any): any[] {
   if (Array.isArray(loc)) return loc;
   if (typeof loc === "object") return [loc]; // IMPORTANT: sometimes Location is an object
   return [];
-}
-
-function parseYMD(ymd: string) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
-  if (!m) return null;
-  return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) };
-}
-
-function londonWallTimeToUtcIso(ssd: string, dayOffset: number, timeStr: string) {
-  const ymd = parseYMD(ssd);
-  const tt = parseDarwinTime(timeStr);
-  if (!ymd || !tt) return null;
-
-  const baseUtc = new Date(Date.UTC(ymd.y, ymd.mo - 1, ymd.d + dayOffset, tt.h, tt.m, tt.s, 0));
-
-  const fmt = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-
-  const parts = fmt.formatToParts(baseUtc).reduce((acc: any, p) => {
-    if (p.type !== "literal") acc[p.type] = p.value;
-    return acc;
-  }, {});
-
-  const desiredUtcAsIf = Date.UTC(ymd.y, ymd.mo - 1, ymd.d + dayOffset, tt.h, tt.m, tt.s, 0);
-  const actualLondonAsIf = Date.UTC(
-    Number(parts.year),
-    Number(parts.month) - 1,
-    Number(parts.day),
-    Number(parts.hour),
-    Number(parts.minute),
-    Number(parts.second),
-    0
-  );
-
-  const deltaMs = desiredUtcAsIf - actualLondonAsIf;
-  const corrected = new Date(baseUtc.getTime() + deltaMs);
-
-  return isNaN(corrected.getTime()) ? null : corrected.toISOString();
-}
-
-function pickTime(...candidates: Array<string | null | undefined>) {
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim()) return c.trim();
-  }
-  return null;
-}
-
-function minutesOfDay(t: string) {
-  const p = parseDarwinTime(t);
-  if (!p) return null;
-  return p.h * 60 + p.m + (p.s ? p.s / 60 : 0);
 }
 
 // IMPORTANT: normalize tiploc in code so we can upsert on a real column (tiploc_norm)
@@ -236,8 +244,11 @@ export async function GET(req: Request) {
 
       const rows: any[] = [];
 
-      let dayOffset = 0;
-      let lastMin: number | null = null;
+      // 2.4 collect service call rows (merged per rid+crs)
+      const callByKey = new Map<string, any>();
+
+      // load CRS map once per message (cached in memory globally)
+      const tiplocMap = await loadTiplocMap(db);
 
       for (let idx = 0; idx < locs.length; idx++) {
         const loc = locs[idx];
@@ -245,36 +256,26 @@ export async function GET(req: Request) {
         const tiploc: string | null = loc.tpl ?? null;
         const tiploc_norm: string | null = normalizeTiplocNorm(tiploc);
 
-        // Optional but smart — if pta/ptd missing, fall back to wta/wtd
-        const pta = pickTime(loc.pta, loc.wta);
-        const ptd = pickTime(loc.ptd, loc.wtd);
+        const crs = tiploc_norm ? tiplocMap.get(tiploc_norm) ?? null : null;
 
-        // Step 4 — accept arr.at / dep.at as well as arr.et / dep.et
-        const arrTime: string | null = loc.arr?.at ?? loc.arr?.et ?? null;
-        const depTime: string | null = loc.dep?.at ?? loc.dep?.et ?? null;
+        // 2.1 Replace time selection / assignments
+        const pta = plannedArrStr(loc);
+        const ptd = plannedDepStr(loc);
+        const arrT = actualArrStr(loc);
+        const depT = actualDepStr(loc);
 
-        const anchor = pickTime(pta, ptd, arrTime, depTime);
-        const anchorMin = anchor ? minutesOfDay(anchor) : null;
-
-        if (anchorMin != null && lastMin != null) {
-          if (anchorMin < lastMin - 180) dayOffset++;
-        }
-        if (anchorMin != null) lastMin = anchorMin;
-
-        const plannedArr = ssd
-          ? londonWallTimeToUtcIso(ssd, dayOffset, pta ?? loc.wta ?? null)
-          : null;
-        const actualArr = ssd && arrTime ? londonWallTimeToUtcIso(ssd, dayOffset, arrTime) : null;
+        const plannedArr = toTs(ssd, pta);
+        const actualArr = toTs(ssd, arrT);
         const lateArr = minutesDiffIso(actualArr, plannedArr);
 
-        if (pta || loc.wta || arrTime) {
+        if (pta || arrT) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
             received_at: m.received_at,
             tiploc,
             tiploc_norm,
-            crs: null,
+            crs,
             rid,
             uid,
             event_type: "ARR",
@@ -285,20 +286,18 @@ export async function GET(req: Request) {
           });
         }
 
-        const plannedDep = ssd
-          ? londonWallTimeToUtcIso(ssd, dayOffset, ptd ?? loc.wtd ?? null)
-          : null;
-        const actualDep = ssd && depTime ? londonWallTimeToUtcIso(ssd, dayOffset, depTime) : null;
+        const plannedDep = toTs(ssd, ptd);
+        const actualDep = toTs(ssd, depT);
         const lateDep = minutesDiffIso(actualDep, plannedDep);
 
-        if (ptd || loc.wtd || depTime) {
+        if (ptd || depT) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
             received_at: m.received_at,
             tiploc,
             tiploc_norm,
-            crs: null,
+            crs,
             rid,
             uid,
             event_type: "DEP",
@@ -307,6 +306,37 @@ export async function GET(req: Request) {
             late_minutes: lateDep,
             raw: loc,
           });
+        }
+
+        // 2.4 Upsert into darwin_service_calls (merge ARR/DEP into one row per rid+crs)
+        if (crs && rid) {
+          const key = `${rid}::${crs}`;
+          const existing =
+            callByKey.get(key) ??
+            ({
+              rid,
+              uid,
+              ssd,
+              crs,
+              updated_at: new Date().toISOString(),
+            } as any);
+
+          // ARR
+          if (plannedArr || actualArr) {
+            existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
+            existing.actual_arrive = actualArr ?? existing.actual_arrive ?? null;
+            existing.late_arrive_min = lateArr ?? existing.late_arrive_min ?? null;
+          }
+
+          // DEP
+          if (plannedDep || actualDep) {
+            existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
+            existing.actual_depart = actualDep ?? existing.actual_depart ?? null;
+            existing.late_depart_min = lateDep ?? existing.late_depart_min ?? null;
+          }
+
+          existing.updated_at = new Date().toISOString();
+          callByKey.set(key, existing);
         }
       }
 
@@ -325,6 +355,16 @@ export async function GET(req: Request) {
           continue;
         }
         eventsInserted += rows.length;
+      }
+
+      // 2.4 service_calls upsert
+      const callRows = Array.from(callByKey.values());
+      if (callRows.length) {
+        const { error: upErr } = await db
+          .from("darwin_service_calls")
+          .upsert(callRows, { onConflict: "rid,crs" });
+
+        if (upErr) console.error("service_calls upsert error", upErr.message);
       }
 
       markIds.push(m.id);
