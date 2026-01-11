@@ -1,28 +1,49 @@
 // workers/darwin-processor.mjs
+import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 
-function must(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
+/**
+ * =========================
+ * Production-grade Darwin processor
+ * - Newest-first processing
+ * - Filters in Node (no fragile JSON-path filters)
+ * - Handles Location as array OR object
+ * - Normalizes TIPLOC + CRS mapping
+ * - Upserts darwin_events on unique key
+ * - Upserts darwin_service_calls (rid+crs)
+ * - Bulk marks processed
+ * - Backoff + jitter to avoid thrash
+ * =========================
+ */
+
+// ---- ENV ----
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// Tuning
+const LOOP_SLEEP_MS = Number(process.env.DARWIN_PROCESS_LOOP_SLEEP_MS ?? "750"); // small delay per loop
+const MAX_MESSAGES = Number(process.env.DARWIN_PROCESS_MAX_MESSAGES ?? "200");
+const MAX_RUN_MS = Number(process.env.DARWIN_PROCESS_MAX_MS ?? "15000"); // timebox per loop
+const MARK_CHUNK = Number(process.env.DARWIN_MARK_CHUNK ?? "2000"); // update processed_at in chunks
+const UPSERT_CHUNK = Number(process.env.DARWIN_UPSERT_CHUNK ?? "2000"); // upsert events in chunks
+
+// Mapping cache refresh
+const MAP_TTL_MS = Number(process.env.DARWIN_TIPLOC_MAP_TTL_MS ?? String(10 * 60 * 1000)); // 10 mins
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  process.exit(1);
 }
 
-// ===== REQUIRED ENV =====
-const SUPABASE_URL = must("SUPABASE_URL");
-const SUPABASE_SERVICE_ROLE_KEY = must("SUPABASE_SERVICE_ROLE_KEY");
-
-// ===== OPTIONAL ENV (safe defaults) =====
-const MAX_MESSAGES = Number(process.env.DARWIN_PROCESS_MAX_MESSAGES ?? "200"); // per loop
-const MAX_MS = Number(process.env.DARWIN_PROCESS_MAX_MS ?? "15000"); // timebox per loop
-const SLEEP_MS = Number(process.env.DARWIN_PROCESS_SLEEP_MS ?? "2000"); // pause between loops
-const LOG_EVERY = Number(process.env.DARWIN_PROCESS_LOG_EVERY ?? "1"); // log every N loops
-
-const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
-// ===== JSON utils =====
-function mustParseJsonString(s) {
+// ---- tiny utils ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const nowIso = () => new Date().toISOString();
+
+function safeJsonParse(s) {
   if (typeof s !== "string" || !s.trim()) return null;
   try {
     return JSON.parse(s);
@@ -31,7 +52,52 @@ function mustParseJsonString(s) {
   }
 }
 
-// Darwin time fields: "20:55" or "21:01:30"
+// Cheap prefilter (avoid parsing heartbeats/failures/etc)
+function looksLikeSchedule(bytes) {
+  return (
+    bytes.includes('"uR"') &&
+    bytes.includes('"TS"') &&
+    bytes.includes('"ssd":"') &&
+    bytes.includes('"Location"')
+  );
+}
+
+function normalizeLocations(loc) {
+  if (!loc) return [];
+  if (Array.isArray(loc)) return loc;
+  if (typeof loc === "object") return [loc];
+  return [];
+}
+
+function normalizeTiplocNorm(tiploc) {
+  if (typeof tiploc !== "string") return null;
+  const v = tiploc.trim().toUpperCase();
+  return v ? v : null;
+}
+
+function pickFirstString(...vals) {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+// planned: prefer public pt* else working wt*
+function plannedArrStr(loc) {
+  return pickFirstString(loc?.pta, loc?.wta);
+}
+function plannedDepStr(loc) {
+  return pickFirstString(loc?.ptd, loc?.wtd);
+}
+
+// actual: prefer at then et then wet
+function actualArrStr(loc) {
+  return pickFirstString(loc?.arr?.at, loc?.arr?.et, loc?.arr?.wet);
+}
+function actualDepStr(loc) {
+  return pickFirstString(loc?.dep?.at, loc?.dep?.et, loc?.dep?.wet);
+}
+
 function parseDarwinTime(t) {
   if (!t || typeof t !== "string") return null;
   const m = t.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
@@ -43,29 +109,25 @@ function parseDarwinTime(t) {
   return { h: hh, m: mm, s: ss };
 }
 
-// Build ISO timestamp from ssd + time, with a simple cross-midnight rollover heuristic.
-// Many schedules roll past midnight; Darwin still uses ssd as service-start date.
-// If times go 23:xx then 00:xx, we bump day by +1 for the 00:xx onwards.
-function toIsoWithRollover(ssd, timeStr, lastHourRef) {
-  if (!ssd || !timeStr) return { iso: null, hour: lastHourRef ?? null };
-
+/**
+ * Conservative midnight rollover:
+ * if hh < 3, treat as next-day continuation (common in Darwin schedules)
+ */
+function toTs(ssd, timeStr) {
+  if (!ssd || !timeStr) return null;
   const tt = parseDarwinTime(timeStr);
-  if (!tt) return { iso: null, hour: lastHourRef ?? null };
+  if (!tt) return null;
 
   const base = new Date(`${ssd}T00:00:00.000Z`);
-  if (isNaN(base.getTime())) return { iso: null, hour: lastHourRef ?? null };
+  if (isNaN(base.getTime())) return null;
 
-  let dayOffset = 0;
-  if (typeof lastHourRef === "number") {
-    // rollover heuristic: 23 -> 0/1/2/3 means next day
-    if (lastHourRef >= 21 && tt.h <= 3) dayOffset = 1;
-    // also if sequence already rolled and stays low, keep dayOffset at 1 by updating lastHourRef below
+  const d = new Date(base);
+  d.setUTCHours(tt.h, tt.m, tt.s, 0);
+
+  if (tt.h < 3) {
+    d.setUTCDate(d.getUTCDate() + 1);
   }
-
-  base.setUTCDate(base.getUTCDate() + dayOffset);
-  base.setUTCHours(tt.h, tt.m, tt.s, 0);
-
-  return { iso: base.toISOString(), hour: tt.h };
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function minutesDiffIso(lateIso, earlyIso) {
@@ -76,163 +138,189 @@ function minutesDiffIso(lateIso, earlyIso) {
   return Math.round((a.getTime() - b.getTime()) / 60000);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+// ---- TIPLOC->CRS map cache ----
+let TIPLOC_TO_CRS = null;
+let TIPLOC_TO_CRS_LOADED_AT = 0;
+
+async function loadTiplocMap() {
+  const now = Date.now();
+  if (TIPLOC_TO_CRS && now - TIPLOC_TO_CRS_LOADED_AT < MAP_TTL_MS) {
+    return TIPLOC_TO_CRS;
+  }
+
+  // Load minimal fields only
+  const { data, error } = await db.from("tiploc_crs").select("tiploc, crs");
+  if (error) throw new Error("Failed loading tiploc_crs: " + error.message);
+
+  const m = new Map();
+  for (const r of data || []) {
+    const k = String(r.tiploc || "").trim().toUpperCase();
+    const v = r.crs ? String(r.crs).trim().toUpperCase() : "";
+    if (k && v) m.set(k, v);
+  }
+  TIPLOC_TO_CRS = m;
+  TIPLOC_TO_CRS_LOADED_AT = now;
+  return m;
 }
 
-// Only keep messages that are actually TS schedule updates we can parse into locations.
-// Also allow TS.Location to be array OR object (some messages have object).
-function extractTS(decoded) {
-  const TS = decoded?.uR?.TS;
-  if (!TS) return null;
-
-  const ssd = TS.ssd ?? null;
-  const rid = TS.rid ?? null;
-  const uid = TS.uid ?? null;
-
-  let locs = TS.Location;
-  if (Array.isArray(locs)) {
-    // ok
-  } else if (locs && typeof locs === "object") {
-    // single location object -> normalize to array of 1
-    locs = [locs];
-  } else {
-    locs = [];
-  }
-
-  if (!ssd || !locs.length) return null;
-
-  return { ssd, rid, uid, locs };
+// ---- chunk helpers ----
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
-// Optional CRS enrichment via tiploc_crs table.
-// Assumes Darwin TIPLOCs are uppercase and match your tiploc_crs content.
-async function fetchCrsMap(tiplocs) {
-  if (!tiplocs.length) return new Map();
+// ---- main processing ----
+async function fetchMessagesNewestFirst(limit) {
+  // IMPORTANT: no JSON-path filters here (production-grade robustness)
+  return await db
+    .from("darwin_messages")
+    .select("id,received_at,topic,payload")
+    .is("processed_at", null)
+    .order("received_at", { ascending: false })
+    .limit(limit);
+}
 
-  // De-dupe and cap to avoid massive IN lists
-  const uniq = Array.from(new Set(tiplocs)).slice(0, 500);
-  const { data, error } = await sb
-    .from("tiploc_crs")
-    .select("tiploc,crs")
-    .in("tiploc", uniq);
+async function markProcessed(ids) {
+  if (!ids.length) return 0;
+  let marked = 0;
 
-  if (error) {
-    console.error("[processor] tiploc_crs lookup error:", error.message);
-    return new Map();
+  for (const chunk of chunkArray(ids, MARK_CHUNK)) {
+    const { error } = await db
+      .from("darwin_messages")
+      .update({ processed_at: nowIso() })
+      .in("id", chunk);
+    if (error) throw new Error("markProcessed failed: " + error.message);
+    marked += chunk.length;
   }
+  return marked;
+}
 
-  const map = new Map();
-  for (const r of data ?? []) {
-    if (r?.tiploc && r?.crs) map.set(String(r.tiploc).trim().toUpperCase(), String(r.crs).trim().toUpperCase());
+async function upsertEvents(rows) {
+  if (!rows.length) return 0;
+  let up = 0;
+
+  for (const chunk of chunkArray(rows, UPSERT_CHUNK)) {
+    const { error } = await db.from("darwin_events").upsert(chunk, {
+      onConflict: "rid,tiploc_norm,event_type,planned_time",
+      ignoreDuplicates: true,
+    });
+    if (error) throw new Error("darwin_events upsert failed: " + error.message);
+    up += chunk.length;
   }
-  return map;
+  return up;
+}
+
+async function upsertServiceCalls(callRows) {
+  if (!callRows.length) return 0;
+  // usually small; no need to chunk unless you want
+  const { error } = await db
+    .from("darwin_service_calls")
+    .upsert(callRows, { onConflict: "rid,crs" });
+  if (error) throw new Error("darwin_service_calls upsert failed: " + error.message);
+  return callRows.length;
 }
 
 async function processOnce() {
   const started = Date.now();
 
-  // Production-grade query: newest-first, no JSON-path filters.
-  const { data: msgs, error } = await sb
-    .from("darwin_messages")
-    .select("id,received_at,topic,payload")
-    .is("processed_at", null)
-    .order("received_at", { ascending: false })
-    .limit(MAX_MESSAGES);
-
-  if (error) throw new Error(`darwin_messages select failed: ${error.message}`);
-
-  let examined = 0;
-  let eventsInserted = 0;
-  let messagesMarked = 0;
-
-  const skipped = {
-    no_bytes: 0,
-    bad_json: 0,
-    no_ts: 0,
-    no_locations: 0,
-    insert_error: 0,
-    mark_error: 0,
-    timebox: 0,
-    not_schedule: 0,
+  const stats = {
+    ok: true,
+    examined: 0,
+    eventsInserted: 0,
+    callsUpserted: 0,
+    messagesMarked: 0,
+    skipped: {
+      no_bytes: 0,
+      bad_json: 0,
+      not_schedule: 0,
+      no_ts: 0,
+      no_locations: 0,
+      insert_error: 0,
+      mark_error: 0,
+      timebox: 0,
+    },
+    config: { MAX_MESSAGES, MAX_RUN_MS },
   };
 
-  for (const m of msgs ?? []) {
-    if (Date.now() - started > MAX_MS) {
-      skipped.timebox++;
+  const { data: msgs, error } = await fetchMessagesNewestFirst(MAX_MESSAGES);
+  if (error) throw new Error("fetch messages failed: " + error.message);
+
+  const tiplocMap = await loadTiplocMap();
+
+  const markIds = [];
+  const eventRows = [];
+  const callByKey = new Map(); // rid::crs -> merged row
+
+  for (const m of msgs || []) {
+    if (Date.now() - started > MAX_RUN_MS) {
+      stats.skipped.timebox++;
       break;
     }
 
-    examined++;
+    stats.examined++;
 
-    const bytes = m?.payload?.bytes;
+    const bytes = m.payload?.bytes;
     if (!bytes) {
-      skipped.no_bytes++;
-      const { error: me } = await sb.from("darwin_messages").update({ processed_at: new Date().toISOString() }).eq("id", m.id);
-      if (!me) messagesMarked++;
-      else skipped.mark_error++;
+      stats.skipped.no_bytes++;
+      markIds.push(m.id);
       continue;
     }
 
-    const decoded = mustParseJsonString(bytes);
+    if (!looksLikeSchedule(bytes)) {
+      stats.skipped.not_schedule++;
+      markIds.push(m.id);
+      continue;
+    }
+
+    const decoded = safeJsonParse(bytes);
     if (!decoded) {
-      skipped.bad_json++;
-      const { error: me } = await sb.from("darwin_messages").update({ processed_at: new Date().toISOString() }).eq("id", m.id);
-      if (!me) messagesMarked++;
-      else skipped.mark_error++;
+      stats.skipped.bad_json++;
+      markIds.push(m.id);
       continue;
     }
 
-    const tsBlock = extractTS(decoded);
-    if (!tsBlock) {
-      skipped.not_schedule++;
-      // mark processed so it doesn't clog the queue
-      const { error: me } = await sb.from("darwin_messages").update({ processed_at: new Date().toISOString() }).eq("id", m.id);
-      if (!me) messagesMarked++;
-      else skipped.mark_error++;
+    const TS = decoded?.uR?.TS;
+    if (!TS) {
+      stats.skipped.no_ts++;
+      markIds.push(m.id);
       continue;
     }
 
-    const { ssd, rid, uid, locs } = tsBlock;
+    const rid = TS.rid ?? null;
+    const uid = TS.uid ?? null;
+    const ssd = TS.ssd ?? null;
 
-    // collect tiplocs for CRS mapping
-    const tiplocs = locs
-      .map((loc) => (loc?.tpl ? String(loc.tpl).trim().toUpperCase() : null))
-      .filter(Boolean);
+    const locs = normalizeLocations(TS.Location);
+    if (!locs.length) {
+      stats.skipped.no_locations++;
+      markIds.push(m.id);
+      continue;
+    }
 
-    const crsMap = await fetchCrsMap(tiplocs);
+    for (let idx = 0; idx < locs.length; idx++) {
+      const loc = locs[idx];
 
-    // Build events for this message
-    const rows = [];
-    let lastHour = null;
+      const tiploc = loc.tpl ?? null;
+      const tiploc_norm = normalizeTiplocNorm(tiploc);
+      const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
 
-    for (const loc of locs) {
-      const tiploc = loc?.tpl ? String(loc.tpl).trim().toUpperCase() : null;
-      const crs = tiploc ? (crsMap.get(tiploc) ?? null) : null;
+      const pta = plannedArrStr(loc);
+      const ptd = plannedDepStr(loc);
+      const arrT = actualArrStr(loc);
+      const depT = actualDepStr(loc);
 
-      // scheduled times
-      const pta = loc?.pta ?? null;
-      const ptd = loc?.ptd ?? null;
-
-      // actual/estimated times: Darwin may use et / at depending on origin
-      const arrT = loc?.arr?.at ?? loc?.arr?.et ?? null;
-      const depT = loc?.dep?.at ?? loc?.dep?.et ?? null;
-
-      // ARR
-      const plannedArrRes = toIsoWithRollover(ssd, pta, lastHour);
-      const plannedArr = plannedArrRes.iso;
-      lastHour = plannedArrRes.hour ?? lastHour;
-
-      const actualArrRes = toIsoWithRollover(ssd, arrT, lastHour);
-      const actualArr = actualArrRes.iso;
-      lastHour = actualArrRes.hour ?? lastHour;
-
+      const plannedArr = toTs(ssd, pta);
+      const actualArr = toTs(ssd, arrT);
       const lateArr = minutesDiffIso(actualArr, plannedArr);
 
       if (pta || arrT) {
-        rows.push({
+        eventRows.push({
+          msg_id: m.id,
+          loc_index: idx,
           received_at: m.received_at,
           tiploc,
+          tiploc_norm,
           crs,
           rid,
           uid,
@@ -244,21 +332,17 @@ async function processOnce() {
         });
       }
 
-      // DEP
-      const plannedDepRes = toIsoWithRollover(ssd, ptd, lastHour);
-      const plannedDep = plannedDepRes.iso;
-      lastHour = plannedDepRes.hour ?? lastHour;
-
-      const actualDepRes = toIsoWithRollover(ssd, depT, lastHour);
-      const actualDep = actualDepRes.iso;
-      lastHour = actualDepRes.hour ?? lastHour;
-
+      const plannedDep = toTs(ssd, ptd);
+      const actualDep = toTs(ssd, depT);
       const lateDep = minutesDiffIso(actualDep, plannedDep);
 
       if (ptd || depT) {
-        rows.push({
+        eventRows.push({
+          msg_id: m.id,
+          loc_index: idx,
           received_at: m.received_at,
           tiploc,
+          tiploc_norm,
           crs,
           rid,
           uid,
@@ -269,56 +353,100 @@ async function processOnce() {
           raw: loc,
         });
       }
+
+      // Merge ARR/DEP into one row per rid+crs
+      if (rid && crs) {
+        const key = `${rid}::${crs}`;
+        const existing =
+          callByKey.get(key) ??
+          ({
+            rid,
+            uid,
+            ssd,
+            crs,
+            updated_at: nowIso(),
+          });
+
+        if (plannedArr || actualArr) {
+          existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
+          existing.actual_arrive = actualArr ?? existing.actual_arrive ?? null;
+          existing.late_arrive_min = lateArr ?? existing.late_arrive_min ?? null;
+        }
+
+        if (plannedDep || actualDep) {
+          existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
+          existing.actual_depart = actualDep ?? existing.actual_depart ?? null;
+          existing.late_depart_min = lateDep ?? existing.late_depart_min ?? null;
+        }
+
+        existing.updated_at = nowIso();
+        callByKey.set(key, existing);
+      }
     }
 
-    if (!rows.length) {
-      skipped.no_locations++;
-      const { error: me } = await sb.from("darwin_messages").update({ processed_at: new Date().toISOString() }).eq("id", m.id);
-      if (!me) messagesMarked++;
-      else skipped.mark_error++;
-      continue;
-    }
-
-    const { error: insErr } = await sb.from("darwin_events").insert(rows);
-    if (insErr) {
-      skipped.insert_error++;
-      // do not mark processed; allow retry
-      continue;
-    }
-    eventsInserted += rows.length;
-
-    const { error: markErr } = await sb.from("darwin_messages").update({ processed_at: new Date().toISOString() }).eq("id", m.id);
-    if (markErr) skipped.mark_error++;
-    else messagesMarked++;
+    // We always mark processed for schedule messages we handled
+    markIds.push(m.id);
   }
 
-  return { ok: true, examined, eventsInserted, messagesMarked, skipped, config: { MAX_MESSAGES, MAX_MS } };
+  // Upserts
+  try {
+    stats.eventsInserted = await upsertEvents(eventRows);
+  } catch (e) {
+    stats.ok = false;
+    stats.skipped.insert_error++;
+    console.error("EVENT UPSERT ERROR:", e?.message || e);
+    // still try marking processed to avoid hot-looping on poison messages
+  }
+
+  try {
+    stats.callsUpserted = await upsertServiceCalls(Array.from(callByKey.values()));
+  } catch (e) {
+    stats.ok = false;
+    console.error("SERVICE_CALLS UPSERT ERROR:", e?.message || e);
+  }
+
+  // Mark processed
+  try {
+    stats.messagesMarked = await markProcessed(markIds);
+  } catch (e) {
+    stats.ok = false;
+    stats.skipped.mark_error++;
+    console.error("MARK PROCESSED ERROR:", e?.message || e);
+  }
+
+  return stats;
 }
 
+// ---- loop runner ----
 async function main() {
-  console.log("[processor] starting", { MAX_MESSAGES, MAX_MS, SLEEP_MS });
+  console.log("[darwin-processor] starting", {
+    MAX_MESSAGES,
+    MAX_RUN_MS,
+    LOOP_SLEEP_MS,
+    MAP_TTL_MS,
+  });
 
-  let loop = 0;
+  // Soft backoff on errors
+  let backoff = 250;
+
   while (true) {
-    loop++;
     try {
-      const r = await processOnce();
-      if (loop % LOG_EVERY === 0) {
-        console.log("[processor]", r);
-      }
-
-      // If we processed nothing, back off a bit longer
-      const didWork = (r.eventsInserted ?? 0) > 0 || (r.messagesMarked ?? 0) > 0;
-      await sleep(didWork ? SLEEP_MS : Math.min(10000, SLEEP_MS * 2));
+      const stats = await processOnce();
+      console.log("[darwin-processor] tick", stats);
+      backoff = 250;
     } catch (e) {
-      console.error("[processor] crash", e?.message || e);
-      // backoff on errors
-      await sleep(5000);
+      console.error("[darwin-processor] fatal tick error:", e?.message || e);
+      // Backoff with jitter
+      const jitter = Math.floor(Math.random() * 250);
+      await sleep(Math.min(10_000, backoff + jitter));
+      backoff = Math.min(10_000, backoff * 2);
     }
+
+    await sleep(LOOP_SLEEP_MS);
   }
 }
 
 main().catch((e) => {
-  console.error("[processor] fatal", e?.message || e);
+  console.error("[darwin-processor] crashed:", e?.message || e);
   process.exit(1);
 });
