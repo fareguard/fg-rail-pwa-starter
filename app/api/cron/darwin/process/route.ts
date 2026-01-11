@@ -183,6 +183,7 @@ export async function GET(req: Request) {
       no_bytes: 0,
       bad_json: 0,
       no_ts: 0,
+      no_rid: 0,
       no_locations: 0,
       insert_error: 0,
       mark_error: 0,
@@ -232,6 +233,13 @@ export async function GET(req: Request) {
       const uid: string | null = TS.uid ?? null;
       const ssd: string | null = TS.ssd ?? null;
 
+      // Production-grade rule: if there is no rid, nothing is matchable
+      if (!rid) {
+        skipped.no_rid++;
+        markIds.push(m.id);
+        continue;
+      }
+
       // Step 1A — accept Location as array OR single object
       const locs: any[] = normalizeLocations(TS.Location);
 
@@ -267,7 +275,10 @@ export async function GET(req: Request) {
         const actualArr = toTs(ssd, arrT);
         const lateArr = minutesDiffIso(actualArr, plannedArr);
 
-        if (pta || arrT) {
+        // Production-grade rule:
+        // Only store darwin_events rows that can be matched:
+        // require rid, tiploc_norm, planned_time
+        if (tiploc_norm && plannedArr) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
@@ -289,7 +300,8 @@ export async function GET(req: Request) {
         const actualDep = toTs(ssd, depT);
         const lateDep = minutesDiffIso(actualDep, plannedDep);
 
-        if (ptd || depT) {
+        // Production-grade rule: same for DEP
+        if (tiploc_norm && plannedDep) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
@@ -308,7 +320,8 @@ export async function GET(req: Request) {
         }
 
         // 2.4 Upsert into darwin_service_calls (merge ARR/DEP into one row per rid+crs)
-        if (crs && rid) {
+        // Same rule: only write/update fields that have a planned_* anchor.
+        if (crs) {
           const key = `${rid}::${crs}`;
           const existing =
             callByKey.get(key) ??
@@ -320,15 +333,15 @@ export async function GET(req: Request) {
               updated_at: new Date().toISOString(),
             } as any);
 
-          // ARR
-          if (plannedArr || actualArr) {
+          // ARR (only if plannedArr exists)
+          if (plannedArr) {
             existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
             existing.actual_arrive = actualArr ?? existing.actual_arrive ?? null;
             existing.late_arrive_min = lateArr ?? existing.late_arrive_min ?? null;
           }
 
-          // DEP
-          if (plannedDep || actualDep) {
+          // DEP (only if plannedDep exists)
+          if (plannedDep) {
             existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
             existing.actual_depart = actualDep ?? existing.actual_depart ?? null;
             existing.late_depart_min = lateDep ?? existing.late_depart_min ?? null;
