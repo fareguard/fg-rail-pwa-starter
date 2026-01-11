@@ -168,7 +168,6 @@ export async function GET(req: Request) {
       .from("darwin_messages")
       .select("id,received_at,topic,payload")
       .is("processed_at", null)
-      .not("payload->>bytes", "is", null) // ensures bytes exists
       .order("received_at", { ascending: false }) // NEWEST FIRST
       .limit(MAX_MESSAGES);
 
