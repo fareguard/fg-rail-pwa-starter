@@ -374,7 +374,7 @@ export async function GET(req: Request) {
       if (callRows.length) {
         const { error: upErr } = await db
           .from("darwin_service_calls")
-          .upsert(callRows, { onConflict: "rid,crs, ssd" });
+          .upsert(callRows, { onConflict: "rid,crs,ssd" });
 
         if (upErr) console.error("service_calls upsert error", upErr.message);
       }
