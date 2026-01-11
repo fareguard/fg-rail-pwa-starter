@@ -73,34 +73,67 @@ function parseDarwinTime(t: any): { h: number; m: number; s: number } | null {
   return { h: hh, m: mm, s: ss };
 }
 
-function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
-  if (!lateIso || !earlyIso) return null;
-  const a = new Date(lateIso);
-  const b = new Date(earlyIso);
-  if (isNaN(a.getTime()) || isNaN(b.getTime())) return null;
-  return Math.round((a.getTime() - b.getTime()) / 60000);
+// ===== sequence-aware monotonic helpers (below parseDarwinTime) =====
+function minutesOfDay(t: string | null): number | null {
+  if (!t) return null;
+  const tt = parseDarwinTime(t);
+  if (!tt) return null;
+  return tt.h * 60 + tt.m; // seconds ignored for monotonic decision (safe)
 }
 
-// ===== 2.2 midnight rollover handling =====
-function toTs(ssd: string | null, timeStr: string | null) {
-  if (!ssd || !timeStr) return null;
+function isoAtSsdWithDayOffset(ssd: string, timeStr: string, dayOffset: number): string | null {
   const tt = parseDarwinTime(timeStr);
   if (!tt) return null;
 
   const base = new Date(`${ssd}T00:00:00.000Z`);
   if (isNaN(base.getTime())) return null;
 
-  // Build candidate at ssd
-  const d = new Date(base);
-  d.setUTCHours(tt.h, tt.m, tt.s, 0);
+  base.setUTCDate(base.getUTCDate() + dayOffset);
+  base.setUTCHours(tt.h, tt.m, tt.s, 0);
 
-  // Rollover rule (conservative):
-  // For 00:00–02:59, assume next-day continuation
-  if (tt.h < 3) {
-    d.setUTCDate(d.getUTCDate() + 1);
+  return isNaN(base.getTime()) ? null : base.toISOString();
+}
+
+type RolloverState = {
+  dayOffset: number;
+  lastAbsMin: number | null; // absolute minutes since ssd start (dayOffset*1440 + minOfDay)
+};
+
+/**
+ * Enforce monotonic time across locations:
+ * - choose a "reference" minute for rollover decisions (planned preferred, else actual)
+ * - if reference would go backwards meaningfully, roll dayOffset forward until it doesn't
+ *
+ * thresholdBackwardsMin:
+ *   allows small reorder/noise without rolling day (e.g. passing times, suppressed, etc.)
+ */
+function applyMonotonicRollover(
+  state: RolloverState,
+  refMinOfDay: number | null,
+  thresholdBackwardsMin = 60
+) {
+  if (refMinOfDay == null) return;
+
+  let candidateAbs = state.dayOffset * 1440 + refMinOfDay;
+
+  if (state.lastAbsMin != null) {
+    // While it goes backwards beyond threshold, roll forward by 1 day
+    while (candidateAbs < state.lastAbsMin - thresholdBackwardsMin) {
+      state.dayOffset += 1;
+      candidateAbs += 1440;
+    }
   }
 
-  return isNaN(d.getTime()) ? null : d.toISOString();
+  // Update lastAbsMin to the candidate abs time (monotonic anchor)
+  state.lastAbsMin = candidateAbs;
+}
+
+function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
+  if (!lateIso || !earlyIso) return null;
+  const a = new Date(lateIso);
+  const b = new Date(earlyIso);
+  if (isNaN(a.getTime()) || isNaN(b.getTime())) return null;
+  return Math.round((a.getTime() - b.getTime()) / 60000);
 }
 
 // ===== 2.3 CRS cache / map =====
@@ -257,6 +290,9 @@ export async function GET(req: Request) {
       // load CRS map once per message (cached in memory globally)
       const tiplocMap = await loadTiplocMap(db);
 
+      // Create one rollover state per message
+      const rollover: RolloverState = { dayOffset: 0, lastAbsMin: null };
+
       for (let idx = 0; idx < locs.length; idx++) {
         const loc = locs[idx];
 
@@ -265,20 +301,23 @@ export async function GET(req: Request) {
 
         const crs = tiploc_norm ? tiplocMap.get(tiploc_norm) ?? null : null;
 
-        // 2.1 Replace time selection / assignments
-        const pta = plannedArrStr(loc);
-        const ptd = plannedDepStr(loc);
+        // --- ARR ---
+        const pta = plannedArrStr(loc); // your existing helper
         const arrT = actualArrStr(loc);
-        const depT = actualDepStr(loc);
 
-        const plannedArr = toTs(ssd, pta);
-        const actualArr = toTs(ssd, arrT);
+        const refArrMin = minutesOfDay(pta) ?? minutesOfDay(arrT);
+        if (ssd && refArrMin != null) {
+          applyMonotonicRollover(rollover, refArrMin);
+        }
+
+        const plannedArr =
+          ssd && pta ? isoAtSsdWithDayOffset(ssd, pta, rollover.dayOffset) : null;
+        const actualArr =
+          ssd && arrT ? isoAtSsdWithDayOffset(ssd, arrT, rollover.dayOffset) : null;
+
         const lateArr = minutesDiffIso(actualArr, plannedArr);
 
-        // Production-grade rule:
-        // Only store darwin_events rows that can be matched:
-        // require rid, tiploc_norm, planned_time
-        if (tiploc_norm && plannedArr) {
+        if (pta || arrT) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
@@ -296,12 +335,23 @@ export async function GET(req: Request) {
           });
         }
 
-        const plannedDep = toTs(ssd, ptd);
-        const actualDep = toTs(ssd, depT);
+        // --- DEP ---
+        const ptd = plannedDepStr(loc);
+        const depT = actualDepStr(loc);
+
+        const refDepMin = minutesOfDay(ptd) ?? minutesOfDay(depT);
+        if (ssd && refDepMin != null) {
+          applyMonotonicRollover(rollover, refDepMin);
+        }
+
+        const plannedDep =
+          ssd && ptd ? isoAtSsdWithDayOffset(ssd, ptd, rollover.dayOffset) : null;
+        const actualDep =
+          ssd && depT ? isoAtSsdWithDayOffset(ssd, depT, rollover.dayOffset) : null;
+
         const lateDep = minutesDiffIso(actualDep, plannedDep);
 
-        // Production-grade rule: same for DEP
-        if (tiploc_norm && plannedDep) {
+        if (ptd || depT) {
           rows.push({
             msg_id: m.id,
             loc_index: idx,
