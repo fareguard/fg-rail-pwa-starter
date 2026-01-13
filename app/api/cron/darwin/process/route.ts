@@ -132,6 +132,52 @@ function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
   return Math.round((a.getTime() - b.getTime()) / 60000);
 }
 
+// ===== NEW helper (add near your other helpers) =====
+function applyMonotonicRollover(
+  items: { planned_time: string | null; actual_time: string | null }[]
+) {
+  let plannedOffsetDays = 0;
+  let actualOffsetDays = 0;
+
+  let prevPlanned: Date | null = null;
+  let prevActual: Date | null = null;
+
+  for (const it of items) {
+    if (it.planned_time) {
+      const d0 = new Date(it.planned_time);
+      if (!isNaN(d0.getTime())) {
+        const d = new Date(d0.getTime());
+        d.setUTCDate(d.getUTCDate() + plannedOffsetDays);
+
+        if (prevPlanned && d.getTime() < prevPlanned.getTime()) {
+          // rollover detected
+          plannedOffsetDays += 1;
+          d.setUTCDate(d.getUTCDate() + 1);
+        }
+
+        it.planned_time = d.toISOString();
+        prevPlanned = d;
+      }
+    }
+
+    if (it.actual_time) {
+      const a0 = new Date(it.actual_time);
+      if (!isNaN(a0.getTime())) {
+        const a = new Date(a0.getTime());
+        a.setUTCDate(a.getUTCDate() + actualOffsetDays);
+
+        if (prevActual && a.getTime() < prevActual.getTime()) {
+          actualOffsetDays += 1;
+          a.setUTCDate(a.getUTCDate() + 1);
+        }
+
+        it.actual_time = a.toISOString();
+        prevActual = a;
+      }
+    }
+  }
+}
+
 // ===== 2.3 CRS cache / map =====
 let TIPLOC_TO_CRS: Map<string, string> | null = null;
 
@@ -385,7 +431,20 @@ export async function GET(req: Request) {
         }
       }
 
+      // ===== APPLY requested sorting + monotonic rollover (before upsert) =====
       if (rows.length) {
+        rows.sort(
+          (a, b) =>
+            (a.loc_index ?? 0) - (b.loc_index ?? 0) ||
+            (a.event_type > b.event_type ? 1 : -1)
+        );
+        applyMonotonicRollover(rows);
+
+        // recompute late_minutes after rollover-adjusted ISO timestamps
+        for (const r of rows) {
+          r.late_minutes = minutesDiffIso(r.actual_time ?? null, r.planned_time ?? null);
+        }
+
         // Upsert on your *real* uniqueness key (rid,tiploc_norm,event_type,planned_time)
         // and ignore duplicates so the worker never fails on replays/overlaps.
         const { error: insErr } = await db.from("darwin_events").upsert(rows, {
@@ -401,6 +460,7 @@ export async function GET(req: Request) {
         }
         eventsInserted += rows.length;
       }
+      // ================================================================
 
       // 2.4 service_calls upsert
       const callRows = Array.from(callByKey.values());
