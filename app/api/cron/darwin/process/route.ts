@@ -73,105 +73,55 @@ function parseDarwinTime(t: any): { h: number; m: number; s: number } | null {
   return { h: hh, m: mm, s: ss };
 }
 
-// ===== Drop-in helpers (NEW) =====
-function parseIso(s: string | null): Date | null {
-  if (!s) return null;
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d;
-}
-
-function absMs(a: Date, b: Date) {
-  const x = a.getTime() - b.getTime();
-  return x < 0 ? -x : x;
-}
-
-function toIsoAtOffset(ssd: string, timeStr: string, dayOffset: number): string | null {
-  const tt = parseDarwinTime(timeStr);
-  if (!tt) return null;
-
-  const base = new Date(`${ssd}T00:00:00.000Z`);
-  if (isNaN(base.getTime())) return null;
-
-  base.setUTCDate(base.getUTCDate() + dayOffset);
-  base.setUTCHours(tt.h, tt.m, tt.s, 0);
-
-  return isNaN(base.getTime()) ? null : base.toISOString();
-}
-
-/**
- * Picks best dayOffset among candidates to minimize absolute difference to refTime.
- * If refTime is null, returns null and you can fall back to monotonic only.
- */
-function pickBestOffsetByRef(
-  ssd: string,
-  timeStr: string,
-  refTime: Date | null,
-  offsets: number[]
-): { iso: string; dayOffset: number } | null {
-  if (!refTime) return null;
-
-  let best: { iso: string; dayOffset: number } | null = null;
-  let bestDist = Number.POSITIVE_INFINITY;
-
-  for (const off of offsets) {
-    const iso = toIsoAtOffset(ssd, timeStr, off);
-    if (!iso) continue;
-
-    const d = new Date(iso);
-    const dist = absMs(d, refTime);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = { iso, dayOffset: off };
-    }
-  }
-  return best;
-}
-
-// ===== sequence-aware monotonic helpers (below parseDarwinTime) =====
-function minutesOfDay(t: string | null): number | null {
-  if (!t) return null;
-  const tt = parseDarwinTime(t);
-  if (!tt) return null;
-  return tt.h * 60 + tt.m; // seconds ignored for monotonic decision (safe)
-}
-
-// (kept for backward compatibility; now prefer toIsoAtOffset)
-function isoAtSsdWithDayOffset(ssd: string, timeStr: string, dayOffset: number): string | null {
-  return toIsoAtOffset(ssd, timeStr, dayOffset);
-}
-
-type RolloverState = {
-  dayOffset: number;
-  lastAbsMin: number | null; // abs minutes since ssd start
+// ===== monotonic helpers (DROP-IN) =====
+type RollCtx = {
+  // last timestamp we emitted for this RID (planned timeline)
+  lastPlannedMs: number | null;
+  // last timestamp we emitted for this RID (actual timeline)
+  lastActualMs: number | null;
 };
 
-/**
- * Enforce monotonic time across locations:
- * - choose a "reference" minute for rollover decisions (planned preferred, else actual)
- * - if reference would go backwards meaningfully, roll dayOffset forward until it doesn't
- *
- * thresholdBackwardsMin:
- *   allows small reorder/noise without rolling day (e.g. passing times, suppressed, etc.)
- */
-function applyMonotonicRollover(
-  state: RolloverState,
-  refMinOfDay: number | null,
-  thresholdBackwardsMin = 60
-) {
-  if (refMinOfDay == null) return;
+// parse time string -> ms at base date
+function buildMs(ssd: string, timeStr: string): number | null {
+  const tt = parseDarwinTime(timeStr);
+  if (!tt) return null;
+  const base = new Date(`${ssd}T00:00:00.000Z`);
+  if (isNaN(base.getTime())) return null;
+  base.setUTCHours(tt.h, tt.m, tt.s, 0);
+  return base.getTime();
+}
 
-  let candidateAbs = state.dayOffset * 1440 + refMinOfDay;
+// “monotonic bump”: if time goes backwards, roll forward by +1 day until it doesn’t
+function monotonicIso(
+  ctx: RollCtx,
+  kind: "planned" | "actual",
+  ssd: string | null,
+  timeStr: string | null,
+  // tolerance: allow tiny backwards jitter without rolling
+  backwardsToleranceMs = 2 * 60 * 1000
+): string | null {
+  if (!ssd || !timeStr) return null;
 
-  if (state.lastAbsMin != null) {
-    // While it goes backwards beyond threshold, roll forward by 1 day
-    while (candidateAbs < state.lastAbsMin - thresholdBackwardsMin) {
-      state.dayOffset += 1;
-      candidateAbs += 1440;
+  let ms = buildMs(ssd, timeStr);
+  if (ms == null) return null;
+
+  const last = kind === "planned" ? ctx.lastPlannedMs : ctx.lastActualMs;
+
+  if (last != null) {
+    // If the candidate is “meaningfully” behind last, roll forward by +1 day until it’s >= last - tolerance
+    while (ms < last - backwardsToleranceMs) {
+      ms += 24 * 60 * 60 * 1000;
+
+      // hard safety: prevent runaway (should never need >2 rolls)
+      if (ms - last > 3 * 24 * 60 * 60 * 1000) break;
     }
   }
 
-  // Update lastAbsMin to the candidate abs time (monotonic anchor)
-  state.lastAbsMin = candidateAbs;
+  if (kind === "planned") ctx.lastPlannedMs = ms;
+  else ctx.lastActualMs = ms;
+
+  const d = new Date(ms);
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
@@ -180,29 +130,6 @@ function minutesDiffIso(lateIso: string | null, earlyIso: string | null) {
   const b = new Date(earlyIso);
   if (isNaN(a.getTime()) || isNaN(b.getTime())) return null;
   return Math.round((a.getTime() - b.getTime()) / 60000);
-}
-
-// NEW: smart TS chooser: closest-to-message-time with monotonic offset fallback
-function toTsSmart(
-  ssd: string | null,
-  timeStr: string | null,
-  msgRef: Date | null,
-  rollover: RolloverState
-) {
-  if (!ssd || !timeStr) return null;
-
-  // Prefer staying on current offset, but allow +1 day if closer to msgRef
-  // (solves isolated midnight fragments cleanly)
-  if (msgRef) {
-    const best = pickBestOffsetByRef(ssd, timeStr, msgRef, [
-      rollover.dayOffset,
-      rollover.dayOffset + 1,
-    ]);
-    if (best) return best.iso;
-  }
-
-  // fallback
-  return toIsoAtOffset(ssd, timeStr, rollover.dayOffset);
 }
 
 // ===== 2.3 CRS cache / map =====
@@ -322,10 +249,6 @@ export async function GET(req: Request) {
         continue;
       }
 
-      // ===== 3) capture a reference time per message (NEW) =====
-      const msgTsIso: string | null = typeof decoded?.ts === "string" ? decoded.ts : null;
-      const msgRef = parseIso(msgTsIso) ?? parseIso(m.received_at) ?? null;
-
       // ===== FAST-PATH: non-TS messages =====
       const TS = decoded?.uR?.TS;
       if (!TS) {
@@ -363,24 +286,8 @@ export async function GET(req: Request) {
       // load CRS map once per message (cached in memory globally)
       const tiplocMap = await loadTiplocMap(db);
 
-      // ===== 4) Initialize rollover dayOffset using first usable time (NEW) =====
-      const rollover: RolloverState = { dayOffset: 0, lastAbsMin: null };
-
-      let firstTimeStr: string | null = null;
-      for (const loc of locs) {
-        firstTimeStr = pickFirstString(
-          plannedArrStr(loc),
-          plannedDepStr(loc),
-          actualArrStr(loc),
-          actualDepStr(loc)
-        );
-        if (firstTimeStr) break;
-      }
-
-      if (ssd && firstTimeStr && msgRef) {
-        const best = pickBestOffsetByRef(ssd, firstTimeStr, msgRef, [0, 1, 2]);
-        if (best) rollover.dayOffset = best.dayOffset;
-      }
+      // ===== Monotonic ctx per message (per RID) =====
+      const ctx: RollCtx = { lastPlannedMs: null, lastActualMs: null };
 
       for (let idx = 0; idx < locs.length; idx++) {
         const loc = locs[idx];
@@ -394,14 +301,9 @@ export async function GET(req: Request) {
         const pta = plannedArrStr(loc);
         const arrT = actualArrStr(loc);
 
-        const refArrMin = minutesOfDay(pta) ?? minutesOfDay(arrT);
-        if (ssd && refArrMin != null) {
-          applyMonotonicRollover(rollover, refArrMin);
-        }
-
-        // ===== 5) smart conversion (NEW) =====
-        const plannedArr = toTsSmart(ssd, pta, msgRef, rollover);
-        const actualArr = toTsSmart(ssd, arrT, msgRef, rollover);
+        // IMPORTANT: planned first, then actual (each has its own monotonic chain)
+        const plannedArr = monotonicIso(ctx, "planned", ssd, pta);
+        const actualArr = monotonicIso(ctx, "actual", ssd, arrT);
 
         const lateArr = minutesDiffIso(actualArr, plannedArr);
 
@@ -427,14 +329,8 @@ export async function GET(req: Request) {
         const ptd = plannedDepStr(loc);
         const depT = actualDepStr(loc);
 
-        const refDepMin = minutesOfDay(ptd) ?? minutesOfDay(depT);
-        if (ssd && refDepMin != null) {
-          applyMonotonicRollover(rollover, refDepMin);
-        }
-
-        // ===== 5) smart conversion (NEW) =====
-        const plannedDep = toTsSmart(ssd, ptd, msgRef, rollover);
-        const actualDep = toTsSmart(ssd, depT, msgRef, rollover);
+        const plannedDep = monotonicIso(ctx, "planned", ssd, ptd);
+        const actualDep = monotonicIso(ctx, "actual", ssd, depT);
 
         const lateDep = minutesDiffIso(actualDep, plannedDep);
 
