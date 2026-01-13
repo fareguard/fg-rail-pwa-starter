@@ -1,83 +1,74 @@
-import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-  throw new Error("Missing SUPABASE env vars for worker (URL or SERVICE_ROLE_KEY).");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  process.exit(1);
 }
 
-const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
+const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
-const LOOP_MS = Number(process.env.DARWIN_TRIP_LINK_LOOP_MS ?? "15000");
-const BATCH_SIZE = Number(process.env.DARWIN_TRIP_LINK_BATCH ?? "50");
-const MAX_SCORE_SECONDS = Number(process.env.DARWIN_TRIP_LINK_MAX_SCORE_S ?? "5400"); // 90 mins
+const BATCH = Number(process.env.DARWIN_LINK_BATCH ?? "200");
+const SLEEP_MS = Number(process.env.DARWIN_LINK_SLEEP_MS ?? "2500");
+const MAX_SCORE_SECONDS = Number(process.env.DARWIN_LINK_MAX_SCORE_SECONDS ?? "5400"); // 90 mins
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function linkBatch() {
-  // Only consider trips in a sane time window:
-  // - from 7 days ago to 24h in the future (covers late ingestion + upcoming journeys)
-  const { data: trips, error } = await db
+async function tick() {
+  // Pull a small batch of candidate trips (needs index trips_need_rid_idx)
+  const { data: trips, error: qErr } = await db
     .from("trips")
     .select("id")
     .is("darwin_rid", null)
     .not("depart_planned", "is", null)
-    .gte("depart_planned", new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString())
-    .lte("depart_planned", new Date(Date.now() + 24 * 3600 * 1000).toISOString())
-    .order("depart_planned", { ascending: true })
-    .limit(BATCH_SIZE);
+    .order("depart_planned", { ascending: false })
+    .limit(BATCH);
 
-  if (error) throw new Error("Trips select error: " + error.message);
-  if (!trips?.length) return { examined: 0, linked: 0 };
+  if (qErr) throw new Error("trips query failed: " + qErr.message);
+  if (!trips?.length) return { scanned: 0, linked: 0 };
 
   let linked = 0;
 
   for (const t of trips) {
-    const { data, error: rpcErr } = await db.rpc("link_trip_to_darwin", {
+    // Call your DB function; strict threshold enforced in SQL function too
+    const { data, error } = await db.rpc("link_trip_to_darwin", {
       p_trip_id: t.id,
       max_score_seconds: MAX_SCORE_SECONDS,
     });
 
-    if (rpcErr) {
-      // don’t crash the loop on one bad trip
-      console.error("link_trip_to_darwin rpc error", t.id, rpcErr.message);
+    if (error) {
+      // don't crash the whole worker for one bad row
+      console.error("link_trip_to_darwin error", t.id, error.message);
       continue;
     }
-
     if (data === true) linked++;
   }
 
-  return { examined: trips.length, linked };
+  return { scanned: trips.length, linked };
 }
 
 async function main() {
-  console.log("[darwin-trip-linker] starting", {
-    LOOP_MS,
-    BATCH_SIZE,
+  console.log("darwin-trip-linker up", {
+    BATCH,
+    SLEEP_MS,
     MAX_SCORE_SECONDS,
   });
 
   while (true) {
     try {
-      const r = await linkBatch();
-      if (r.examined || r.linked) {
-        console.log("[darwin-trip-linker] batch", r);
-      }
+      const res = await tick();
+      console.log("tick", res);
     } catch (e) {
-      console.error("[darwin-trip-linker] loop error", e?.message || e);
+      console.error("tick failed", e?.message || e);
     }
-
-    await sleep(LOOP_MS);
+    await sleep(SLEEP_MS);
   }
 }
 
-main().catch((e) => {
-  console.error("[darwin-trip-linker] fatal", e?.message || e);
-  process.exit(1);
-});
+main();
