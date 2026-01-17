@@ -9,7 +9,8 @@
     "worker:darwin": "node workers/darwin-consumer.mjs",
     "worker:darwin:process": "node workers/darwin-processor.mjs",
     "worker:darwin:trip-linker": "node workers/darwin-trip-linker.mjs",
-    "worker:darwin:retention": "node workers/darwin-retention.mjs"
+    "worker:darwin:retention": "node workers/darwin-retention.mjs",
+    "worker:claims:check": "node workers/claim-checker.mjs"
 
   },
   "dependencies": {
