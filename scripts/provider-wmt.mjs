@@ -1,4 +1,3 @@
-// scripts/provider-wmt.mjs
 import { chromium } from "@playwright/test";
 
 export async function submitWMTClaim(payload, { submitLive = false } = {}) {
@@ -20,24 +19,40 @@ export async function submitWMTClaim(payload, { submitLive = false } = {}) {
       await page.waitForLoadState("domcontentloaded");
     }
 
-    const email = payload.user_email || "hello@fareguard.co.uk";
-    const ref = payload.booking_ref || "UNKNOWN";
+    const email = payload.user_email;
+    const ref = payload.booking_ref;
+
+    if (!email) return { ok: false, error: "missing_user_email", provider: "wmt" };
+    if (!ref) return { ok: false, error: "missing_booking_ref", provider: "wmt" };
 
     await page.fill('input[type="email"], input[name*="email"]', email);
     await page.fill('input[name*="booking"], input[name*="reference"]', ref);
 
-    if (submitLive) {
-      const submitBtn = page.locator('button[type="submit"], input[type="submit"]');
-      if (await submitBtn.count()) {
-        await submitBtn.first().click();
-        await page.waitForLoadState("networkidle");
-      }
+    if (!submitLive) {
+      await browser.close();
+      return { ok: true, dry_run: true, provider: "wmt" };
     }
 
+    const submitBtn = page.locator('button[type="submit"], input[type="submit"]');
+    if (!(await submitBtn.count())) return { ok: false, error: "submit_button_not_found", provider: "wmt" };
+
+    await submitBtn.first().click();
+
+    // Confirmation heuristic (you must tune this after one real submit)
+    await page.waitForLoadState("domcontentloaded");
+    const confirmation = page.locator('text=/reference|submitted|thank you|confirmation/i');
+
+    if (await confirmation.count()) {
+      const txt = (await confirmation.first().innerText().catch(() => "")) || "";
+      await browser.close();
+      return { ok: true, provider: "wmt", provider_ref: null, confirmation_text: txt.slice(0, 500) };
+    }
+
+    // If no confirmation, fail (prevents false "submitted")
     await browser.close();
-    return { ok: true, provider: "wmt", submitted_at: new Date().toISOString(), payload };
+    return { ok: false, error: "no_confirmation_detected", provider: "wmt" };
   } catch (err) {
     await browser.close();
-    return { ok: false, error: err?.message || String(err), provider: "wmt", payload };
+    return { ok: false, error: err?.message || String(err), provider: "wmt" };
   }
 }
