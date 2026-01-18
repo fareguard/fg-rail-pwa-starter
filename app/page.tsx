@@ -231,8 +231,8 @@ export default function Home() {
           style={{ display: "flex", gap: 16, flexWrap: "wrap" }}
         >
           <span>© {year} FareGuard</span>
-          <Link href="/privacy">Privacy</Link>
-          <Link href="/terms">Terms</Link>
+          <Link href="/privacy-policy">Privacy</Link>
+          <Link href="/tos">Terms</Link>
           <Link href="/contact">Contact</Link>
         </div>
       </footer>
