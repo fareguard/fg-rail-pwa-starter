@@ -26,11 +26,23 @@ function operatorToProvider(op) {
   const p = String(op || "").trim().toLowerCase();
   // map your rules/operators to provider modules
   // IMPORTANT: match whatever is stored in delay_repay_rules.operator / claims.meta->>'operator'
+
   if (p.includes("west midlands")) return "wmt";
   if (p.includes("avanti")) return "avanti";
   if (p.includes("gwr") || p.includes("great western")) return "gwr";
   if (p.includes("lner")) return "lner";
-  if (p.includes("gtr") || p.includes("thameslink") || p.includes("southern") || p.includes("great northern")) return "gtr";
+
+  // c2c support — ONLY because it is intentionally routed via GTR
+  // If this ever stops being true, remove this and it will fail cleanly
+  if (p === "c2c" || p.includes("c2c")) return "gtr";
+
+  if (
+    p.includes("gtr") ||
+    p.includes("thameslink") ||
+    p.includes("southern") ||
+    p.includes("great northern")
+  ) return "gtr";
+
   return null;
 }
 
@@ -43,7 +55,9 @@ async function popClaimId() {
 async function getClaim(claimId) {
   const { data, error } = await db
     .from("claims")
-    .select("id, trip_id, status, provider_ref, error, submitted_at, operator, booking_ref, user_email, meta")
+    .select(
+      "id, trip_id, status, provider_ref, error, submitted_at, operator, booking_ref, user_email, meta"
+    )
     .eq("id", claimId)
     .maybeSingle();
   if (error) throw error;
@@ -57,19 +71,28 @@ async function updateClaim(claimId, patch) {
 
 async function updateQueue(claimId, patch) {
   // stage-based queue is keyed by claim_id
-  const { error } = await db.from("claim_queue").update(patch).eq("claim_id", claimId);
+  const { error } = await db
+    .from("claim_queue")
+    .update(patch)
+    .eq("claim_id", claimId);
   if (error) throw error;
 }
 
 async function runProvider(providerId, payload) {
   const submitOpts = { submitLive: LIVE };
   switch (providerId) {
-    case "avanti": return submitAvantiClaim(payload, submitOpts);
-    case "wmt": return submitWMTClaim(payload, submitOpts);
-    case "gwr": return submitGWRClaim(payload, submitOpts);
-    case "lner": return submitLNERClaim(payload, submitOpts);
-    case "gtr": return submitGTRClaim(payload, submitOpts);
-    default: return { ok: false, error: `Unknown provider ${providerId}` };
+    case "avanti":
+      return submitAvantiClaim(payload, submitOpts);
+    case "wmt":
+      return submitWMTClaim(payload, submitOpts);
+    case "gwr":
+      return submitGWRClaim(payload, submitOpts);
+    case "lner":
+      return submitLNERClaim(payload, submitOpts);
+    case "gtr":
+      return submitGTRClaim(payload, submitOpts);
+    default:
+      return { ok: false, error: `Unknown provider ${providerId}` };
   }
 }
 
@@ -81,7 +104,9 @@ function backoffMinutes(attempts) {
 async function tickOnce() {
   const claimId = await popClaimId();
   if (!claimId) {
-    console.log(JSON.stringify({ ok: true, processed: 0, source: "submit.none" }));
+    console.log(
+      JSON.stringify({ ok: true, processed: 0, source: "submit.none" })
+    );
     return;
   }
 
@@ -91,7 +116,9 @@ async function tickOnce() {
     await updateQueue(claimId, {
       stage: "check",
       last_error: "claim_missing",
-      next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      next_attempt_at: new Date(
+        Date.now() + 60 * 60 * 1000
+      ).toISOString(),
       updated_at: new Date().toISOString(),
     });
     return;
@@ -99,15 +126,25 @@ async function tickOnce() {
 
   // SAFETY: never mark submitted on dry-run
   // We'll treat dry-run success as "ready" and re-queue.
-  const operator = claim.operator || claim.meta?.operator || claim.meta?.operator_name || claim.meta?.["operator"] || claim.meta?.["operator"];
+  const operator =
+    claim.operator ||
+    claim.meta?.operator ||
+    claim.meta?.operator_name ||
+    claim.meta?.["operator"];
+
   const provider = operatorToProvider(operator);
 
   if (!provider) {
-    await updateClaim(claimId, { status: "failed", error: "no_provider_for_operator" });
+    await updateClaim(claimId, {
+      status: "failed",
+      error: "no_provider_for_operator",
+    });
     await updateQueue(claimId, {
       stage: "check",
       last_error: "no_provider_for_operator",
-      next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      next_attempt_at: new Date(
+        Date.now() + 60 * 60 * 1000
+      ).toISOString(),
       updated_at: new Date().toISOString(),
     });
     return;
@@ -115,17 +152,21 @@ async function tickOnce() {
 
   // Build payload from claim/meta (single source of truth)
   const payload = {
-    ...((claim.meta && typeof claim.meta === "object") ? claim.meta : {}),
+    ...(claim.meta && typeof claim.meta === "object" ? claim.meta : {}),
     user_email: claim.user_email || claim.meta?.user_email,
     booking_ref: claim.booking_ref || claim.meta?.booking_ref,
     operator,
   };
 
-  // Mark queue processing-ish (still stage submit, but push next_attempt to prevent double workers)
+  // Mark queue processing-ish (temporary lock window)
   await updateQueue(claimId, {
-    attempts: (claim.meta?.submit_attempts ? Number(claim.meta.submit_attempts) : undefined), // optional
+    attempts: claim.meta?.submit_attempts
+      ? Number(claim.meta.submit_attempts)
+      : undefined,
     last_error: null,
-    next_attempt_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // temporary lock window
+    next_attempt_at: new Date(
+      Date.now() + 10 * 60 * 1000
+    ).toISOString(),
     updated_at: new Date().toISOString(),
   });
 
@@ -147,10 +188,21 @@ async function tickOnce() {
     await updateQueue(claimId, {
       stage: "submit",
       last_error: "dry_run_no_submit",
-      next_attempt_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      next_attempt_at: new Date(
+        Date.now() + 15 * 60 * 1000
+      ).toISOString(),
       updated_at: new Date().toISOString(),
     });
-    console.log(JSON.stringify({ ok: true, processed: 1, claimId, provider, live: LIVE, dry_run: true }));
+    console.log(
+      JSON.stringify({
+        ok: true,
+        processed: 1,
+        claimId,
+        provider,
+        live: LIVE,
+        dry_run: true,
+      })
+    );
     return;
   }
 
@@ -162,29 +214,49 @@ async function tickOnce() {
       error: null,
     });
     await updateQueue(claimId, {
-      stage: "check", // or create 'done' stage if you want
+      stage: "check",
       last_error: null,
-      next_attempt_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // park
+      next_attempt_at: new Date(
+        Date.now() + 24 * 60 * 60 * 1000
+      ).toISOString(),
       updated_at: new Date().toISOString(),
     });
   } else {
     // Retry with backoff
-    // Read current queue attempts
-    const { data: qrow } = await db.from("claim_queue").select("attempts").eq("claim_id", claimId).maybeSingle();
+    const { data: qrow } = await db
+      .from("claim_queue")
+      .select("attempts")
+      .eq("claim_id", claimId)
+      .maybeSingle();
+
     const attempts = (qrow?.attempts ?? 0) + 1;
     const mins = backoffMinutes(attempts);
 
-    await updateClaim(claimId, { status: "failed", error: result?.error || "submit_failed" });
+    await updateClaim(claimId, {
+      status: "failed",
+      error: result?.error || "submit_failed",
+    });
     await updateQueue(claimId, {
       stage: "submit",
       attempts,
       last_error: result?.error || "submit_failed",
-      next_attempt_at: new Date(Date.now() + mins * 60 * 1000).toISOString(),
+      next_attempt_at: new Date(
+        Date.now() + mins * 60 * 1000
+      ).toISOString(),
       updated_at: new Date().toISOString(),
     });
   }
 
-  console.log(JSON.stringify({ ok: true, processed: 1, claimId, provider, live: LIVE, result }));
+  console.log(
+    JSON.stringify({
+      ok: true,
+      processed: 1,
+      claimId,
+      provider,
+      live: LIVE,
+      result,
+    })
+  );
 }
 
 async function main() {
@@ -192,7 +264,13 @@ async function main() {
     try {
       await tickOnce();
     } catch (e) {
-      console.error(JSON.stringify({ ok: false, worker: "claim-submitter", error: e?.message || String(e) }));
+      console.error(
+        JSON.stringify({
+          ok: false,
+          worker: "claim-submitter",
+          error: e?.message || String(e),
+        })
+      );
     }
     await sleep(SLEEP_MS);
   }
