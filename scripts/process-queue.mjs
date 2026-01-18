@@ -116,9 +116,7 @@ async function tickOnce() {
     await updateQueue(claimId, {
       stage: "check",
       last_error: "claim_missing",
-      next_attempt_at: new Date(
-        Date.now() + 60 * 60 * 1000
-      ).toISOString(),
+      next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       updated_at: new Date().toISOString(),
     });
     return;
@@ -142,9 +140,7 @@ async function tickOnce() {
     await updateQueue(claimId, {
       stage: "check",
       last_error: "no_provider_for_operator",
-      next_attempt_at: new Date(
-        Date.now() + 60 * 60 * 1000
-      ).toISOString(),
+      next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       updated_at: new Date().toISOString(),
     });
     return;
@@ -160,13 +156,8 @@ async function tickOnce() {
 
   // Mark queue processing-ish (temporary lock window)
   await updateQueue(claimId, {
-    attempts: claim.meta?.submit_attempts
-      ? Number(claim.meta.submit_attempts)
-      : undefined,
     last_error: null,
-    next_attempt_at: new Date(
-      Date.now() + 10 * 60 * 1000
-    ).toISOString(),
+    next_attempt_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     updated_at: new Date().toISOString(),
   });
 
@@ -189,7 +180,7 @@ async function tickOnce() {
       stage: "submit",
       last_error: "dry_run_no_submit",
       next_attempt_at: new Date(
-        Date.now() + 15 * 60 * 1000
+        Date.now() + 6 * 60 * 60 * 1000
       ).toISOString(),
       updated_at: new Date().toISOString(),
     });
@@ -216,9 +207,7 @@ async function tickOnce() {
     await updateQueue(claimId, {
       stage: "check",
       last_error: null,
-      next_attempt_at: new Date(
-        Date.now() + 24 * 60 * 60 * 1000
-      ).toISOString(),
+      next_attempt_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       updated_at: new Date().toISOString(),
     });
   } else {
@@ -240,9 +229,7 @@ async function tickOnce() {
       stage: "submit",
       attempts,
       last_error: result?.error || "submit_failed",
-      next_attempt_at: new Date(
-        Date.now() + mins * 60 * 1000
-      ).toISOString(),
+      next_attempt_at: new Date(Date.now() + mins * 60 * 1000).toISOString(),
       updated_at: new Date().toISOString(),
     });
   }
