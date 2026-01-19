@@ -4,7 +4,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import ConnectGmailButton from "@/app/components/ConnectGmailButton";
-import TripsLive from "@/components/TripsLive"; // ✅ added import
+import TripsLive from "@/components/TripsLive";
 import RefreshIconButton from "@/app/components/RefreshIconButton";
 
 type Me = {
@@ -19,16 +19,16 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState<{ ok: boolean; claims?: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // one place to (re)load data
+  // ✅ Welcome modal (first visit)
+  const [showWelcome, setShowWelcome] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // never cache user state
       const r = await fetch("/api/me", { cache: "no-store" });
       const j: Me = await r.json();
       setMe(j);
 
-      // lightweight sanity metric (also no-store)
       const s = await fetch("/dashboard/summary", { cache: "no-store" });
       const sj = await s.json();
       setSummary(sj);
@@ -51,13 +51,10 @@ export default function DashboardPage() {
     };
   }, [load]);
 
-  // 🔁 auto-refresh after OAuth completes (from /auth/callback/signing-in)
+  // 🔁 auto-refresh after OAuth completes
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key === "fg-auth-ok") {
-        // cookie session is set; re-pull server state
-        load();
-      }
+      if (e.key === "fg-auth-ok") load();
     };
     const onFocus = () => load();
 
@@ -69,8 +66,109 @@ export default function DashboardPage() {
     };
   }, [load]);
 
+  // ✅ show welcome popup only on first visit (per browser)
+  useEffect(() => {
+    try {
+      const key = "fg_welcome_seen";
+      const seen = localStorage.getItem(key);
+      if (!seen) {
+        setShowWelcome(true);
+        localStorage.setItem(key, "1");
+      }
+    } catch {
+      // if localStorage is blocked, just don't show it
+    }
+  }, []);
+
+  // ✅ close modal helpers
+  const closeWelcome = useCallback(() => setShowWelcome(false), []);
+
+  // ESC closes modal
+  useEffect(() => {
+    if (!showWelcome) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeWelcome();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [showWelcome, closeWelcome]);
+
   return (
     <div className="container section" style={{ paddingTop: 28 }}>
+      {/* ✅ Welcome Modal */}
+      {showWelcome && (
+        <div
+          role="presentation"
+          onClick={(e) => {
+            // click backdrop to close
+            if (e.target === e.currentTarget) closeWelcome();
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="fgWelcomeTitle"
+            style={{
+              width: "min(560px, 100%)",
+              background: "#fff",
+              borderRadius: 14,
+              boxShadow: "0 20px 60px rgba(0,0,0,0.35)",
+              padding: 16,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <h2 id="fgWelcomeTitle" style={{ margin: 0, fontSize: "1.25rem" }}>
+                ✅ Welcome to FareGuard
+              </h2>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={closeWelcome}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  fontSize: "1.25rem",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <p style={{ margin: "12px 0" }}>
+                <strong>Thanks for checking us out!</strong> This is an early version of the FareGuard dashboard. While
+                the full service is still being built, you can already connect your Gmail and view your train tickets
+                here.
+              </p>
+              <p style={{ margin: "12px 0" }}>More features are on the way — stay tuned</p>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+              <button
+                type="button"
+                onClick={closeWelcome}
+                className="btn btnPrimary"
+                style={{ padding: "10px 14px" }}
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <h1 className="h1" style={{ marginBottom: 6, flex: "1 1 auto" }}>
           Your journeys & refund status
@@ -87,18 +185,16 @@ export default function DashboardPage() {
 
       {!loading && me && !me.authenticated && (
         <div className="card" style={{ marginTop: 16 }}>
-          <span className="badge" style={{ marginBottom: 8 }}>Setup</span>
-          <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>
-            Finish connecting Gmail
-          </h3>
+          <span className="badge" style={{ marginBottom: 8 }}>
+            Setup
+          </span>
+          <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>Finish connecting Gmail</h3>
           <p className="small" style={{ marginBottom: 12 }}>
             Connect your Gmail (read-only) so we can detect e-tickets and file Delay Repay.
           </p>
 
-          {/* ✅ 1-click connect here (redirects to /auth/callback/signing-in and bounces back) */}
           <ConnectGmailButton label="Connect Gmail (1–click)" className="btn btnPrimary" next="/dashboard" />
 
-          {/* Optional: keep a fallback link just in case */}
           <p className="small" style={{ marginTop: 10 }}>
             Having trouble? <Link href="/?connect=1">Try from the homepage</Link>.
           </p>
@@ -108,18 +204,13 @@ export default function DashboardPage() {
       {!loading && me && me.authenticated && (
         <>
           <div className="card" style={{ marginTop: 16 }}>
-            <span
-              className="badge"
-              style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}
-            >
+            <span className="badge" style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}>
               Live
             </span>
             <h3 style={{ margin: "4px 0 8px", color: "var(--fg-navy)" }}>
               Welcome{me.email ? `, ${me.email}` : ""}.
             </h3>
-            <p className="small">
-              We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.
-            </p>
+            <p className="small">We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.</p>
 
             {summary?.ok && (
               <p className="small" style={{ marginTop: 8 }}>
@@ -128,7 +219,6 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* 👇 Added TripsLive under the authenticated card */}
           <TripsLive />
         </>
       )}
