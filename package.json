@@ -11,7 +11,8 @@
     "worker:darwin:trip-linker": "node workers/darwin-trip-linker.mjs",
     "worker:darwin:retention": "node workers/darwin-retention.mjs",
     "worker:claims:check": "node workers/claim-checker.mjs",
-    "worker:claims:submit": "node scripts/process-queue.mjs"
+    "worker:claims:submit": "node scripts/process-queue.mjs",
+    "worker:claims:notify": "node workers/claim-notifier.mjs"
 
   },
   "dependencies": {
