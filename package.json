@@ -13,7 +13,6 @@
     "worker:claims:check": "node workers/claim-checker.mjs",
     "worker:claims:submit": "node scripts/process-queue.mjs",
     "worker:claims:notify": "node workers/claim-notifier.mjs"
-
   },
   "dependencies": {
     "@supabase/ssr": "^0.7.0",
@@ -26,6 +25,7 @@
     "openai": "^4.0.0",
     "react": "18.2.0",
     "react-dom": "18.2.0",
+    "resend": "^6.8.0",
     "swr": "^2.2.5"
   },
   "devDependencies": {
