@@ -1,296 +1,340 @@
 // workers/claim-notifier.mjs
-// Production-safe notifier worker for FareGuard v1
-// - Pulls queued notifications (claims_pop_notify)
-// - Fetches CTA + operator URL (claim_get_cta)
-// - Sends email via Resend
-// - Marks claim notify_status=sent or failed with backoff
+// Queue-based notifier for FareGuard V1 (email CTA to Delay Repay).
+// - Normal mode: pops due claims via public.claims_pop_notify(), sends via Resend, updates claims notify_* fields.
+// - Test mode: if NOTIFY_TEST_CLAIM_ID is set, sends ONE email for that claim_id and exits (NO DB writes).
 //
-// Requires env:
-// SUPABASE_URL
-// SUPABASE_SERVICE_ROLE_KEY
-// RESEND_API_KEY
-// EMAIL_FROM  (e.g. "FareGuard <notify@fareguard.co.uk>")
-// EMAIL_REPLY_TO (optional)
-// APP_PUBLIC_URL (optional) e.g. https://fareguard.co.uk
-// NOTIFY_BATCH (optional, default 5)
-// NOTIFY_SLEEP_MS (optional, default 15000)
+// Env vars required:
+//   SUPABASE_URL
+//   SUPABASE_SERVICE_ROLE_KEY
+//   RESEND_API_KEY
+//   EMAIL_FROM                 e.g. 'FareGuard <hello@notify.fareguard.co.uk>'
+// Optional:
+//   EMAIL_REPLY_TO             e.g. 'support@fareguard.co.uk'
+//   APP_PUBLIC_URL             e.g. 'https://fareguard.co.uk' (used for dashboard link)
+//   NOTIFY_SLEEP_MS            default 15000
+//   NOTIFY_BATCH               default 1
+//   NOTIFY_TEST_CLAIM_ID       uuid - send once + exit (no DB writes)
+//   NOTIFY_TEST_TO_EMAIL       overrides recipient in test mode
 
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const resendKey = process.env.RESEND_API_KEY;
 
+const resendKey = process.env.RESEND_API_KEY;
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_REPLY_TO = process.env.EMAIL_REPLY_TO || null;
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || "";
+const SLEEP_MS = parseInt(process.env.NOTIFY_SLEEP_MS || "15000", 10);
+const BATCH = parseInt(process.env.NOTIFY_BATCH || "1", 10);
 
-const NOTIFY_BATCH = Number(process.env.NOTIFY_BATCH || 5);
-const SLEEP_MS = Number(process.env.NOTIFY_SLEEP_MS || 15000);
+const TEST_CLAIM_ID = (process.env.NOTIFY_TEST_CLAIM_ID || "").trim();
+const TEST_TO_EMAIL = (process.env.NOTIFY_TEST_TO_EMAIL || "").trim();
 
-if (!supabaseUrl || !serviceKey) {
-  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  process.exit(1);
-}
-if (!resendKey) {
-  console.error("Missing RESEND_API_KEY");
-  process.exit(1);
-}
-if (!EMAIL_FROM) {
-  console.error("Missing EMAIL_FROM");
-  process.exit(1);
+function must(val, name) {
+  if (!val) {
+    console.error(JSON.stringify({ ok: false, error: `Missing ${name}` }));
+    process.exit(1);
+  }
 }
 
-const db = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
+must(supabaseUrl, "SUPABASE_URL");
+must(serviceKey, "SUPABASE_SERVICE_ROLE_KEY");
+must(resendKey, "RESEND_API_KEY");
+must(EMAIL_FROM, "EMAIL_FROM");
+
+const db = createClient(supabaseUrl, serviceKey, {
+  auth: { persistSession: false },
+});
 const resend = new Resend(resendKey);
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function minutesToMs(mins) {
-  return mins * 60 * 1000;
+function safeText(x, fallback = "") {
+  if (x === null || x === undefined) return fallback;
+  return String(x);
 }
 
-// Gentle exponential-ish backoff with cap: 2, 5, 10, 20, 40, 60 mins...
-function notifyBackoffMinutes(attempts) {
-  const seq = [2, 5, 10, 20, 40, 60];
-  return seq[Math.min(seq.length - 1, Math.max(0, attempts - 1))];
-}
-
-function formatOperator(op) {
-  return op || "your train operator";
-}
-
-function safeUrl(u) {
+function fmtDateTime(isoOrDate) {
   try {
-    if (!u) return null;
-    // allow https only
-    const x = new URL(u);
-    if (x.protocol !== "https:") return null;
-    return x.toString();
+    const d = new Date(isoOrDate);
+    if (Number.isNaN(d.getTime())) return safeText(isoOrDate, "");
+    return d.toLocaleString("en-GB", { timeZone: "Europe/London" });
   } catch {
-    return null;
+    return safeText(isoOrDate, "");
   }
 }
 
-function buildEmailHtml({ operator, claimUrl, dashboardUrl }) {
-  const op = formatOperator(operator);
+function buildEmail({ claim, cta }) {
+  const meta = (claim?.meta && typeof claim.meta === "object") ? claim.meta : {};
 
-  const btnStyle =
-    "display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;" +
-    "background:#111827;color:#ffffff;font-weight:700;";
+  const operator = safeText(cta?.operator || claim?.operator || meta.operator, "Unknown operator");
+  const claimUrl = safeText(cta?.claim_url, "");
 
-  const boxStyle =
-    "border:1px solid #e5e7eb;border-radius:14px;padding:16px;background:#ffffff;";
+  const origin = safeText(claim?.origin || meta.origin, meta.origin_crs || "");
+  const destination = safeText(claim?.destination || meta.destination, meta.destination_crs || "");
+  const departPlanned = claim?.depart_planned || meta.depart_planned || "";
+  const arrivePlanned = claim?.arrive_planned || meta.arrive_planned || "";
+  const delayMinutes = meta.delay_minutes ?? meta.late_arrive_min ?? null;
 
-  return `
-  <div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:600px;margin:0 auto;line-height:1.45;color:#111827;">
-    <h2 style="margin:0 0 12px 0;">Your Delay Repay claim is ready</h2>
+  const dashboardUrl =
+    APP_PUBLIC_URL
+      ? `${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard`
+      : "";
 
-    <div style="${boxStyle}">
-      <p style="margin:0 0 10px 0;">
-        We’ve checked your journey and it looks eligible to claim Delay Repay from <strong>${op}</strong>.
-      </p>
+  // Subject: keep it simple for V1
+  const subject = `Your Delay Repay claim looks ready (${operator})`;
 
-      <p style="margin:0 0 14px 0;">
-        Use the button below to open the official claim page:
-      </p>
+  const title = "Your claim looks ready";
+  const journeyLine =
+    (origin || destination)
+      ? `${origin || "Origin"} → ${destination || "Destination"}`
+      : "Your journey";
 
-      <p style="margin:0 0 16px 0;">
-        <a href="${claimUrl}" style="${btnStyle}" target="_blank" rel="noopener noreferrer">
-          Claim on ${op}
+  const details = [
+    departPlanned ? `Planned depart: ${fmtDateTime(departPlanned)}` : null,
+    arrivePlanned ? `Planned arrive: ${fmtDateTime(arrivePlanned)}` : null,
+    (delayMinutes !== null && delayMinutes !== undefined && delayMinutes !== "")
+      ? `Delay (estimated): ${safeText(delayMinutes)} min`
+      : null,
+  ].filter(Boolean);
+
+  const detailsHtml = details.length
+    ? `<ul style="margin:12px 0 0 18px;padding:0;">${details.map((d) => `<li>${d}</li>`).join("")}</ul>`
+    : "";
+
+  const ctaHtml = claimUrl
+    ? `
+      <div style="margin-top:18px;">
+        <a href="${claimUrl}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:12px 16px;border-radius:10px;font-weight:600;">
+          Claim Delay Repay
         </a>
-      </p>
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:#555;">
+        If the button doesn't work, copy/paste: <span style="word-break:break-all;">${claimUrl}</span>
+      </div>
+    `
+    : `
+      <div style="margin-top:18px;padding:12px;border:1px solid #f0c;border-radius:10px;background:#fff5fb;">
+        We couldn't find the Delay Repay link for <b>${operator}</b> yet.
+        Please reply to this email and we’ll add it.
+      </div>
+    `;
 
-      ${
-        dashboardUrl
-          ? `<p style="margin:0;color:#374151;font-size:14px;">
-               Want to track this in FareGuard? <a href="${dashboardUrl}" target="_blank" rel="noopener noreferrer">Open your dashboard</a>.
-             </p>`
-          : ""
-      }
+  const dashHtml = dashboardUrl
+    ? `<div style="margin-top:18px;font-size:12px;color:#555;">Dashboard: <a href="${dashboardUrl}">${dashboardUrl}</a></div>`
+    : "";
+
+  const html = `
+  <div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:620px;margin:0 auto;padding:18px;">
+    <div style="font-size:12px;color:#666;margin-bottom:8px;">FareGuard</div>
+    <h2 style="margin:0 0 8px 0;font-size:20px;">${title}</h2>
+    <div style="font-size:14px;color:#222;">
+      <div style="font-weight:600;">${journeyLine}</div>
+      ${detailsHtml}
+      ${ctaHtml}
+      ${dashHtml}
+      <hr style="margin:18px 0;border:none;border-top:1px solid #eee;" />
+      <div style="font-size:12px;color:#666;line-height:1.4;">
+        This is an automated reminder. You’re always in control — you submit the claim on the operator’s site.
+      </div>
     </div>
+  </div>`;
 
-    <p style="margin:16px 0 0 0;color:#6b7280;font-size:12px;">
-      You’re being sent to the operator’s official Delay Repay site. FareGuard doesn’t submit this claim automatically in v1.
-    </p>
-  </div>
-  `;
+  const text = [
+    "FareGuard",
+    "",
+    subject,
+    "",
+    journeyLine,
+    ...details,
+    "",
+    claimUrl ? `Claim here: ${claimUrl}` : `No claim URL found for operator: ${operator}`,
+    dashboardUrl ? `Dashboard: ${dashboardUrl}` : "",
+  ].filter(Boolean).join("\n");
+
+  return { subject, html, text };
 }
 
-async function popNotifyIds(limit) {
+async function rpcClaimsPopNotify(limit) {
   const { data, error } = await db.rpc("claims_pop_notify", { p_limit: limit });
   if (error) throw error;
+  // returns [{ claim_id: uuid }, ...]
   return (data || []).map((r) => r.claim_id);
 }
 
-async function getCta(claimId) {
+async function rpcClaimGetCta(claimId) {
   const { data, error } = await db.rpc("claim_get_cta", { p_claim_id: claimId });
   if (error) throw error;
-  // claim_get_cta returns TABLE, so supabase returns an array
-  const row = Array.isArray(data) ? data[0] : data;
-  return row || null;
+  // returns array with one row or empty
+  return (data && data[0]) ? data[0] : null;
 }
 
-async function markSent(claimId, providerId, messageId) {
-  const patch = {
-    notify_status: "sent",
-    notified_at: new Date().toISOString(),
-    notify_last_error: null,
-    notify_attempts: 0, // reset attempts after success
-    updated_at: new Date().toISOString(),
-  };
+async function getClaimRow(claimId) {
+  const { data, error } = await db
+    .from("claims")
+    .select("id, trip_id, user_email, status, meta, operator, origin, destination, depart_planned, arrive_planned, notify_status, notify_attempts")
+    .eq("id", claimId)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
 
-  // optional columns (only if you added them)
-  if (providerId) patch.notify_provider_id = providerId;
-  if (messageId) patch.notify_message_id = messageId;
-
+async function patchClaim(claimId, patch) {
   const { error } = await db.from("claims").update(patch).eq("id", claimId);
   if (error) throw error;
 }
 
-async function markFailed(claimId, errMsg) {
-  // Fetch current attempts
-  const { data: cur, error: e1 } = await db
-    .from("claims")
-    .select("notify_attempts")
-    .eq("id", claimId)
-    .maybeSingle();
-  if (e1) throw e1;
-
-  const attempts = Number(cur?.notify_attempts || 0) + 1;
-  const backoffMins = notifyBackoffMinutes(attempts);
-
-  const { error } = await db
-    .from("claims")
-    .update({
-      notify_status: "failed",
-      notify_attempts: attempts,
-      notify_last_error: String(errMsg || "notify_failed").slice(0, 500),
-      notify_queued_at: new Date(Date.now() + minutesToMs(backoffMins)).toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", claimId);
-
-  if (error) throw error;
-}
-
-async function suppress(claimId, reason) {
-  const { error } = await db
-    .from("claims")
-    .update({
-      notify_status: "suppressed",
-      notify_last_error: String(reason || "suppressed").slice(0, 500),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", claimId);
-  if (error) throw error;
-}
-
-async function sendOne(claimId) {
-  const cta = await getCta(claimId);
-
-  if (!cta) {
-    await suppress(claimId, "cta_missing");
-    return { claimId, ok: false, suppressed: true, reason: "cta_missing" };
-  }
-
-  const to = (cta.user_email || "").trim();
-  if (!to) {
-    await suppress(claimId, "missing_user_email");
-    return { claimId, ok: false, suppressed: true, reason: "missing_user_email" };
-  }
-
-  const claimUrl = safeUrl(cta.claim_url);
-  if (!claimUrl) {
-    await suppress(claimId, "missing_or_invalid_claim_url");
-    return { claimId, ok: false, suppressed: true, reason: "missing_or_invalid_claim_url" };
-  }
-
-  const operator = cta.operator || "";
-  const dashboardUrl = APP_PUBLIC_URL
-    ? safeUrl(`${APP_PUBLIC_URL.replace(/\/+$/, "")}/dashboard`)
-    : null;
-
-  const subject = `Your Delay Repay claim is ready (${formatOperator(operator)})`;
-  const html = buildEmailHtml({ operator, claimUrl, dashboardUrl });
-
-  const emailPayload = {
+async function sendEmail({ to, subject, html, text }) {
+  const payload = {
     from: EMAIL_FROM,
     to,
     subject,
     html,
-    ...(EMAIL_REPLY_TO ? { reply_to: EMAIL_REPLY_TO } : {}),
+    text,
   };
+  if (EMAIL_REPLY_TO) payload.reply_to = EMAIL_REPLY_TO;
 
-  const res = await resend.emails.send(emailPayload);
+  const resp = await resend.emails.send(payload);
+  return resp;
+}
 
-  if (res?.error) {
-    throw new Error(res.error.message || "resend_error");
+async function processOneClaim(claimId, { testMode = false } = {}) {
+  const claim = await getClaimRow(claimId);
+  if (!claim) {
+    if (!testMode) {
+      await patchClaim(claimId, {
+        notify_status: "failed",
+        notify_attempts: 999,
+        notify_last_error: "claim_row_missing",
+        updated_at: new Date().toISOString(),
+      });
+    }
+    return { ok: false, error: "claim_row_missing" };
   }
 
-  // Resend returns id like { id: '...' }
-  await markSent(claimId, "resend", res?.data?.id || null);
+  // Only email if we can address it.
+  const toEmail = (testMode && TEST_TO_EMAIL)
+    ? TEST_TO_EMAIL
+    : claim.user_email;
 
-  return { claimId, ok: true, messageId: res?.data?.id || null };
+  if (!toEmail) {
+    if (!testMode) {
+      await patchClaim(claimId, {
+        notify_status: "suppressed",
+        notify_last_error: "missing_user_email",
+        updated_at: new Date().toISOString(),
+      });
+    }
+    return { ok: false, error: "missing_user_email" };
+  }
+
+  const cta = await rpcClaimGetCta(claimId);
+
+  // If no claim_url, suppress in real mode (don’t spam users with broken CTA).
+  const claimUrl = cta?.claim_url || null;
+  if (!claimUrl && !testMode) {
+    await patchClaim(claimId, {
+      notify_status: "suppressed",
+      notify_last_error: "missing_claim_url_for_operator",
+      updated_at: new Date().toISOString(),
+    });
+    return { ok: false, error: "missing_claim_url_for_operator", operator: cta?.operator || null };
+  }
+
+  const { subject, html, text } = buildEmail({ claim, cta });
+
+  const res = await sendEmail({ to: toEmail, subject, html, text });
+
+  // Resend returns { data: { id }, error } style
+  const messageId = res?.data?.id || null;
+  const sendErr = res?.error ? (res.error.message || JSON.stringify(res.error)) : null;
+
+  if (sendErr) {
+    if (!testMode) {
+      const attempts = (claim.notify_attempts ?? 0) + 1;
+      const backoffMin = Math.min(60, Math.max(2, attempts + 1));
+      await patchClaim(claimId, {
+        notify_status: "failed",
+        notify_attempts: attempts,
+        notify_last_error: sendErr,
+        notify_queued_at: new Date(Date.now() + backoffMin * 60 * 1000).toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+    return { ok: false, error: sendErr, messageId };
+  }
+
+  if (!testMode) {
+    await patchClaim(claimId, {
+      notify_status: "sent",
+      notified_at: new Date().toISOString(),
+      notify_last_error: null,
+      notify_provider_id: "resend",
+      notify_message_id: messageId,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  return { ok: true, messageId, to: toEmail, operator: cta?.operator || null, claimUrl: claimUrl || null };
 }
 
 async function tickOnce() {
-  const ids = await popNotifyIds(NOTIFY_BATCH);
+  // TEST MODE: send one email and exit (no DB writes)
+  if (TEST_CLAIM_ID) {
+    const out = await processOneClaim(TEST_CLAIM_ID, { testMode: true });
+    console.log(JSON.stringify({ ok: true, processed: 1, source: "notify.test", test_claim_id: TEST_CLAIM_ID, result: out }));
+    process.exit(0);
+  }
 
-  if (!ids.length) {
+  const claimIds = await rpcClaimsPopNotify(BATCH);
+  if (!claimIds.length) {
     console.log(JSON.stringify({ ok: true, processed: 0, source: "notify.none" }));
     return;
   }
 
-  let okCount = 0;
-  let failCount = 0;
-  let suppressedCount = 0;
-
-  for (const claimId of ids) {
+  let processed = 0;
+  for (const claimId of claimIds) {
+    // Mark as "in-flight" (leased already by pop function); we just attempt send.
+    let out;
     try {
-      const out = await sendOne(claimId);
-      if (out.ok) okCount += 1;
-      else if (out.suppressed) suppressedCount += 1;
-      else failCount += 1;
+      out = await processOneClaim(claimId, { testMode: false });
     } catch (e) {
-      failCount += 1;
-      await markFailed(claimId, e?.message || String(e));
+      const msg = e?.message || String(e);
+      // best-effort mark failed
+      try {
+        const claim = await getClaimRow(claimId);
+        const attempts = (claim?.notify_attempts ?? 0) + 1;
+        const backoffMin = Math.min(60, Math.max(2, attempts + 1));
+        await patchClaim(claimId, {
+          notify_status: "failed",
+          notify_attempts: attempts,
+          notify_last_error: msg,
+          notify_queued_at: new Date(Date.now() + backoffMin * 60 * 1000).toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      } catch {}
+      out = { ok: false, error: msg };
     }
+
+    processed += 1;
+    console.log(JSON.stringify({ ok: true, processed: 1, source: "notify.send", claim_id: claimId, result: out }));
   }
 
-  console.log(
-    JSON.stringify({
-      ok: true,
-      processed: ids.length,
-      sent: okCount,
-      failed: failCount,
-      suppressed: suppressedCount,
-      source: "notify.batch",
-    })
-  );
+  console.log(JSON.stringify({ ok: true, processed, source: "notify.batch" }));
 }
 
 async function main() {
   while (true) {
-    try {
-      await tickOnce();
-    } catch (e) {
-      console.error(
-        JSON.stringify({
-          ok: false,
-          worker: "claim-notifier",
-          error: e?.message || String(e),
-        })
-      );
-    }
+    await tickOnce();
     await sleep(SLEEP_MS);
   }
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(JSON.stringify({ ok: false, worker: "claim-notifier", error: e?.message || String(e) }));
   process.exit(1);
 });
