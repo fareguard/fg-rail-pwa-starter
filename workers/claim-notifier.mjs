@@ -79,7 +79,7 @@ function formatUK(dt) {
   });
 }
 
-export function buildClaimReadyEmail({
+function buildClaimReadyEmail({
   appUrl,
   claimId,
   operator,
@@ -102,7 +102,7 @@ export function buildClaimReadyEmail({
     ? `Your journey ${origin || ""} → ${destination || ""} looks eligible. Claim on ${
         operator || "the operator"
       } site.`
-    : `Your journey looks eligible. We need the Delay Repay link for ${
+    : `Your journey looks eligible. We’re fetching the Delay Repay link for ${
         operator || "the operator"
       }.`;
 
@@ -132,8 +132,8 @@ export function buildClaimReadyEmail({
         padding:12px 14px;
         font-size:14px;
         ">
-        We couldn’t find the Delay Repay link for <strong>${safeOp}</strong> yet.
-        Reply to this email with the correct link and we’ll add it.
+        We’re fetching the Delay Repay link for <strong>${safeOp}</strong>.
+        For now, open your dashboard and you’ll see the correct link there shortly.
       </div>
     `;
 
@@ -282,6 +282,20 @@ async function processOneClaim(claimId, { testMode = false } = {}) {
     return { ok: false, error: "claim_row_missing" };
   }
 
+  // C) Bulletproof guard: only email if claim is actually ready.
+  if (claim.status !== "ready") {
+    // don’t send, put it back
+    if (!testMode) {
+      await patchClaim(claimId, {
+        notify_status: "failed",
+        notify_last_error: "claim_not_ready",
+        notify_queued_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+    return { ok: false, error: "claim_not_ready" };
+  }
+
   // Only email if we can address it.
   const toEmail = testMode && TEST_TO_EMAIL ? TEST_TO_EMAIL : claim.user_email;
 
@@ -301,7 +315,7 @@ async function processOneClaim(claimId, { testMode = false } = {}) {
 
   // Build email params (Step 1C)
   const email = buildClaimReadyEmail({
-    appUrl: process.env.APP_PUBLIC_URL,
+    appUrl: APP_PUBLIC_URL,
     claimId: cta?.claim_id || claim.id,
     operator: cta?.operator,
     claimUrl: cta?.claim_url,
