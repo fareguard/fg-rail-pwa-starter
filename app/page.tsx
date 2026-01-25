@@ -62,6 +62,9 @@ export default function Home() {
               what you’re owed — because we know delays are frustrating enough.
             </p>
 
+            <div className="ctaRow">
+              <ConnectGmailButton />
+            </div>
 
             <p className="small" style={{ marginTop: 8 }}>
               Works with e-tickets stored on Gmail • All UK operators supported
