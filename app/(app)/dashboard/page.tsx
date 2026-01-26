@@ -128,7 +128,7 @@ export default function DashboardPage() {
           >
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <h2 id="fgWelcomeTitle" style={{ margin: 0, fontSize: "1.25rem" }}>
-                ✅ Welcome to FareGuard
+                Welcome to FareGuard! 
               </h2>
               <button
                 type="button"
@@ -148,11 +148,10 @@ export default function DashboardPage() {
 
             <div style={{ marginTop: 10 }}>
               <p style={{ margin: "12px 0" }}>
-                <strong>Thanks for checking us out!</strong> This is an early version of the FareGuard dashboard. While
-                the full service is still being built, you can already connect your Gmail and view your train tickets
-                here.
+                FareGuard automatically tracks your e-tickets, monitors delays, 
+                and reminds you when you’re eligible for Delay Repay — so you never miss money you’re owed.
               </p>
-              <p style={{ margin: "12px 0" }}>More features are on the way — stay tuned</p>
+              <p style={{ margin: "12px 0" }}>We’re continuously improving FareGuard with new features and updates.</p>
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
