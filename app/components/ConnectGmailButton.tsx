@@ -4,7 +4,7 @@
 import { useState, useCallback } from "react";
 
 export default function ConnectGmailButton({
-  label = "Connect Gmail (1–click)",
+  label = "Connect Gmail",
   next = "/dashboard",
   className = "btn btnPrimary",
 }: {
