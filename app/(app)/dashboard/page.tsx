@@ -175,7 +175,7 @@ export default function DashboardPage() {
         </h1>
         <RefreshIconButton />
       </div>
-      <p className="sub">We’re watching your tickets and filing Delay Repay when eligible.</p>
+      <p className="sub">We're tracking your tickets and checking for eligible delays.</p>
 
       {loading && (
         <div className="card" style={{ marginTop: 16 }}>
@@ -190,7 +190,7 @@ export default function DashboardPage() {
           </span>
           <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>Finish connecting Gmail</h3>
           <p className="small" style={{ marginBottom: 12 }}>
-            Connect your Gmail (read-only) so we can detect e-tickets and file Delay Repay.
+            Connect your Gmail (read-only) so we can find your tickets and track delays automatically.
           </p>
 
           <ConnectGmailButton label="Connect Gmail (1–click)" className="btn btnPrimary" next="/dashboard" />
