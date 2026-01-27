@@ -54,12 +54,19 @@ function safeJsonParse(s) {
 
 // Cheap prefilter (avoid parsing heartbeats/failures/etc)
 function looksLikeSchedule(bytes) {
-  return (
-    bytes.includes('"uR"') &&
-    bytes.includes('"TS"') &&
-    bytes.includes('"ssd":"') &&
-    bytes.includes('"Location"')
-  );
+  if (!bytes || typeof bytes !== "string") return false;
+
+  // Must be an update root
+  if (!bytes.includes('"uR"')) return false;
+
+  // TS updates OR schedule array updates (both can contain Location)
+  // Avoid requiring "ssd":" literally — some messages won't contain it in that exact way.
+  const hasTS = bytes.includes('"TS"');
+  const hasScheduleArr = bytes.includes('"schedule"');
+
+  // Most useful messages include Location, but don't hard-require it here either.
+  // We'll validate after parsing.
+  return hasTS || hasScheduleArr;
 }
 
 function normalizeLocations(loc) {
