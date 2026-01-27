@@ -64,11 +64,38 @@ function looksLikeSchedule(bytes) {
   );
 }
 
-function normalizeLocations(loc) {
-  if (!loc) return [];
-  if (Array.isArray(loc)) return loc;
-  if (typeof loc === "object") return [loc];
+/**
+ * Step 2 — “bulletproof” normalization helpers
+ * Darwin payloads vary a lot across feeds/versions.
+ */
+function normalizeLocations(x) {
+  if (!x) return [];
+  if (Array.isArray(x)) return x;
+  if (typeof x === "object") return [x];
   return [];
+}
+
+function getLocationsFromSchedule(TS) {
+  // Darwin payloads vary: Location, location, locations
+  return normalizeLocations(TS?.Location || TS?.location || TS?.locations);
+}
+
+function getSSD(decoded, TS) {
+  // sometimes ssd is on TS, sometimes on uR, sometimes deeper
+  return TS?.ssd ?? decoded?.uR?.ssd ?? null;
+}
+
+function getRID(TS) {
+  return TS?.rid ?? TS?.RID ?? null;
+}
+
+function getUID(TS) {
+  return TS?.uid ?? TS?.UID ?? null;
+}
+
+function getTIPLOC(loc) {
+  // common variants: tpl, tiploc, tplx
+  return loc?.tpl ?? loc?.tiploc ?? loc?.tplx ?? null;
 }
 
 // Extract both TS (single) and schedule[] (array or single object)
@@ -308,22 +335,25 @@ async function processOnce() {
       const TS0 = schedules[0];
       console.log("[darwin-processor] sample schedule", {
         id: m.id,
-        rid: TS0?.rid,
-        uid: TS0?.uid,
-        ssd: TS0?.ssd,
-        hasLocation: !!TS0?.Location,
-        locationType: Array.isArray(TS0?.Location) ? "array" : typeof TS0?.Location,
+        rid: getRID(TS0),
+        uid: getUID(TS0),
+        ssd: getSSD(decoded, TS0),
+        hasLocation: !!(TS0?.Location || TS0?.location || TS0?.locations),
+        locationType: Array.isArray(TS0?.Location || TS0?.location || TS0?.locations)
+          ? "array"
+          : typeof (TS0?.Location || TS0?.location || TS0?.locations),
         countInMessage: schedules.length,
       });
       debugPrinted++;
     }
 
     for (const TS of schedules) {
-      const rid = TS?.rid ?? null;
-      const uid = TS?.uid ?? null;
-      const ssd = TS?.ssd ?? null;
+      // --- patched: bulletproof keys ---
+      const rid = getRID(TS);
+      const uid = getUID(TS);
+      const ssd = getSSD(decoded, TS);
 
-      const locs = normalizeLocations(TS?.Location);
+      const locs = getLocationsFromSchedule(TS);
       if (!rid || !ssd || !locs.length) {
         stats.skipped.no_locations++;
         continue;
@@ -332,7 +362,8 @@ async function processOnce() {
       for (let idx = 0; idx < locs.length; idx++) {
         const loc = locs[idx];
 
-        const tiploc = loc.tpl ?? null;
+        // --- patched: bulletproof tiploc field ---
+        const tiploc = getTIPLOC(loc);
         const tiploc_norm = normalizeTiplocNorm(tiploc);
         const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
 
