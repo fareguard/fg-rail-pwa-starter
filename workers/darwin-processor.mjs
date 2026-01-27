@@ -287,7 +287,24 @@ async function processOnce() {
       continue;
     }
 
+    // Step D — Add one debug log so we know it’s parsing
     const TS = decoded?.uR?.TS;
+    if (!TS) {
+      markIds.push(m.id);
+      continue;
+    }
+
+    if (stats.examined <= 3) {
+      console.log("[darwin-processor] sample TS", {
+        id: m.id,
+        rid: TS.rid,
+        uid: TS.uid,
+        ssd: TS.ssd,
+        hasLocation: !!TS.Location,
+        locationType: Array.isArray(TS.Location) ? "array" : typeof TS.Location,
+      });
+    }
+
     if (!TS) {
       stats.skipped.no_ts++;
       markIds.push(m.id);
