@@ -59,7 +59,6 @@ function looksLikeSchedule(bytes) {
     typeof bytes === "string" &&
     bytes.includes('"uR"') &&
     bytes.includes('"ssd"') &&
-    bytes.includes('"Location"') &&
     (bytes.includes('"TS"') || bytes.includes('"schedule"'))
   );
 }
@@ -98,23 +97,6 @@ function getTIPLOC(loc) {
   return loc?.tpl ?? loc?.tiploc ?? loc?.tplx ?? null;
 }
 
-// Extract both TS (single) and schedule[] (array or single object)
-function extractSchedules(decoded) {
-  const ur = decoded?.uR;
-  if (!ur) return [];
-
-  // TS can be a single schedule-like object
-  if (ur.TS && typeof ur.TS === "object") return [ur.TS];
-
-  // schedule can be an array of schedule objects
-  if (Array.isArray(ur.schedule)) return ur.schedule;
-
-  // sometimes schedule is a single object
-  if (ur.schedule && typeof ur.schedule === "object") return [ur.schedule];
-
-  return [];
-}
-
 function normalizeTiplocNorm(tiploc) {
   if (typeof tiploc !== "string") return null;
   const v = tiploc.trim().toUpperCase();
@@ -142,6 +124,36 @@ function actualArrStr(loc) {
 }
 function actualDepStr(loc) {
   return pickFirstString(loc?.dep?.at, loc?.dep?.et, loc?.dep?.wet);
+}
+
+// ===== NEW: schedule[] helpers (CIS schedule mode) =====
+function normalizeScheduleItems(decoded) {
+  const s = decoded?.uR?.schedule;
+  if (Array.isArray(s)) return s;
+  return [];
+}
+
+function scheduleItemToLocations(item) {
+  // CIS schedule shape: OR + IP[] + DT (+ sometimes OPOR/OPDT)
+  const out = [];
+
+  if (item?.OR) out.push(item.OR);
+  if (Array.isArray(item?.IP)) out.push(...item.IP);
+  else if (item?.IP) out.push(item.IP);
+  if (item?.DT) out.push(item.DT);
+
+  // Some messages use OPOR/OPDT (non-passenger etc) — include if present
+  if (item?.OPOR) out.push(item.OPOR);
+  if (item?.OPDT) out.push(item.OPDT);
+
+  return out;
+}
+
+function getSchedulePlannedArrStr(loc) {
+  return pickFirstString(loc?.pta, loc?.wta);
+}
+function getSchedulePlannedDepStr(loc) {
+  return pickFirstString(loc?.ptd, loc?.wtd);
 }
 
 function parseDarwinTime(t) {
@@ -293,8 +305,6 @@ async function processOnce() {
   const eventRows = [];
   const callByKey = new Map(); // rid::crs -> merged row
 
-  let debugPrinted = 0;
-
   for (const m of msgs || []) {
     if (Date.now() - started > MAX_RUN_MS) {
       stats.skipped.timebox++;
@@ -323,131 +333,205 @@ async function processOnce() {
       continue;
     }
 
-    const schedules = extractSchedules(decoded);
-    if (!schedules.length) {
-      stats.skipped.no_ts++;
+    const schedules = normalizeScheduleItems(decoded);
+
+    if (schedules.length) {
+      // ===== CIS SCHEDULE MODE (planned only) =====
+      for (const item of schedules) {
+        if (Date.now() - started > MAX_RUN_MS) {
+          stats.skipped.timebox++;
+          break;
+        }
+
+        const rid = item?.rid ?? null;
+        const uid = item?.uid ?? null;
+        const ssd = item?.ssd ?? null;
+
+        const locs = scheduleItemToLocations(item);
+        if (!rid || !ssd || !locs.length) continue;
+
+        for (let idx = 0; idx < locs.length; idx++) {
+          const loc = locs[idx];
+
+          const tiploc = getTIPLOC(loc);
+          const tiploc_norm = normalizeTiplocNorm(tiploc);
+          const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+
+          const pta = getSchedulePlannedArrStr(loc);
+          const ptd = getSchedulePlannedDepStr(loc);
+
+          const plannedArr = toTs(ssd, pta);
+          const plannedDep = toTs(ssd, ptd);
+
+          // In schedule messages we don't have actual times -> leave actual_time/late_minutes null
+          if (pta) {
+            eventRows.push({
+              msg_id: m.id,
+              loc_index: idx,
+              received_at: m.received_at,
+              tiploc,
+              tiploc_norm,
+              crs,
+              rid,
+              uid,
+              event_type: "ARR",
+              planned_time: plannedArr,
+              actual_time: null,
+              late_minutes: null,
+              raw: loc,
+            });
+          }
+
+          if (ptd) {
+            eventRows.push({
+              msg_id: m.id,
+              loc_index: idx,
+              received_at: m.received_at,
+              tiploc,
+              tiploc_norm,
+              crs,
+              rid,
+              uid,
+              event_type: "DEP",
+              planned_time: plannedDep,
+              actual_time: null,
+              late_minutes: null,
+              raw: loc,
+            });
+          }
+
+          // Still build service_calls from planned (for coverage + linking)
+          if (rid && crs) {
+            const key = `${rid}::${crs}`;
+            const existing =
+              callByKey.get(key) ??
+              ({
+                rid,
+                uid,
+                ssd,
+                crs,
+                updated_at: nowIso(),
+              });
+
+            if (plannedArr) existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
+            if (plannedDep) existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
+
+            existing.updated_at = nowIso();
+            callByKey.set(key, existing);
+          }
+        }
+      }
+
       markIds.push(m.id);
       continue;
     }
 
-    // optional debug: show first few schedules we successfully extracted
-    if (debugPrinted < 3) {
-      const TS0 = schedules[0];
-      console.log("[darwin-processor] sample schedule", {
-        id: m.id,
-        rid: getRID(TS0),
-        uid: getUID(TS0),
-        ssd: getSSD(decoded, TS0),
-        hasLocation: !!(TS0?.Location || TS0?.location || TS0?.locations),
-        locationType: Array.isArray(TS0?.Location || TS0?.location || TS0?.locations)
-          ? "array"
-          : typeof (TS0?.Location || TS0?.location || TS0?.locations),
-        countInMessage: schedules.length,
-      });
-      debugPrinted++;
+    // ===== TS MODE (actual updates) =====
+    const TS = decoded?.uR?.TS;
+    if (!TS) {
+      stats.skipped.not_schedule++;
+      markIds.push(m.id);
+      continue;
     }
 
-    for (const TS of schedules) {
-      // --- patched: bulletproof keys ---
-      const rid = getRID(TS);
-      const uid = getUID(TS);
-      const ssd = getSSD(decoded, TS);
+    // (keep your existing TS.Location logic here)
+    const rid = getRID(TS);
+    const uid = getUID(TS);
+    const ssd = getSSD(decoded, TS);
 
-      const locs = getLocationsFromSchedule(TS);
-      if (!rid || !ssd || !locs.length) {
-        stats.skipped.no_locations++;
-        continue;
+    const locs = getLocationsFromSchedule(TS);
+    if (!rid || !ssd || !locs.length) {
+      stats.skipped.no_locations++;
+      markIds.push(m.id);
+      continue;
+    }
+
+    for (let idx = 0; idx < locs.length; idx++) {
+      const loc = locs[idx];
+
+      const tiploc = getTIPLOC(loc);
+      const tiploc_norm = normalizeTiplocNorm(tiploc);
+      const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+
+      const pta = plannedArrStr(loc);
+      const ptd = plannedDepStr(loc);
+      const arrT = actualArrStr(loc);
+      const depT = actualDepStr(loc);
+
+      const plannedArr = toTs(ssd, pta);
+      const actualArr = toTs(ssd, arrT);
+      const lateArr = minutesDiffIso(actualArr, plannedArr);
+
+      if (pta || arrT) {
+        eventRows.push({
+          msg_id: m.id,
+          loc_index: idx,
+          received_at: m.received_at,
+          tiploc,
+          tiploc_norm,
+          crs,
+          rid,
+          uid,
+          event_type: "ARR",
+          planned_time: plannedArr,
+          actual_time: actualArr,
+          late_minutes: lateArr,
+          raw: loc,
+        });
       }
 
-      for (let idx = 0; idx < locs.length; idx++) {
-        const loc = locs[idx];
+      const plannedDep = toTs(ssd, ptd);
+      const actualDep = toTs(ssd, depT);
+      const lateDep = minutesDiffIso(actualDep, plannedDep);
 
-        // --- patched: bulletproof tiploc field ---
-        const tiploc = getTIPLOC(loc);
-        const tiploc_norm = normalizeTiplocNorm(tiploc);
-        const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+      if (ptd || depT) {
+        eventRows.push({
+          msg_id: m.id,
+          loc_index: idx,
+          received_at: m.received_at,
+          tiploc,
+          tiploc_norm,
+          crs,
+          rid,
+          uid,
+          event_type: "DEP",
+          planned_time: plannedDep,
+          actual_time: actualDep,
+          late_minutes: lateDep,
+          raw: loc,
+        });
+      }
 
-        const pta = plannedArrStr(loc);
-        const ptd = plannedDepStr(loc);
-        const arrT = actualArrStr(loc);
-        const depT = actualDepStr(loc);
-
-        const plannedArr = toTs(ssd, pta);
-        const actualArr = toTs(ssd, arrT);
-        const lateArr = minutesDiffIso(actualArr, plannedArr);
-
-        if (pta || arrT) {
-          eventRows.push({
-            msg_id: m.id,
-            loc_index: idx,
-            received_at: m.received_at,
-            tiploc,
-            tiploc_norm,
-            crs,
+      // Merge ARR/DEP into one row per rid+crs
+      if (rid && crs) {
+        const key = `${rid}::${crs}`;
+        const existing =
+          callByKey.get(key) ??
+          ({
             rid,
             uid,
-            event_type: "ARR",
-            planned_time: plannedArr,
-            actual_time: actualArr,
-            late_minutes: lateArr,
-            raw: loc,
-          });
-        }
-
-        const plannedDep = toTs(ssd, ptd);
-        const actualDep = toTs(ssd, depT);
-        const lateDep = minutesDiffIso(actualDep, plannedDep);
-
-        if (ptd || depT) {
-          eventRows.push({
-            msg_id: m.id,
-            loc_index: idx,
-            received_at: m.received_at,
-            tiploc,
-            tiploc_norm,
+            ssd,
             crs,
-            rid,
-            uid,
-            event_type: "DEP",
-            planned_time: plannedDep,
-            actual_time: actualDep,
-            late_minutes: lateDep,
-            raw: loc,
+            updated_at: nowIso(),
           });
+
+        if (plannedArr || actualArr) {
+          existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
+          existing.actual_arrive = actualArr ?? existing.actual_arrive ?? null;
+          existing.late_arrive_min = lateArr ?? existing.late_arrive_min ?? null;
         }
 
-        // Merge ARR/DEP into one row per rid+crs
-        if (rid && crs) {
-          const key = `${rid}::${crs}`;
-          const existing =
-            callByKey.get(key) ??
-            ({
-              rid,
-              uid,
-              ssd,
-              crs,
-              updated_at: nowIso(),
-            });
-
-          if (plannedArr || actualArr) {
-            existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
-            existing.actual_arrive = actualArr ?? existing.actual_arrive ?? null;
-            existing.late_arrive_min = lateArr ?? existing.late_arrive_min ?? null;
-          }
-
-          if (plannedDep || actualDep) {
-            existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
-            existing.actual_depart = actualDep ?? existing.actual_depart ?? null;
-            existing.late_depart_min = lateDep ?? existing.late_depart_min ?? null;
-          }
-
-          existing.updated_at = nowIso();
-          callByKey.set(key, existing);
+        if (plannedDep || actualDep) {
+          existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
+          existing.actual_depart = actualDep ?? existing.actual_depart ?? null;
+          existing.late_depart_min = lateDep ?? existing.late_depart_min ?? null;
         }
+
+        existing.updated_at = nowIso();
+        callByKey.set(key, existing);
       }
     }
 
-    // We always mark processed for schedule messages we handled (even if some schedules inside were incomplete)
     markIds.push(m.id);
   }
 
