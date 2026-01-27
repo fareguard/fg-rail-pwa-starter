@@ -7,7 +7,8 @@ import { createClient } from "@supabase/supabase-js";
  * Production-grade Darwin processor
  * - Newest-first processing
  * - Filters in Node (no fragile JSON-path filters)
- * - Handles Location as array OR object
+ * - Handles TS(Location) as array OR object
+ * - Handles uR.schedule[] (planned-only rows)
  * - Normalizes TIPLOC + CRS mapping
  * - Upserts darwin_events on unique key
  * - Upserts darwin_service_calls (rid+crs)
@@ -53,13 +54,15 @@ function safeJsonParse(s) {
 }
 
 // Cheap prefilter (avoid parsing heartbeats/failures/etc)
+// ✅ Replace looksLikeSchedule() with requested version
 function looksLikeSchedule(bytes) {
-  // accept either TS updates OR schedule arrays
+  // Accept either TS(Location...) updates OR schedule-array messages
   return (
     typeof bytes === "string" &&
-    bytes.includes('"uR"') &&
-    bytes.includes('"ssd"') &&
-    (bytes.includes('"TS"') || bytes.includes('"schedule"'))
+    (
+      (bytes.includes('"uR"') && bytes.includes('"TS"') && bytes.includes('"Location"')) ||
+      (bytes.includes('"uR"') && bytes.includes('"schedule"') && bytes.includes('"rid"') && bytes.includes('"ssd"'))
+    )
   );
 }
 
@@ -126,34 +129,46 @@ function actualDepStr(loc) {
   return pickFirstString(loc?.dep?.at, loc?.dep?.et, loc?.dep?.wet);
 }
 
-// ===== NEW: schedule[] helpers (CIS schedule mode) =====
-function normalizeScheduleItems(decoded) {
-  const s = decoded?.uR?.schedule;
-  if (Array.isArray(s)) return s;
-  return [];
+// ✅ Add these helpers near your other helpers (schedule[] support)
+function scheduleStopToLoc(s) {
+  // Normalize Darwin schedule stop shapes into a "loc-like" object
+  // with tpl + planned arrival/depart fields (pta/ptd or wta/wtd).
+  if (!s || typeof s !== "object") return null;
+  const tpl = s.tpl || null;
+  if (!tpl) return null;
+
+  // For schedule stops, planned times can live in pta/ptd OR wta/wtd.
+  return {
+    tpl,
+    pta: s.pta ?? null,
+    ptd: s.ptd ?? null,
+    wta: s.wta ?? null,
+    wtd: s.wtd ?? null,
+  };
 }
 
-function scheduleItemToLocations(item) {
-  // CIS schedule shape: OR + IP[] + DT (+ sometimes OPOR/OPDT)
+function extractScheduleLocations(svc) {
+  // svc: one object inside uR.schedule[]
+  // Locations can be in OR/IP/DT and other variants (OPOR/OPDT etc)
   const out = [];
 
-  if (item?.OR) out.push(item.OR);
-  if (Array.isArray(item?.IP)) out.push(...item.IP);
-  else if (item?.IP) out.push(item.IP);
-  if (item?.DT) out.push(item.DT);
+  // Origin variants
+  if (svc.OR) out.push(scheduleStopToLoc(svc.OR));
+  if (svc.OPOR) out.push(scheduleStopToLoc(svc.OPOR)); // some non-passenger services
 
-  // Some messages use OPOR/OPDT (non-passenger etc) — include if present
-  if (item?.OPOR) out.push(item.OPOR);
-  if (item?.OPDT) out.push(item.OPDT);
+  // Intermediate variants
+  const ip = svc.IP;
+  if (Array.isArray(ip)) {
+    for (const x of ip) out.push(scheduleStopToLoc(x));
+  } else if (ip && typeof ip === "object") {
+    out.push(scheduleStopToLoc(ip));
+  }
 
-  return out;
-}
+  // Destination variants
+  if (svc.DT) out.push(scheduleStopToLoc(svc.DT));
+  if (svc.OPDT) out.push(scheduleStopToLoc(svc.OPDT));
 
-function getSchedulePlannedArrStr(loc) {
-  return pickFirstString(loc?.pta, loc?.wta);
-}
-function getSchedulePlannedDepStr(loc) {
-  return pickFirstString(loc?.ptd, loc?.wtd);
+  return out.filter(Boolean);
 }
 
 function parseDarwinTime(t) {
@@ -333,37 +348,57 @@ async function processOnce() {
       continue;
     }
 
-    const schedules = normalizeScheduleItems(decoded);
+    // ✅ Replace the TS-only block with unified TS + schedule[] block
+    const uR = decoded?.uR;
+    if (!uR) {
+      stats.skipped.no_ts++;
+      markIds.push(m.id);
+      continue;
+    }
 
-    if (schedules.length) {
-      // ===== CIS SCHEDULE MODE (planned only) =====
-      for (const item of schedules) {
+    let rid = null;
+    let uid = null;
+    let ssd = null;
+    let locs = [];
+
+    // Case 1: Real-time TS updates with Location
+    if (uR.TS && uR.TS.Location) {
+      const TS = uR.TS;
+      rid = TS.rid ?? null;
+      uid = TS.uid ?? null;
+      ssd = TS.ssd ?? null;
+      locs = normalizeLocations(TS.Location);
+    }
+    // Case 2: Schedule-array messages
+    else if (Array.isArray(uR.schedule) && uR.schedule.length) {
+      // Each schedule element is basically a service skeleton.
+      // We emit planned rows for every schedule element.
+      for (const svc of uR.schedule) {
         if (Date.now() - started > MAX_RUN_MS) {
           stats.skipped.timebox++;
           break;
         }
 
-        const rid = item?.rid ?? null;
-        const uid = item?.uid ?? null;
-        const ssd = item?.ssd ?? null;
+        const svcRid = svc?.rid ?? null;
+        const svcUid = svc?.uid ?? null;
+        const svcSsd = svc?.ssd ?? null;
+        const svcLocs = extractScheduleLocations(svc);
 
-        const locs = scheduleItemToLocations(item);
-        if (!rid || !ssd || !locs.length) continue;
+        if (!svcRid || !svcSsd || !svcLocs.length) continue;
 
-        for (let idx = 0; idx < locs.length; idx++) {
-          const loc = locs[idx];
-
-          const tiploc = getTIPLOC(loc);
+        // Emit rows using svcRid
+        for (let idx = 0; idx < svcLocs.length; idx++) {
+          const loc = svcLocs[idx];
+          const tiploc = loc.tpl ?? null;
           const tiploc_norm = normalizeTiplocNorm(tiploc);
           const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
 
-          const pta = getSchedulePlannedArrStr(loc);
-          const ptd = getSchedulePlannedDepStr(loc);
+          const pta = plannedArrStr(loc);
+          const ptd = plannedDepStr(loc);
 
-          const plannedArr = toTs(ssd, pta);
-          const plannedDep = toTs(ssd, ptd);
+          const plannedArr = toTs(svcSsd, pta);
+          const plannedDep = toTs(svcSsd, ptd);
 
-          // In schedule messages we don't have actual times -> leave actual_time/late_minutes null
           if (pta) {
             eventRows.push({
               msg_id: m.id,
@@ -372,8 +407,8 @@ async function processOnce() {
               tiploc,
               tiploc_norm,
               crs,
-              rid,
-              uid,
+              rid: svcRid,
+              uid: svcUid,
               event_type: "ARR",
               planned_time: plannedArr,
               actual_time: null,
@@ -390,8 +425,8 @@ async function processOnce() {
               tiploc,
               tiploc_norm,
               crs,
-              rid,
-              uid,
+              rid: svcRid,
+              uid: svcUid,
               event_type: "DEP",
               planned_time: plannedDep,
               actual_time: null,
@@ -400,21 +435,20 @@ async function processOnce() {
             });
           }
 
-          // Still build service_calls from planned (for coverage + linking)
-          if (rid && crs) {
-            const key = `${rid}::${crs}`;
+          if (svcRid && crs) {
+            const key = `${svcRid}::${crs}`;
             const existing =
               callByKey.get(key) ??
               ({
-                rid,
-                uid,
-                ssd,
+                rid: svcRid,
+                uid: svcUid,
+                ssd: svcSsd,
                 crs,
                 updated_at: nowIso(),
               });
 
-            if (plannedArr) existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
-            if (plannedDep) existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
+            if (plannedArr) existing.planned_arrive = plannedArr;
+            if (plannedDep) existing.planned_depart = plannedDep;
 
             existing.updated_at = nowIso();
             callByKey.set(key, existing);
@@ -422,30 +456,36 @@ async function processOnce() {
         }
       }
 
+      // Mark this message processed after handling schedule array
+      markIds.push(m.id);
+      continue;
+    } else {
+      stats.skipped.no_ts++;
       markIds.push(m.id);
       continue;
     }
 
-    // ===== TS MODE (actual updates) =====
-    const TS = decoded?.uR?.TS;
-    if (!TS) {
-      stats.skipped.not_schedule++;
-      markIds.push(m.id);
-      continue;
-    }
-
-    // (keep your existing TS.Location logic here)
-    const rid = getRID(TS);
-    const uid = getUID(TS);
-    const ssd = getSSD(decoded, TS);
-
-    const locs = getLocationsFromSchedule(TS);
-    if (!rid || !ssd || !locs.length) {
+    // TS path continues here (existing logic):
+    if (!locs.length) {
       stats.skipped.no_locations++;
       markIds.push(m.id);
       continue;
     }
 
+    // Fill in fallback ssd/rid/uid if missing in TS header
+    // (preserves your earlier robustness)
+    const TS = uR.TS;
+    rid = rid ?? getRID(TS);
+    uid = uid ?? getUID(TS);
+    ssd = ssd ?? getSSD(decoded, TS);
+
+    if (!rid || !ssd) {
+      stats.skipped.no_ts++;
+      markIds.push(m.id);
+      continue;
+    }
+
+    // (then keep your existing TS Location loop here)
     for (let idx = 0; idx < locs.length; idx++) {
       const loc = locs[idx];
 
