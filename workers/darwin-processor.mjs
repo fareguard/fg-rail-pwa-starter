@@ -11,7 +11,7 @@ import { createClient } from "@supabase/supabase-js";
  * - Handles uR.schedule[] (planned-only rows)
  * - Normalizes TIPLOC + CRS mapping
  * - Upserts darwin_events on unique key
- * - Upserts darwin_service_calls (rid+crs)
+ * - Upserts darwin_service_calls (rid+tiploc_norm)   ✅ FIXED
  * - Bulk marks processed
  * - Backoff + jitter to avoid thrash
  * =========================
@@ -59,10 +59,11 @@ function looksLikeSchedule(bytes) {
   // Accept either TS(Location...) updates OR schedule-array messages
   return (
     typeof bytes === "string" &&
-    (
-      (bytes.includes('"uR"') && bytes.includes('"TS"') && bytes.includes('"Location"')) ||
-      (bytes.includes('"uR"') && bytes.includes('"schedule"') && bytes.includes('"rid"') && bytes.includes('"ssd"'))
-    )
+    ((bytes.includes('"uR"') && bytes.includes('"TS"') && bytes.includes('"Location"')) ||
+      (bytes.includes('"uR"') &&
+        bytes.includes('"schedule"') &&
+        bytes.includes('"rid"') &&
+        bytes.includes('"ssd"')))
   );
 }
 
@@ -121,12 +122,22 @@ function plannedDepStr(loc) {
   return pickFirstString(loc?.ptd, loc?.wtd);
 }
 
+// planned pass: wtp (working pass time) sometimes exists without pta/ptd
+function plannedPassStr(loc) {
+  return pickFirstString(loc?.ptp, loc?.wtp); // ptp is rare; wtp is common
+}
+
 // actual: prefer at then et then wet
 function actualArrStr(loc) {
   return pickFirstString(loc?.arr?.at, loc?.arr?.et, loc?.arr?.wet);
 }
 function actualDepStr(loc) {
   return pickFirstString(loc?.dep?.at, loc?.dep?.et, loc?.dep?.wet);
+}
+
+// actual pass: pass.at / pass.et / pass.wet
+function actualPassStr(loc) {
+  return pickFirstString(loc?.pass?.at, loc?.pass?.et, loc?.pass?.wet);
 }
 
 // ✅ Add these helpers near your other helpers (schedule[] support)
@@ -284,7 +295,9 @@ async function upsertEvents(rows) {
 async function upsertServiceCalls(callRows) {
   if (!callRows.length) return 0;
   // usually small; no need to chunk unless you want
-  const { error } = await db.from("darwin_service_calls").upsert(callRows, { onConflict: "rid,crs" });
+  const { error } = await db
+    .from("darwin_service_calls")
+    .upsert(callRows, { onConflict: "rid,tiploc_norm" }); // ✅ FIXED (CRS can be null)
   if (error) throw new Error("darwin_service_calls upsert failed: " + error.message);
   return callRows.length;
 }
@@ -318,7 +331,7 @@ async function processOnce() {
 
   const markIds = [];
   const eventRows = [];
-  const callByKey = new Map(); // rid::crs -> merged row
+  const callByKey = new Map(); // rid::tiploc_norm -> merged row   ✅ FIXED
 
   for (const m of msgs || []) {
     if (Date.now() - started > MAX_RUN_MS) {
@@ -435,8 +448,9 @@ async function processOnce() {
             });
           }
 
-          if (svcRid && crs) {
-            const key = `${svcRid}::${crs}`;
+          // ✅ Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
+          if (svcRid && tiploc_norm) {
+            const key = `${svcRid}::${tiploc_norm}`;
             const existing =
               callByKey.get(key) ??
               ({
@@ -444,8 +458,12 @@ async function processOnce() {
                 uid: svcUid,
                 ssd: svcSsd,
                 crs,
+                tiploc_norm, // ✅ ADD
                 updated_at: nowIso(),
               });
+
+            // keep CRS as nullable attribute; update when we have it
+            existing.crs = crs ?? existing.crs ?? null;
 
             if (plannedArr) existing.planned_arrive = plannedArr;
             if (plannedDep) existing.planned_depart = plannedDep;
@@ -542,9 +560,35 @@ async function processOnce() {
         });
       }
 
-      // Merge ARR/DEP into one row per rid+crs
-      if (rid && crs) {
-        const key = `${rid}::${crs}`;
+      // ✅ Step 1 — Handle PASS updates (unblocks events immediately)
+      const ptp = plannedPassStr(loc);
+      const passT = actualPassStr(loc);
+
+      const plannedPass = toTs(ssd, ptp);
+      const actualPass = toTs(ssd, passT);
+      const latePass = minutesDiffIso(actualPass, plannedPass);
+
+      if (ptp || passT) {
+        eventRows.push({
+          msg_id: m.id,
+          loc_index: idx,
+          received_at: m.received_at,
+          tiploc,
+          tiploc_norm,
+          crs,
+          rid,
+          uid,
+          event_type: "PASS",
+          planned_time: plannedPass,
+          actual_time: actualPass,
+          late_minutes: latePass,
+          raw: loc,
+        });
+      }
+
+      // ✅ Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
+      if (rid && tiploc_norm) {
+        const key = `${rid}::${tiploc_norm}`;
         const existing =
           callByKey.get(key) ??
           ({
@@ -552,8 +596,12 @@ async function processOnce() {
             uid,
             ssd,
             crs,
+            tiploc_norm, // ✅ ADD
             updated_at: nowIso(),
           });
+
+        // keep CRS as nullable attribute; update when we have it
+        existing.crs = crs ?? existing.crs ?? null;
 
         if (plannedArr || actualArr) {
           existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
