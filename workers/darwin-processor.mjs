@@ -216,7 +216,7 @@ async function upsertServiceCalls(callRows) {
   // usually small; no need to chunk unless you want
   const { error } = await db
     .from("darwin_service_calls")
-    .upsert(callRows, { onConflict: "rid,crs" });
+    .upsert(callRows, { onConflict: "rid,crs,ssd" });
   if (error) throw new Error("darwin_service_calls upsert failed: " + error.message);
   return callRows.length;
 }
