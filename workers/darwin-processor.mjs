@@ -11,7 +11,7 @@ import { createClient } from "@supabase/supabase-js";
  * - Handles uR.schedule[] (planned-only rows)
  * - Normalizes TIPLOC + CRS mapping
  * - Upserts darwin_events on unique key
- * - Upserts darwin_service_calls (rid+tiploc_norm)   ✅ FIXED
+ * - Upserts darwin_service_calls
  * - Bulk marks processed
  * - Backoff + jitter to avoid thrash
  * =========================
@@ -270,20 +270,27 @@ async function markProcessed(ids) {
   let marked = 0;
 
   for (const chunk of chunkArray(ids, MARK_CHUNK)) {
-    const { error } = await db.from("darwin_messages").update({ processed_at: nowIso() }).in("id", chunk);
+    const { error } = await db
+      .from("darwin_messages")
+      // ✅ clear process_error when processed
+      .update({ processed_at: nowIso(), process_error: null })
+      .in("id", chunk);
+
     if (error) throw new Error("markProcessed failed: " + error.message);
     marked += chunk.length;
   }
   return marked;
 }
 
+// ✅ Replace upsertEvents + upsertServiceCalls to match DB unique constraints
 async function upsertEvents(rows) {
   if (!rows.length) return 0;
   let up = 0;
 
   for (const chunk of chunkArray(rows, UPSERT_CHUNK)) {
     const { error } = await db.from("darwin_events").upsert(chunk, {
-      onConflict: "rid,tiploc_norm,event_type,planned_time",
+      // MUST match an actual unique index/constraint in DB (darwin_events_dedupe_uq)
+      onConflict: "msg_id,loc_index,event_type",
       ignoreDuplicates: true,
     });
     if (error) throw new Error("darwin_events upsert failed: " + error.message);
@@ -294,11 +301,13 @@ async function upsertEvents(rows) {
 
 async function upsertServiceCalls(callRows) {
   if (!callRows.length) return 0;
-  // usually small; no need to chunk unless you want
-  const { error } = await db
-    .from("darwin_service_calls")
-    .upsert(callRows, { onConflict: "rid,tiploc_norm" }); // ✅ FIXED (CRS can be null)
+
+  const { error } = await db.from("darwin_service_calls").upsert(callRows, {
+    // MUST match the unique constraint in DB (darwin_service_calls_uq)
+    onConflict: "rid,crs,ssd",
+  });
   if (error) throw new Error("darwin_service_calls upsert failed: " + error.message);
+
   return callRows.length;
 }
 
@@ -331,7 +340,7 @@ async function processOnce() {
 
   const markIds = [];
   const eventRows = [];
-  const callByKey = new Map(); // rid::tiploc_norm -> merged row   ✅ FIXED
+  const callByKey = new Map(); // rid::tiploc_norm -> merged row
 
   for (const m of msgs || []) {
     if (Date.now() - started > MAX_RUN_MS) {
@@ -361,7 +370,7 @@ async function processOnce() {
       continue;
     }
 
-    // ✅ Replace the TS-only block with unified TS + schedule[] block
+    // Unified TS + schedule[] block
     const uR = decoded?.uR;
     if (!uR) {
       stats.skipped.no_ts++;
@@ -448,7 +457,7 @@ async function processOnce() {
             });
           }
 
-          // ✅ Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
+          // Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
           if (svcRid && tiploc_norm) {
             const key = `${svcRid}::${tiploc_norm}`;
             const existing =
@@ -458,7 +467,7 @@ async function processOnce() {
                 uid: svcUid,
                 ssd: svcSsd,
                 crs,
-                tiploc_norm, // ✅ ADD
+                tiploc_norm,
                 updated_at: nowIso(),
               });
 
@@ -491,7 +500,6 @@ async function processOnce() {
     }
 
     // Fill in fallback ssd/rid/uid if missing in TS header
-    // (preserves your earlier robustness)
     const TS = uR.TS;
     rid = rid ?? getRID(TS);
     uid = uid ?? getUID(TS);
@@ -503,7 +511,6 @@ async function processOnce() {
       continue;
     }
 
-    // (then keep your existing TS Location loop here)
     for (let idx = 0; idx < locs.length; idx++) {
       const loc = locs[idx];
 
@@ -560,7 +567,7 @@ async function processOnce() {
         });
       }
 
-      // ✅ Step 1 — Handle PASS updates (unblocks events immediately)
+      // PASS updates
       const ptp = plannedPassStr(loc);
       const passT = actualPassStr(loc);
 
@@ -586,7 +593,7 @@ async function processOnce() {
         });
       }
 
-      // ✅ Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
+      // Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
       if (rid && tiploc_norm) {
         const key = `${rid}::${tiploc_norm}`;
         const existing =
@@ -596,7 +603,7 @@ async function processOnce() {
             uid,
             ssd,
             crs,
-            tiploc_norm, // ✅ ADD
+            tiploc_norm,
             updated_at: nowIso(),
           });
 
@@ -623,30 +630,51 @@ async function processOnce() {
     markIds.push(m.id);
   }
 
-  // Upserts
+  // ✅ Bulletproof upsert + mark logic (do NOT mark processed if either upsert fails)
+  let upsertOk = true;
+  let upsertErr = null;
+
   try {
     stats.eventsInserted = await upsertEvents(eventRows);
   } catch (e) {
+    upsertOk = false;
+    upsertErr = "events_upsert: " + (e?.message || String(e));
     stats.ok = false;
     stats.skipped.insert_error++;
-    console.error("EVENT UPSERT ERROR:", e?.message || e);
-    // still try marking processed to avoid hot-looping on poison messages
+    console.error("EVENT UPSERT ERROR:", upsertErr);
   }
 
   try {
     stats.callsUpserted = await upsertServiceCalls(Array.from(callByKey.values()));
   } catch (e) {
+    upsertOk = false;
+    const msg = "calls_upsert: " + (e?.message || String(e));
+    upsertErr = upsertErr ? upsertErr + " | " + msg : msg;
     stats.ok = false;
-    console.error("SERVICE_CALLS UPSERT ERROR:", e?.message || e);
+    console.error("SERVICE_CALLS UPSERT ERROR:", msg);
   }
 
-  // Mark processed
-  try {
-    stats.messagesMarked = await markProcessed(markIds);
-  } catch (e) {
-    stats.ok = false;
-    stats.skipped.mark_error++;
-    console.error("MARK PROCESSED ERROR:", e?.message || e);
+  // ✅ Only mark processed if upserts succeeded
+  if (upsertOk) {
+    try {
+      stats.messagesMarked = await markProcessed(markIds);
+    } catch (e) {
+      stats.ok = false;
+      stats.skipped.mark_error++;
+      console.error("MARK PROCESSED ERROR:", e?.message || e);
+    }
+  } else {
+    // Write process_error so we can see the failure reason; leave processed_at = null so it retries
+    try {
+      for (const chunk of chunkArray(markIds, MARK_CHUNK)) {
+        const { error } = await db.from("darwin_messages").update({ process_error: upsertErr }).in("id", chunk);
+        if (error) throw error;
+      }
+    } catch (e) {
+      console.error("PROCESS_ERROR WRITE FAILED:", e?.message || e);
+    }
+
+    stats.messagesMarked = 0;
   }
 
   return stats;
