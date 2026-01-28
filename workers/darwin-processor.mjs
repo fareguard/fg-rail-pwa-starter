@@ -36,6 +36,12 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   process.exit(1);
 }
 
+// 3) Quick “wrong database” check (catches loads of issues)
+console.log("[darwin-processor] boot", {
+  supabaseHost: new URL(process.env.SUPABASE_URL).host,
+  hasServiceKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+});
+
 const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
@@ -693,6 +699,9 @@ async function main() {
   let backoff = 250;
 
   while (true) {
+    // 4) Add one “heartbeat” log per loop
+    console.log("[darwin-processor] loop", { at: new Date().toISOString() });
+
     try {
       const stats = await processOnce();
       console.log("[darwin-processor] tick", stats);
