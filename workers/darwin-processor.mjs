@@ -63,15 +63,14 @@ function safeJsonParse(s) {
 }
 
 // Cheap prefilter (avoid parsing heartbeats/failures/etc)
-function looksLikeSchedule(bytes) {
-  // Accept either TS(Location...) updates OR schedule-array messages
+// Step 2 — Fix the processor prefilter (key)
+function looksLikeRelevant(bytes) {
+  if (typeof bytes !== "string") return false;
+  // TS updates (movement) OR schedule messages (timetable)
   return (
-    typeof bytes === "string" &&
-    ((bytes.includes('"uR"') && bytes.includes('"TS"') && bytes.includes('"Location"')) ||
-      (bytes.includes('"uR"') &&
-        bytes.includes('"schedule"') &&
-        bytes.includes('"rid"') &&
-        bytes.includes('"ssd"')))
+    bytes.includes('"uR"') &&
+    ((bytes.includes('"TS"') && bytes.includes('"Location"')) ||
+      bytes.includes('"schedule"'))
   );
 }
 
@@ -358,7 +357,8 @@ async function processOnce() {
       continue;
     }
 
-    if (!looksLikeSchedule(bytes)) {
+    // Step 2 patch: replace looksLikeSchedule(bytes) with looksLikeRelevant(bytes)
+    if (!looksLikeRelevant(bytes)) {
       stats.skipped.not_schedule++;
       markIds.push(m.id);
       continue;
