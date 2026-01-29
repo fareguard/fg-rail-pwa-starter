@@ -308,12 +308,13 @@ async function upsertEvents(rows) {
 async function upsertServiceCalls(callRows) {
   if (!callRows.length) return 0;
 
+  // ✅ STEP 3 — Fix darwin_service_calls upsert (schema cache bug)
+  // Primary key is (rid, crs, ssd), so onConflict must match exactly.
   const { error } = await db.from("darwin_service_calls").upsert(callRows, {
-    // MUST match the unique constraint in DB (darwin_service_calls_uq)
     onConflict: "rid,crs,ssd",
   });
-  if (error) throw new Error("darwin_service_calls upsert failed: " + error.message);
 
+  if (error) throw new Error("darwin_service_calls upsert failed: " + error.message);
   return callRows.length;
 }
 
