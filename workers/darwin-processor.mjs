@@ -10,9 +10,9 @@ import { createClient } from "@supabase/supabase-js";
  * - Handles TS(Location) as array OR object
  * - Handles uR.schedule[] (planned-only rows)
  * - Normalizes TIPLOC + CRS mapping
- * - Upserts darwin_events on unique key
- * - Upserts darwin_service_calls
- * - Bulk marks processed
+ * - darwin_events insert-only (ignore duplicates)
+ * - darwin_service_calls upsert with column whitelist (no stray fields)
+ * - ALWAYS marks messages processed even if inserts fail
  * - Backoff + jitter to avoid thrash
  * =========================
  */
@@ -36,7 +36,10 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   process.exit(1);
 }
 
-// 3) Quick “wrong database” check (catches loads of issues)
+// 3) Deploy sanity check (version marker)
+console.log("[darwin-processor] version", "2026-01-29-a");
+
+// Quick “wrong database” check (catches loads of issues)
 console.log("[darwin-processor] boot", {
   supabaseHost: new URL(process.env.SUPABASE_URL).host,
   hasServiceKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -60,7 +63,6 @@ function safeJsonParse(s) {
 }
 
 // Cheap prefilter (avoid parsing heartbeats/failures/etc)
-// ✅ Replace looksLikeSchedule() with requested version
 function looksLikeSchedule(bytes) {
   // Accept either TS(Location...) updates OR schedule-array messages
   return (
@@ -82,11 +84,6 @@ function normalizeLocations(x) {
   if (Array.isArray(x)) return x;
   if (typeof x === "object") return [x];
   return [];
-}
-
-function getLocationsFromSchedule(TS) {
-  // Darwin payloads vary: Location, location, locations
-  return normalizeLocations(TS?.Location || TS?.location || TS?.locations);
 }
 
 function getSSD(decoded, TS) {
@@ -146,7 +143,7 @@ function actualPassStr(loc) {
   return pickFirstString(loc?.pass?.at, loc?.pass?.et, loc?.pass?.wet);
 }
 
-// ✅ Add these helpers near your other helpers (schedule[] support)
+// schedule[] support
 function scheduleStopToLoc(s) {
   // Normalize Darwin schedule stop shapes into a "loc-like" object
   // with tpl + planned arrival/depart fields (pta/ptd or wta/wtd).
@@ -278,7 +275,7 @@ async function markProcessed(ids) {
   for (const chunk of chunkArray(ids, MARK_CHUNK)) {
     const { error } = await db
       .from("darwin_messages")
-      // ✅ clear process_error when processed
+      // clear process_error when processed
       .update({ processed_at: nowIso(), process_error: null })
       .in("id", chunk);
 
@@ -288,34 +285,45 @@ async function markProcessed(ids) {
   return marked;
 }
 
-// ✅ Replace upsertEvents + upsertServiceCalls to match DB unique constraints
+// 1A) darwin_events: insert-only (ignore duplicates) on (msg_id, loc_index, event_type)
 async function upsertEvents(rows) {
   if (!rows.length) return 0;
-  let up = 0;
 
+  // IMPORTANT: insert-only to avoid "affect row a second time" on big batches
   for (const chunk of chunkArray(rows, UPSERT_CHUNK)) {
     const { error } = await db.from("darwin_events").upsert(chunk, {
-      // ✅ UPDATED: must match unique constraint (msg_id, loc_index, event_type)
       onConflict: "msg_id,loc_index,event_type",
-      // 🚫 REMOVED: ignoreDuplicates
+      ignoreDuplicates: true, // DO NOTHING instead of DO UPDATE
     });
-    if (error) throw new Error("darwin_events upsert failed: " + error.message);
-    up += chunk.length;
+    if (error) throw new Error("events_upsert: " + error.message);
   }
-  return up;
+  return rows.length;
 }
 
+// 1B) darwin_service_calls: whitelist real columns (do NOT send tiploc_norm or any stray field)
 async function upsertServiceCalls(callRows) {
   if (!callRows.length) return 0;
 
-  // ✅ STEP 3 — Fix darwin_service_calls upsert (schema cache bug)
-  // Primary key is (rid, crs, ssd), so onConflict must match exactly.
-  const { error } = await db.from("darwin_service_calls").upsert(callRows, {
-    onConflict: "rid,crs,ssd",
-  });
+  const cleaned = callRows.map((r) => ({
+    rid: r.rid ?? null,
+    uid: r.uid ?? null,
+    ssd: r.ssd ?? null,
+    crs: r.crs ?? null,
+    planned_arrive: r.planned_arrive ?? null,
+    actual_arrive: r.actual_arrive ?? null,
+    planned_depart: r.planned_depart ?? null,
+    actual_depart: r.actual_depart ?? null,
+    late_arrive_min: r.late_arrive_min ?? null,
+    late_depart_min: r.late_depart_min ?? null,
+    updated_at: r.updated_at ?? nowIso(),
+  }));
 
-  if (error) throw new Error("darwin_service_calls upsert failed: " + error.message);
-  return callRows.length;
+  const { error } = await db
+    .from("darwin_service_calls")
+    .upsert(cleaned, { onConflict: "rid,crs,ssd" });
+
+  if (error) throw new Error("calls_upsert: " + error.message);
+  return cleaned.length;
 }
 
 async function processOnce() {
@@ -347,7 +355,7 @@ async function processOnce() {
 
   const markIds = [];
   const eventRows = [];
-  const callByKey = new Map(); // rid::tiploc_norm -> merged row
+  const callByKey = new Map(); // rid::tiploc_norm -> merged row (note: tiploc_norm NOT sent to DB)
 
   for (const m of msgs || []) {
     if (Date.now() - started > MAX_RUN_MS) {
@@ -465,6 +473,7 @@ async function processOnce() {
           }
 
           // Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
+          // NOTE: tiploc_norm is kept ONLY for keying/merge; it will be stripped before DB upsert.
           if (svcRid && tiploc_norm) {
             const key = `${svcRid}::${tiploc_norm}`;
             const existing =
@@ -478,7 +487,6 @@ async function processOnce() {
                 updated_at: nowIso(),
               });
 
-            // keep CRS as nullable attribute; update when we have it
             existing.crs = crs ?? existing.crs ?? null;
 
             if (plannedArr) existing.planned_arrive = plannedArr;
@@ -601,6 +609,7 @@ async function processOnce() {
       }
 
       // Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
+      // NOTE: tiploc_norm is kept ONLY for keying/merge; it will be stripped before DB upsert.
       if (rid && tiploc_norm) {
         const key = `${rid}::${tiploc_norm}`;
         const existing =
@@ -614,7 +623,6 @@ async function processOnce() {
             updated_at: nowIso(),
           });
 
-        // keep CRS as nullable attribute; update when we have it
         existing.crs = crs ?? existing.crs ?? null;
 
         if (plannedArr || actualArr) {
@@ -637,51 +645,52 @@ async function processOnce() {
     markIds.push(m.id);
   }
 
-  // ✅ Bulletproof upsert + mark logic (do NOT mark processed if either upsert fails)
-  let upsertOk = true;
-  let upsertErr = null;
+  // 2) Critical: always mark messages processed even if inserts fail
+  let insertErr = null;
+  let callsErr = null;
 
   try {
     stats.eventsInserted = await upsertEvents(eventRows);
   } catch (e) {
-    upsertOk = false;
-    upsertErr = "events_upsert: " + (e?.message || String(e));
+    insertErr = e instanceof Error ? e : new Error(String(e));
+    console.error("EVENT UPSERT ERROR:", insertErr?.message || insertErr);
     stats.ok = false;
     stats.skipped.insert_error++;
-    console.error("EVENT UPSERT ERROR:", upsertErr);
   }
 
   try {
     stats.callsUpserted = await upsertServiceCalls(Array.from(callByKey.values()));
   } catch (e) {
-    upsertOk = false;
-    const msg = "calls_upsert: " + (e?.message || String(e));
-    upsertErr = upsertErr ? upsertErr + " | " + msg : msg;
+    callsErr = e instanceof Error ? e : new Error(String(e));
+    console.error("SERVICE_CALLS UPSERT ERROR:", callsErr?.message || callsErr);
     stats.ok = false;
-    console.error("SERVICE_CALLS UPSERT ERROR:", msg);
   }
 
-  // ✅ Only mark processed if upserts succeeded
-  if (upsertOk) {
+  // still mark processed no matter what
+  try {
+    stats.messagesMarked = await markProcessed(markIds);
+  } catch (e) {
+    console.error("MARK PROCESSED ERROR:", e?.message || e);
+    stats.ok = false;
+    stats.skipped.mark_error++;
+  }
+
+  // optionally write process_error if insertErr/callsErr happened (best-effort)
+  if (insertErr || callsErr) {
+    const msg = [
+      insertErr ? `events_upsert: ${insertErr.message}` : null,
+      callsErr ? `calls_upsert: ${callsErr.message}` : null,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
     try {
-      stats.messagesMarked = await markProcessed(markIds);
+      await db.from("darwin_messages").update({ process_error: msg }).in("id", markIds);
     } catch (e) {
-      stats.ok = false;
-      stats.skipped.mark_error++;
-      console.error("MARK PROCESSED ERROR:", e?.message || e);
-    }
-  } else {
-    // Write process_error so we can see the failure reason; leave processed_at = null so it retries
-    try {
-      for (const chunk of chunkArray(markIds, MARK_CHUNK)) {
-        const { error } = await db.from("darwin_messages").update({ process_error: upsertErr }).in("id", chunk);
-        if (error) throw error;
-      }
-    } catch (e) {
-      console.error("PROCESS_ERROR WRITE FAILED:", e?.message || e);
+      console.error("PROCESS_ERROR UPDATE FAILED:", e?.message || e);
     }
 
-    stats.messagesMarked = 0;
+    stats.ok = false;
   }
 
   return stats;
@@ -700,7 +709,7 @@ async function main() {
   let backoff = 250;
 
   while (true) {
-    // 4) Add one “heartbeat” log per loop
+    // heartbeat log per loop
     console.log("[darwin-processor] loop", { at: new Date().toISOString() });
 
     try {
