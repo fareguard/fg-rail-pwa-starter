@@ -295,9 +295,9 @@ async function upsertEvents(rows) {
 
   for (const chunk of chunkArray(rows, UPSERT_CHUNK)) {
     const { error } = await db.from("darwin_events").upsert(chunk, {
-      // MUST match an actual unique index/constraint in DB (darwin_events_dedupe_uq)
+      // ✅ UPDATED: must match unique constraint (msg_id, loc_index, event_type)
       onConflict: "msg_id,loc_index,event_type",
-      ignoreDuplicates: true,
+      // 🚫 REMOVED: ignoreDuplicates
     });
     if (error) throw new Error("darwin_events upsert failed: " + error.message);
     up += chunk.length;
