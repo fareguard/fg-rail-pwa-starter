@@ -37,7 +37,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 // 3) Deploy sanity check (version marker)
-console.log("[darwin-processor] version", "2026-01-29-b");
+console.log("[darwin-processor] version", "2026-01-29-c");
 
 // Quick “wrong database” check (catches loads of issues)
 console.log("[darwin-processor] boot", {
@@ -402,6 +402,7 @@ async function processOnce() {
           const plannedArr = toTs(ssd, pta);
           const plannedDep = toTs(ssd, ptd);
 
+          // PK key includes ssd: rid::crs::ssd
           const key = `${rid}::${crs}::${ssd}`;
           const existing =
             callByKey.get(key) ?? { rid, uid, ssd, crs, updated_at: nowIso() };
@@ -418,7 +419,7 @@ async function processOnce() {
       continue;
     }
 
-    // 2) TS messages: update actual calls (your existing TS logic)
+    // 2) TS messages: update actual calls (and keep event insert logic)
     if (hasTS(j)) {
       const TS = j?.uR?.TS;
       if (!TS) {
@@ -437,7 +438,6 @@ async function processOnce() {
         continue;
       }
 
-      // Your existing event logic (optional) stays; we keep inserting ARR/DEP/PASS events.
       for (let idx = 0; idx < locs.length; idx++) {
         const loc = locs[idx];
 
@@ -525,14 +525,16 @@ async function processOnce() {
           const existing =
             callByKey.get(key) ?? { rid, uid, ssd, crs, updated_at: nowIso() };
 
+          const pta2 = plannedArrStr(loc);
+          const ptd2 = plannedDepStr(loc);
           const arrT2 = actualArrStr(loc);
           const depT2 = actualDepStr(loc);
 
-          const plannedArr2 = toTs(ssd, plannedArrStr(loc));
+          const plannedArr2 = toTs(ssd, pta2);
           const actualArr2 = toTs(ssd, arrT2);
           const lateArr2 = minutesDiffIso(actualArr2, plannedArr2);
 
-          const plannedDep2 = toTs(ssd, plannedDepStr(loc));
+          const plannedDep2 = toTs(ssd, ptd2);
           const actualDep2 = toTs(ssd, depT2);
           const lateDep2 = minutesDiffIso(actualDep2, plannedDep2);
 
