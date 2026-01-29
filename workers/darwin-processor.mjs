@@ -37,7 +37,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 // 3) Deploy sanity check (version marker)
-console.log("[darwin-processor] version", "2026-01-29-a");
+console.log("[darwin-processor] version", "2026-01-29-b");
 
 // Quick “wrong database” check (catches loads of issues)
 console.log("[darwin-processor] boot", {
@@ -143,46 +143,32 @@ function actualPassStr(loc) {
   return pickFirstString(loc?.pass?.at, loc?.pass?.et, loc?.pass?.wet);
 }
 
-// schedule[] support
-function scheduleStopToLoc(s) {
-  // Normalize Darwin schedule stop shapes into a "loc-like" object
-  // with tpl + planned arrival/depart fields (pta/ptd or wta/wtd).
-  if (!s || typeof s !== "object") return null;
-  const tpl = s.tpl || null;
-  if (!tpl) return null;
-
-  // For schedule stops, planned times can live in pta/ptd OR wta/wtd.
-  return {
-    tpl,
-    pta: s.pta ?? null,
-    ptd: s.ptd ?? null,
-    wta: s.wta ?? null,
-    wtd: s.wtd ?? null,
-  };
+// Step 2 patch: schedule[] + TS detection/helpers
+function hasSchedule(j) {
+  const s = j?.uR?.schedule;
+  return Array.isArray(s) && s.length > 0;
+}
+function hasTS(j) {
+  const L = j?.uR?.TS?.Location;
+  return !!L;
 }
 
-function extractScheduleLocations(svc) {
-  // svc: one object inside uR.schedule[]
-  // Locations can be in OR/IP/DT and other variants (OPOR/OPDT etc)
-  const out = [];
+// schedule locations can be OR, IP, DT, OPOR, OPDT, PP etc – we only care about those with tpl + times
+function extractScheduleStops(sch) {
+  const stops = [];
 
-  // Origin variants
-  if (svc.OR) out.push(scheduleStopToLoc(svc.OR));
-  if (svc.OPOR) out.push(scheduleStopToLoc(svc.OPOR)); // some non-passenger services
+  // OR / DT are objects
+  if (sch.OR) stops.push(sch.OR);
+  if (sch.DT) stops.push(sch.DT);
 
-  // Intermediate variants
-  const ip = svc.IP;
-  if (Array.isArray(ip)) {
-    for (const x of ip) out.push(scheduleStopToLoc(x));
-  } else if (ip && typeof ip === "object") {
-    out.push(scheduleStopToLoc(ip));
-  }
+  // IP can be object or array
+  if (sch.IP) stops.push(...normalizeLocations(sch.IP));
 
-  // Destination variants
-  if (svc.DT) out.push(scheduleStopToLoc(svc.DT));
-  if (svc.OPDT) out.push(scheduleStopToLoc(svc.OPDT));
+  // Some schedules have OPOR/OPDT (non-passenger etc)
+  if (sch.OPOR) stops.push(sch.OPOR);
+  if (sch.OPDT) stops.push(sch.OPDT);
 
-  return out.filter(Boolean);
+  return stops;
 }
 
 function parseDarwinTime(t) {
@@ -300,7 +286,7 @@ async function upsertEvents(rows) {
   return rows.length;
 }
 
-// 1B) darwin_service_calls: whitelist real columns (do NOT send tiploc_norm or any stray field)
+// 1B) darwin_service_calls: whitelist real columns (do NOT send stray fields)
 async function upsertServiceCalls(callRows) {
   if (!callRows.length) return 0;
 
@@ -355,7 +341,7 @@ async function processOnce() {
 
   const markIds = [];
   const eventRows = [];
-  const callByKey = new Map(); // rid::tiploc_norm -> merged row (note: tiploc_norm NOT sent to DB)
+  const callByKey = new Map(); // rid::crs::ssd -> merged call row
 
   for (const m of msgs || []) {
     if (Date.now() - started > MAX_RUN_MS) {
@@ -385,263 +371,193 @@ async function processOnce() {
       continue;
     }
 
-    // Unified TS + schedule[] block
-    const uR = decoded?.uR;
-    if (!uR) {
-      stats.skipped.no_ts++;
-      markIds.push(m.id);
-      continue;
-    }
+    const j = decoded;
 
-    let rid = null;
-    let uid = null;
-    let ssd = null;
-    let locs = [];
+    // 1) schedule[] messages: create planned calls
+    if (hasSchedule(j)) {
+      const schedArr = j.uR.schedule;
 
-    // Case 1: Real-time TS updates with Location
-    if (uR.TS && uR.TS.Location) {
-      const TS = uR.TS;
-      rid = TS.rid ?? null;
-      uid = TS.uid ?? null;
-      ssd = TS.ssd ?? null;
-      locs = normalizeLocations(TS.Location);
-    }
-    // Case 2: Schedule-array messages
-    else if (Array.isArray(uR.schedule) && uR.schedule.length) {
-      // Each schedule element is basically a service skeleton.
-      // We emit planned rows for every schedule element.
-      for (const svc of uR.schedule) {
+      for (const sch of schedArr) {
         if (Date.now() - started > MAX_RUN_MS) {
           stats.skipped.timebox++;
           break;
         }
 
-        const svcRid = svc?.rid ?? null;
-        const svcUid = svc?.uid ?? null;
-        const svcSsd = svc?.ssd ?? null;
-        const svcLocs = extractScheduleLocations(svc);
+        const rid = sch.rid ?? null;
+        const uid = sch.uid ?? null;
+        const ssd = sch.ssd ?? null;
+        if (!rid || !ssd) continue;
 
-        if (!svcRid || !svcSsd || !svcLocs.length) continue;
+        const stops = extractScheduleStops(sch);
 
-        // Emit rows using svcRid
-        for (let idx = 0; idx < svcLocs.length; idx++) {
-          const loc = svcLocs[idx];
-          const tiploc = loc.tpl ?? null;
+        for (const loc of stops) {
+          const tiploc = loc?.tpl ?? null;
           const tiploc_norm = normalizeTiplocNorm(tiploc);
           const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+          if (!crs) continue; // only store stations
 
           const pta = plannedArrStr(loc);
           const ptd = plannedDepStr(loc);
 
-          const plannedArr = toTs(svcSsd, pta);
-          const plannedDep = toTs(svcSsd, ptd);
+          const plannedArr = toTs(ssd, pta);
+          const plannedDep = toTs(ssd, ptd);
 
-          if (pta) {
-            eventRows.push({
-              msg_id: m.id,
-              loc_index: idx,
-              received_at: m.received_at,
-              tiploc,
-              tiploc_norm,
-              crs,
-              rid: svcRid,
-              uid: svcUid,
-              event_type: "ARR",
-              planned_time: plannedArr,
-              actual_time: null,
-              late_minutes: null,
-              raw: loc,
-            });
-          }
+          const key = `${rid}::${crs}::${ssd}`;
+          const existing =
+            callByKey.get(key) ?? { rid, uid, ssd, crs, updated_at: nowIso() };
 
-          if (ptd) {
-            eventRows.push({
-              msg_id: m.id,
-              loc_index: idx,
-              received_at: m.received_at,
-              tiploc,
-              tiploc_norm,
-              crs,
-              rid: svcRid,
-              uid: svcUid,
-              event_type: "DEP",
-              planned_time: plannedDep,
-              actual_time: null,
-              late_minutes: null,
-              raw: loc,
-            });
-          }
+          if (plannedArr) existing.planned_arrive = plannedArr;
+          if (plannedDep) existing.planned_depart = plannedDep;
 
-          // Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
-          // NOTE: tiploc_norm is kept ONLY for keying/merge; it will be stripped before DB upsert.
-          if (svcRid && tiploc_norm) {
-            const key = `${svcRid}::${tiploc_norm}`;
-            const existing =
-              callByKey.get(key) ??
-              ({
-                rid: svcRid,
-                uid: svcUid,
-                ssd: svcSsd,
-                crs,
-                tiploc_norm,
-                updated_at: nowIso(),
-              });
-
-            existing.crs = crs ?? existing.crs ?? null;
-
-            if (plannedArr) existing.planned_arrive = plannedArr;
-            if (plannedDep) existing.planned_depart = plannedDep;
-
-            existing.updated_at = nowIso();
-            callByKey.set(key, existing);
-          }
+          existing.updated_at = nowIso();
+          callByKey.set(key, existing);
         }
       }
 
-      // Mark this message processed after handling schedule array
-      markIds.push(m.id);
-      continue;
-    } else {
-      stats.skipped.no_ts++;
       markIds.push(m.id);
       continue;
     }
 
-    // TS path continues here (existing logic):
-    if (!locs.length) {
-      stats.skipped.no_locations++;
-      markIds.push(m.id);
-      continue;
-    }
-
-    // Fill in fallback ssd/rid/uid if missing in TS header
-    const TS = uR.TS;
-    rid = rid ?? getRID(TS);
-    uid = uid ?? getUID(TS);
-    ssd = ssd ?? getSSD(decoded, TS);
-
-    if (!rid || !ssd) {
-      stats.skipped.no_ts++;
-      markIds.push(m.id);
-      continue;
-    }
-
-    for (let idx = 0; idx < locs.length; idx++) {
-      const loc = locs[idx];
-
-      const tiploc = getTIPLOC(loc);
-      const tiploc_norm = normalizeTiplocNorm(tiploc);
-      const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
-
-      const pta = plannedArrStr(loc);
-      const ptd = plannedDepStr(loc);
-      const arrT = actualArrStr(loc);
-      const depT = actualDepStr(loc);
-
-      const plannedArr = toTs(ssd, pta);
-      const actualArr = toTs(ssd, arrT);
-      const lateArr = minutesDiffIso(actualArr, plannedArr);
-
-      if (pta || arrT) {
-        eventRows.push({
-          msg_id: m.id,
-          loc_index: idx,
-          received_at: m.received_at,
-          tiploc,
-          tiploc_norm,
-          crs,
-          rid,
-          uid,
-          event_type: "ARR",
-          planned_time: plannedArr,
-          actual_time: actualArr,
-          late_minutes: lateArr,
-          raw: loc,
-        });
+    // 2) TS messages: update actual calls (your existing TS logic)
+    if (hasTS(j)) {
+      const TS = j?.uR?.TS;
+      if (!TS) {
+        markIds.push(m.id);
+        continue;
       }
 
-      const plannedDep = toTs(ssd, ptd);
-      const actualDep = toTs(ssd, depT);
-      const lateDep = minutesDiffIso(actualDep, plannedDep);
+      const rid = TS.rid ?? getRID(TS) ?? null;
+      const uid = TS.uid ?? getUID(TS) ?? null;
+      const ssd = TS.ssd ?? getSSD(j, TS) ?? null;
 
-      if (ptd || depT) {
-        eventRows.push({
-          msg_id: m.id,
-          loc_index: idx,
-          received_at: m.received_at,
-          tiploc,
-          tiploc_norm,
-          crs,
-          rid,
-          uid,
-          event_type: "DEP",
-          planned_time: plannedDep,
-          actual_time: actualDep,
-          late_minutes: lateDep,
-          raw: loc,
-        });
+      const locs = normalizeLocations(TS.Location);
+      if (!locs.length) {
+        stats.skipped.no_locations++;
+        markIds.push(m.id);
+        continue;
       }
 
-      // PASS updates
-      const ptp = plannedPassStr(loc);
-      const passT = actualPassStr(loc);
+      // Your existing event logic (optional) stays; we keep inserting ARR/DEP/PASS events.
+      for (let idx = 0; idx < locs.length; idx++) {
+        const loc = locs[idx];
 
-      const plannedPass = toTs(ssd, ptp);
-      const actualPass = toTs(ssd, passT);
-      const latePass = minutesDiffIso(actualPass, plannedPass);
+        const tiploc = getTIPLOC(loc);
+        const tiploc_norm = normalizeTiplocNorm(tiploc);
+        const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
 
-      if (ptp || passT) {
-        eventRows.push({
-          msg_id: m.id,
-          loc_index: idx,
-          received_at: m.received_at,
-          tiploc,
-          tiploc_norm,
-          crs,
-          rid,
-          uid,
-          event_type: "PASS",
-          planned_time: plannedPass,
-          actual_time: actualPass,
-          late_minutes: latePass,
-          raw: loc,
-        });
-      }
+        const pta = plannedArrStr(loc);
+        const ptd = plannedDepStr(loc);
+        const arrT = actualArrStr(loc);
+        const depT = actualDepStr(loc);
 
-      // Merge ARR/DEP into one row per rid+tiploc_norm (CRS may be null)
-      // NOTE: tiploc_norm is kept ONLY for keying/merge; it will be stripped before DB upsert.
-      if (rid && tiploc_norm) {
-        const key = `${rid}::${tiploc_norm}`;
-        const existing =
-          callByKey.get(key) ??
-          ({
+        const plannedArr = toTs(ssd, pta);
+        const actualArr = toTs(ssd, arrT);
+        const lateArr = minutesDiffIso(actualArr, plannedArr);
+
+        if (pta || arrT) {
+          eventRows.push({
+            msg_id: m.id,
+            loc_index: idx,
+            received_at: m.received_at,
+            tiploc,
+            tiploc_norm,
+            crs,
             rid,
             uid,
-            ssd,
-            crs,
-            tiploc_norm,
-            updated_at: nowIso(),
+            event_type: "ARR",
+            planned_time: plannedArr,
+            actual_time: actualArr,
+            late_minutes: lateArr,
+            raw: loc,
           });
-
-        existing.crs = crs ?? existing.crs ?? null;
-
-        if (plannedArr || actualArr) {
-          existing.planned_arrive = plannedArr ?? existing.planned_arrive ?? null;
-          existing.actual_arrive = actualArr ?? existing.actual_arrive ?? null;
-          existing.late_arrive_min = lateArr ?? existing.late_arrive_min ?? null;
         }
 
-        if (plannedDep || actualDep) {
-          existing.planned_depart = plannedDep ?? existing.planned_depart ?? null;
-          existing.actual_depart = actualDep ?? existing.actual_depart ?? null;
-          existing.late_depart_min = lateDep ?? existing.late_depart_min ?? null;
+        const plannedDep = toTs(ssd, ptd);
+        const actualDep = toTs(ssd, depT);
+        const lateDep = minutesDiffIso(actualDep, plannedDep);
+
+        if (ptd || depT) {
+          eventRows.push({
+            msg_id: m.id,
+            loc_index: idx,
+            received_at: m.received_at,
+            tiploc,
+            tiploc_norm,
+            crs,
+            rid,
+            uid,
+            event_type: "DEP",
+            planned_time: plannedDep,
+            actual_time: actualDep,
+            late_minutes: lateDep,
+            raw: loc,
+          });
         }
 
-        existing.updated_at = nowIso();
-        callByKey.set(key, existing);
+        const ptp = plannedPassStr(loc);
+        const passT = actualPassStr(loc);
+
+        const plannedPass = toTs(ssd, ptp);
+        const actualPass = toTs(ssd, passT);
+        const latePass = minutesDiffIso(actualPass, plannedPass);
+
+        if (ptp || passT) {
+          eventRows.push({
+            msg_id: m.id,
+            loc_index: idx,
+            received_at: m.received_at,
+            tiploc,
+            tiploc_norm,
+            crs,
+            rid,
+            uid,
+            event_type: "PASS",
+            planned_time: plannedPass,
+            actual_time: actualPass,
+            late_minutes: latePass,
+            raw: loc,
+          });
+        }
+
+        // IMPORTANT: for calls, require rid+ssd+crs and key is rid::crs::ssd (PK is rid,crs,ssd)
+        if (rid && ssd && crs) {
+          const key = `${rid}::${crs}::${ssd}`;
+          const existing =
+            callByKey.get(key) ?? { rid, uid, ssd, crs, updated_at: nowIso() };
+
+          const arrT2 = actualArrStr(loc);
+          const depT2 = actualDepStr(loc);
+
+          const plannedArr2 = toTs(ssd, plannedArrStr(loc));
+          const actualArr2 = toTs(ssd, arrT2);
+          const lateArr2 = minutesDiffIso(actualArr2, plannedArr2);
+
+          const plannedDep2 = toTs(ssd, plannedDepStr(loc));
+          const actualDep2 = toTs(ssd, depT2);
+          const lateDep2 = minutesDiffIso(actualDep2, plannedDep2);
+
+          if (plannedArr2 || actualArr2) {
+            existing.planned_arrive = plannedArr2 ?? existing.planned_arrive ?? null;
+            existing.actual_arrive = actualArr2 ?? existing.actual_arrive ?? null;
+            existing.late_arrive_min = lateArr2 ?? existing.late_arrive_min ?? null;
+          }
+          if (plannedDep2 || actualDep2) {
+            existing.planned_depart = plannedDep2 ?? existing.planned_depart ?? null;
+            existing.actual_depart = actualDep2 ?? existing.actual_depart ?? null;
+            existing.late_depart_min = lateDep2 ?? existing.late_depart_min ?? null;
+          }
+
+          existing.updated_at = nowIso();
+          callByKey.set(key, existing);
+        }
       }
+
+      markIds.push(m.id);
+      continue;
     }
 
+    // anything else: just mark processed
+    stats.skipped.no_ts++;
     markIds.push(m.id);
   }
 
