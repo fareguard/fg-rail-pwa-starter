@@ -12,7 +12,7 @@ import { createClient } from "@supabase/supabase-js";
  * - Normalizes TIPLOC + CRS mapping
  * - darwin_events insert-only (ignore duplicates)
  * - darwin_service_calls upsert with column whitelist (no stray fields)
- * - ALWAYS marks messages processed even if inserts fail
+ * - Marks messages processed via RPC grouped by kind (observability)
  * - Backoff + jitter to avoid thrash
  * =========================
  */
@@ -25,7 +25,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const LOOP_SLEEP_MS = Number(process.env.DARWIN_PROCESS_LOOP_SLEEP_MS ?? "750"); // small delay per loop
 const MAX_MESSAGES = Number(process.env.DARWIN_PROCESS_MAX_MESSAGES ?? "200");
 const MAX_RUN_MS = Number(process.env.DARWIN_PROCESS_MAX_MS ?? "15000"); // timebox per loop
-const MARK_CHUNK = Number(process.env.DARWIN_MARK_CHUNK ?? "2000"); // update processed_at in chunks
+const MARK_CHUNK = Number(process.env.DARWIN_MARK_CHUNK ?? "2000"); // rpc in chunks
 const UPSERT_CHUNK = Number(process.env.DARWIN_UPSERT_CHUNK ?? "2000"); // upsert events in chunks
 
 // Mapping cache refresh
@@ -37,7 +37,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 // 3) Deploy sanity check (version marker)
-console.log("[darwin-processor] version", "2026-01-29-c");
+console.log("[darwin-processor] version", "2026-01-30-a");
 
 // Quick “wrong database” check (catches loads of issues)
 console.log("[darwin-processor] boot", {
@@ -253,20 +253,21 @@ async function fetchMessagesNewestFirst(limit) {
     .limit(limit);
 }
 
-async function markProcessed(ids) {
+// Step B — group marking by kind, and call RPC per group
+async function markProcessedKind(ids, kind, err = null) {
   if (!ids.length) return 0;
+
   let marked = 0;
-
   for (const chunk of chunkArray(ids, MARK_CHUNK)) {
-    const { error } = await db
-      .from("darwin_messages")
-      // clear process_error when processed
-      .update({ processed_at: nowIso(), process_error: null })
-      .in("id", chunk);
-
-    if (error) throw new Error("markProcessed failed: " + error.message);
-    marked += chunk.length;
+    const { data, error } = await db.rpc("darwin_mark_processed", {
+      p_ids: chunk,
+      p_kind: kind,
+      p_error: err,
+    });
+    if (error) throw new Error("darwin_mark_processed failed: " + error.message);
+    marked += data ?? 0;
   }
+
   return marked;
 }
 
@@ -338,7 +339,18 @@ async function processOnce() {
 
   const tiplocMap = await loadTiplocMap();
 
-  const markIds = [];
+  const mark = {
+    ts_location: [],
+    schedule: [],
+    skip_no_bytes: [],
+    skip_bad_json: [],
+    skip_not_schedule: [],
+    skip_no_ts: [],
+    skip_no_locations: [],
+    error_events_upsert: [],
+    error_calls_upsert: [],
+  };
+
   const eventRows = [];
   const callByKey = new Map(); // rid::crs::ssd -> merged call row
 
@@ -353,21 +365,20 @@ async function processOnce() {
     const bytes = m.payload?.bytes;
     if (!bytes) {
       stats.skipped.no_bytes++;
-      markIds.push(m.id);
+      mark.skip_no_bytes.push(m.id);
       continue;
     }
 
-    // Step 2 patch: replace looksLikeSchedule(bytes) with looksLikeRelevant(bytes)
     if (!looksLikeRelevant(bytes)) {
       stats.skipped.not_schedule++;
-      markIds.push(m.id);
+      mark.skip_not_schedule.push(m.id);
       continue;
     }
 
     const decoded = safeJsonParse(bytes);
     if (!decoded) {
       stats.skipped.bad_json++;
-      markIds.push(m.id);
+      mark.skip_bad_json.push(m.id);
       continue;
     }
 
@@ -415,7 +426,7 @@ async function processOnce() {
         }
       }
 
-      markIds.push(m.id);
+      mark.schedule.push(m.id);
       continue;
     }
 
@@ -423,7 +434,8 @@ async function processOnce() {
     if (hasTS(j)) {
       const TS = j?.uR?.TS;
       if (!TS) {
-        markIds.push(m.id);
+        stats.skipped.no_ts++;
+        mark.skip_no_ts.push(m.id);
         continue;
       }
 
@@ -434,7 +446,7 @@ async function processOnce() {
       const locs = normalizeLocations(TS.Location);
       if (!locs.length) {
         stats.skipped.no_locations++;
-        markIds.push(m.id);
+        mark.skip_no_locations.push(m.id);
         continue;
       }
 
@@ -554,16 +566,16 @@ async function processOnce() {
         }
       }
 
-      markIds.push(m.id);
+      mark.ts_location.push(m.id);
       continue;
     }
 
     // anything else: just mark processed
     stats.skipped.no_ts++;
-    markIds.push(m.id);
+    mark.skip_no_ts.push(m.id);
   }
 
-  // 2) Critical: always mark messages processed even if inserts fail
+  // ---- inserts (capture errors, but don't stop marking) ----
   let insertErr = null;
   let callsErr = null;
 
@@ -584,31 +596,49 @@ async function processOnce() {
     stats.ok = false;
   }
 
-  // still mark processed no matter what
+  // ---- marking via RPC per group (observability) ----
+  // If events upsert fails: mark TS messages as error_events_upsert.
+  // If calls upsert fails: mark schedule+TS messages as error_calls_upsert.
+  // (If both fail: TS messages get error_events_upsert; schedule gets error_calls_upsert.)
   try {
-    stats.messagesMarked = await markProcessed(markIds);
+    let marked = 0;
+
+    // Skip buckets always marked normally
+    marked += await markProcessedKind(mark.skip_no_bytes, "skip_no_bytes");
+    marked += await markProcessedKind(mark.skip_bad_json, "skip_bad_json");
+    marked += await markProcessedKind(mark.skip_not_schedule, "skip_not_schedule");
+    marked += await markProcessedKind(mark.skip_no_ts, "skip_no_ts");
+    marked += await markProcessedKind(mark.skip_no_locations, "skip_no_locations");
+
+    // Schedule + TS buckets with error routing
+    if (callsErr) {
+      const union = Array.from(new Set([...mark.schedule, ...mark.ts_location]));
+      marked += await markProcessedKind(
+        union,
+        "error_calls_upsert",
+        callsErr?.message ? `calls_upsert: ${callsErr.message}` : "calls_upsert failed"
+      );
+    } else {
+      // schedule OK
+      marked += await markProcessedKind(mark.schedule, "schedule");
+    }
+
+    if (insertErr) {
+      marked += await markProcessedKind(
+        mark.ts_location,
+        "error_events_upsert",
+        insertErr?.message ? `events_upsert: ${insertErr.message}` : "events_upsert failed"
+      );
+    } else if (!callsErr) {
+      // TS OK (only if not already marked as calls-error)
+      marked += await markProcessedKind(mark.ts_location, "ts_location");
+    }
+
+    stats.messagesMarked = marked;
   } catch (e) {
     console.error("MARK PROCESSED ERROR:", e?.message || e);
     stats.ok = false;
     stats.skipped.mark_error++;
-  }
-
-  // optionally write process_error if insertErr/callsErr happened (best-effort)
-  if (insertErr || callsErr) {
-    const msg = [
-      insertErr ? `events_upsert: ${insertErr.message}` : null,
-      callsErr ? `calls_upsert: ${callsErr.message}` : null,
-    ]
-      .filter(Boolean)
-      .join(" | ");
-
-    try {
-      await db.from("darwin_messages").update({ process_error: msg }).in("id", markIds);
-    } catch (e) {
-      console.error("PROCESS_ERROR UPDATE FAILED:", e?.message || e);
-    }
-
-    stats.ok = false;
   }
 
   return stats;
