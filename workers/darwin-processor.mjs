@@ -253,7 +253,7 @@ async function fetchMessagesNewestFirst(limit) {
     .limit(limit);
 }
 
-// Step B — group marking by kind, and call RPC per group
+// Step B — change your worker to group IDs by kind, then call the RPC per group
 async function markProcessedKind(ids, kind, err = null) {
   if (!ids.length) return 0;
 
@@ -339,6 +339,7 @@ async function processOnce() {
 
   const tiplocMap = await loadTiplocMap();
 
+  // Replace single markIds with per-kind buckets
   const mark = {
     ts_location: [],
     schedule: [],
@@ -597,9 +598,11 @@ async function processOnce() {
   }
 
   // ---- marking via RPC per group (observability) ----
-  // If events upsert fails: mark TS messages as error_events_upsert.
-  // If calls upsert fails: mark schedule+TS messages as error_calls_upsert.
-  // (If both fail: TS messages get error_events_upsert; schedule gets error_calls_upsert.)
+  // Priority rules:
+  // - If events upsert fails: TS messages -> error_events_upsert
+  // - Else if calls upsert fails: TS messages -> error_calls_upsert
+  // - Schedule messages: if calls upsert fails -> error_calls_upsert, else -> schedule
+  // Skip buckets always marked normally.
   try {
     let marked = 0;
 
@@ -610,27 +613,31 @@ async function processOnce() {
     marked += await markProcessedKind(mark.skip_no_ts, "skip_no_ts");
     marked += await markProcessedKind(mark.skip_no_locations, "skip_no_locations");
 
-    // Schedule + TS buckets with error routing
+    // Schedule bucket
     if (callsErr) {
-      const union = Array.from(new Set([...mark.schedule, ...mark.ts_location]));
       marked += await markProcessedKind(
-        union,
+        mark.schedule,
         "error_calls_upsert",
         callsErr?.message ? `calls_upsert: ${callsErr.message}` : "calls_upsert failed"
       );
     } else {
-      // schedule OK
       marked += await markProcessedKind(mark.schedule, "schedule");
     }
 
+    // TS bucket (priority: events error > calls error > ok)
     if (insertErr) {
       marked += await markProcessedKind(
         mark.ts_location,
         "error_events_upsert",
         insertErr?.message ? `events_upsert: ${insertErr.message}` : "events_upsert failed"
       );
-    } else if (!callsErr) {
-      // TS OK (only if not already marked as calls-error)
+    } else if (callsErr) {
+      marked += await markProcessedKind(
+        mark.ts_location,
+        "error_calls_upsert",
+        callsErr?.message ? `calls_upsert: ${callsErr.message}` : "calls_upsert failed"
+      );
+    } else {
       marked += await markProcessedKind(mark.ts_location, "ts_location");
     }
 
