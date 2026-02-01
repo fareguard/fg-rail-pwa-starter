@@ -274,13 +274,16 @@ function chunkArray(arr, size) {
 }
 
 // ---- main processing ----
-async function fetchMessagesNewestFirst(limit) {
-  // IMPORTANT: no JSON-path filters here (production-grade robustness)
+
+// ✅ fetch supports ordering by env (backfill = oldest-first)
+async function fetchMessages(limit) {
+  const orderAsc = process.env.DARWIN_BACKFILL === "1"; // backfill mode
+
   return await db
     .from("darwin_messages")
     .select("id,received_at,topic,payload")
     .is("processed_at", null)
-    .order("received_at", { ascending: false })
+    .order("received_at", { ascending: orderAsc })
     .limit(limit);
 }
 
@@ -378,7 +381,7 @@ async function processOnce() {
     config: { MAX_MESSAGES, MAX_RUN_MS },
   };
 
-  const { data: msgs, error } = await fetchMessagesNewestFirst(MAX_MESSAGES);
+  const { data: msgs, error } = await fetchMessages(MAX_MESSAGES);
   if (error) throw new Error("fetch messages failed: " + error.message);
 
   // ✅ allow reload-on-miss to mutate this reference
