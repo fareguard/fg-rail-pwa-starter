@@ -28,15 +28,15 @@ const MAX_RUN_MS = Number(process.env.DARWIN_PROCESS_MAX_MS ?? "15000"); // time
 const MARK_CHUNK = Number(process.env.DARWIN_MARK_CHUNK ?? "2000"); // rpc in chunks
 const UPSERT_CHUNK = Number(process.env.DARWIN_UPSERT_CHUNK ?? "2000"); // upsert events in chunks
 
-// Mapping cache refresh
-const MAP_TTL_MS = Number(process.env.DARWIN_TIPLOC_MAP_TTL_MS ?? String(10 * 60 * 1000)); // 10 mins
+// Mapping cache refresh (shorter while iterating)
+const MAP_TTL_MS = Number(process.env.DARWIN_TIPLOC_MAP_TTL_MS ?? String(60 * 1000)); // 1 min
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   process.exit(1);
 }
 
-// 3) Deploy sanity check (version marker)
+// Deploy sanity check (version marker)
 console.log("[darwin-processor] version", "2026-01-30-a");
 
 // Quick “wrong database” check (catches loads of issues)
@@ -63,7 +63,6 @@ function safeJsonParse(s) {
 }
 
 // Cheap prefilter (avoid parsing heartbeats/failures/etc)
-// Step 2 — Fix the processor prefilter (key)
 function looksLikeRelevant(bytes) {
   if (typeof bytes !== "string") return false;
   // TS updates (movement) OR schedule messages (timetable)
@@ -75,7 +74,7 @@ function looksLikeRelevant(bytes) {
 }
 
 /**
- * Step 2 — “bulletproof” normalization helpers
+ * “bulletproof” normalization helpers
  * Darwin payloads vary a lot across feeds/versions.
  */
 function normalizeLocations(x) {
@@ -142,7 +141,7 @@ function actualPassStr(loc) {
   return pickFirstString(loc?.pass?.at, loc?.pass?.et, loc?.pass?.wet);
 }
 
-// Step 2 patch: schedule[] + TS detection/helpers
+// schedule[] + TS detection/helpers
 function hasSchedule(j) {
   const s = j?.uR?.schedule;
   return Array.isArray(s) && s.length > 0;
@@ -162,6 +161,9 @@ function extractScheduleStops(sch) {
 
   // IP can be object or array
   if (sch.IP) stops.push(...normalizeLocations(sch.IP));
+
+  // ✅ add PP (passing points) — can be object or array
+  if (sch.PP) stops.push(...normalizeLocations(sch.PP));
 
   // Some schedules have OPOR/OPDT (non-passenger etc)
   if (sch.OPOR) stops.push(sch.OPOR);
@@ -214,14 +216,20 @@ function minutesDiffIso(lateIso, earlyIso) {
 let TIPLOC_TO_CRS = null;
 let TIPLOC_TO_CRS_LOADED_AT = 0;
 
-async function loadTiplocMap() {
+// ✅ reload-on-miss throttle
+let MAP_FORCE_RELOAD_AT = 0;
+
+async function loadTiplocMap(force = false) {
   const now = Date.now();
-  if (TIPLOC_TO_CRS && now - TIPLOC_TO_CRS_LOADED_AT < MAP_TTL_MS) {
+  if (!force && TIPLOC_TO_CRS && now - TIPLOC_TO_CRS_LOADED_AT < MAP_TTL_MS) {
     return TIPLOC_TO_CRS;
   }
 
-  // Load minimal fields only
-  const { data, error } = await db.from("tiploc_crs").select("tiploc, crs");
+  const { data, error } = await db
+    .from("tiploc_crs")
+    .select("tiploc, crs")
+    .not("crs", "is", null); // ✅ don’t even fetch null crs rows
+
   if (error) throw new Error("Failed loading tiploc_crs: " + error.message);
 
   const m = new Map();
@@ -253,7 +261,7 @@ async function fetchMessagesNewestFirst(limit) {
     .limit(limit);
 }
 
-// Step B — change your worker to group IDs by kind, then call the RPC per group
+// Group IDs by kind, then call the RPC per group
 async function markProcessedKind(ids, kind, err = null) {
   if (!ids.length) return 0;
 
@@ -284,6 +292,19 @@ async function upsertEvents(rows) {
     if (error) throw new Error("events_upsert: " + error.message);
   }
   return rows.length;
+}
+
+// ✅ in-memory dedupe before upsert
+function dedupeEvents(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    const k = `${r.msg_id}::${r.loc_index}::${r.event_type}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
 }
 
 // 1B) darwin_service_calls: whitelist real columns (do NOT send stray fields)
@@ -337,7 +358,11 @@ async function processOnce() {
   const { data: msgs, error } = await fetchMessagesNewestFirst(MAX_MESSAGES);
   if (error) throw new Error("fetch messages failed: " + error.message);
 
-  const tiplocMap = await loadTiplocMap();
+  // ✅ allow reload-on-miss to mutate this reference
+  let tiplocMap = await loadTiplocMap();
+
+  // ✅ track unknown TIPLOCs per tick
+  const missingTiplocs = new Map(); // tiploc_norm -> count
 
   // Replace single markIds with per-kind buckets
   const mark = {
@@ -405,14 +430,28 @@ async function processOnce() {
         for (const loc of stops) {
           const tiploc = loc?.tpl ?? null;
           const tiploc_norm = normalizeTiplocNorm(tiploc);
-          const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+
+          let crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+
+          // ✅ reload-on-miss once/min if we keep seeing unknown TIPLOCs
+          if (tiploc_norm && !crs) {
+            missingTiplocs.set(tiploc_norm, (missingTiplocs.get(tiploc_norm) ?? 0) + 1);
+            if (missingTiplocs.get(tiploc_norm) >= 10 && Date.now() > MAP_FORCE_RELOAD_AT) {
+              MAP_FORCE_RELOAD_AT = Date.now() + 60_000;
+              tiplocMap = await loadTiplocMap(true);
+              crs = tiplocMap.get(tiploc_norm) ?? null;
+            }
+          }
+
           if (!crs) continue; // only store stations
 
           const pta = plannedArrStr(loc);
           const ptd = plannedDepStr(loc);
+          const ptp = plannedPassStr(loc);
 
           const plannedArr = toTs(ssd, pta);
           const plannedDep = toTs(ssd, ptd);
+          const plannedPass = toTs(ssd, ptp);
 
           // PK key includes ssd: rid::crs::ssd
           const key = `${rid}::${crs}::${ssd}`;
@@ -421,6 +460,11 @@ async function processOnce() {
 
           if (plannedArr) existing.planned_arrive = plannedArr;
           if (plannedDep) existing.planned_depart = plannedDep;
+
+          // ✅ conservative: if we only have pass time, populate planned_arrive if missing
+          if (plannedPass) {
+            existing.planned_arrive = existing.planned_arrive ?? plannedPass;
+          }
 
           existing.updated_at = nowIso();
           callByKey.set(key, existing);
@@ -456,7 +500,18 @@ async function processOnce() {
 
         const tiploc = getTIPLOC(loc);
         const tiploc_norm = normalizeTiplocNorm(tiploc);
-        const crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+
+        let crs = tiploc_norm ? (tiplocMap.get(tiploc_norm) ?? null) : null;
+
+        // ✅ reload-on-miss once/min if we keep seeing unknown TIPLOCs
+        if (tiploc_norm && !crs) {
+          missingTiplocs.set(tiploc_norm, (missingTiplocs.get(tiploc_norm) ?? 0) + 1);
+          if (missingTiplocs.get(tiploc_norm) >= 10 && Date.now() > MAP_FORCE_RELOAD_AT) {
+            MAP_FORCE_RELOAD_AT = Date.now() + 60_000;
+            tiplocMap = await loadTiplocMap(true);
+            crs = tiplocMap.get(tiploc_norm) ?? null;
+          }
+        }
 
         const pta = plannedArrStr(loc);
         const ptd = plannedDepStr(loc);
@@ -581,7 +636,8 @@ async function processOnce() {
   let callsErr = null;
 
   try {
-    stats.eventsInserted = await upsertEvents(eventRows);
+    const dedupedEventRows = dedupeEvents(eventRows);
+    stats.eventsInserted = await upsertEvents(dedupedEventRows);
   } catch (e) {
     insertErr = e instanceof Error ? e : new Error(String(e));
     console.error("EVENT UPSERT ERROR:", insertErr?.message || insertErr);
