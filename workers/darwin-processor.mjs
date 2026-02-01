@@ -49,6 +49,29 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
+// ✅ Right after the boot log, add an actual DB read so logs prove which DB you’re on:
+try {
+  const { data: ping, error: pingErr } = await db
+    .from("darwin_messages")
+    .select("id, received_at")
+    .order("received_at", { ascending: false })
+    .limit(1);
+
+  console.log("[darwin-processor] db ping", {
+    ok: !pingErr,
+    pingErr: pingErr?.message ?? null,
+    newestMsgId: ping?.[0]?.id ?? null,
+    newestMsgAt: ping?.[0]?.received_at ?? null,
+  });
+} catch (e) {
+  console.log("[darwin-processor] db ping", {
+    ok: false,
+    pingErr: e?.message ?? String(e),
+    newestMsgId: null,
+    newestMsgAt: null,
+  });
+}
+
 // ---- tiny utils ----
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowIso = () => new Date().toISOString();
