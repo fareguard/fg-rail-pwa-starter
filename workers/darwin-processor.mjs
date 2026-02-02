@@ -14,6 +14,7 @@ import { createClient } from "@supabase/supabase-js";
  * - darwin_service_calls upsert with column whitelist (no stray fields)
  * - Marks messages processed via RPC grouped by kind (observability)
  * - Backoff + jitter to avoid thrash
+ * - RPC advisory lock to prevent multiple workers competing
  * =========================
  */
 
@@ -264,6 +265,18 @@ async function loadTiplocMap(force = false) {
   TIPLOC_TO_CRS = m;
   TIPLOC_TO_CRS_LOADED_AT = now;
   return m;
+}
+
+// ---- RPC lock helpers ----
+async function tryDarwinLock() {
+  const { data, error } = await db.rpc("darwin_try_lock");
+  if (error) throw new Error("darwin_try_lock failed: " + error.message);
+  return !!data;
+}
+
+async function darwinUnlock() {
+  const { error } = await db.rpc("darwin_unlock");
+  if (error) throw new Error("darwin_unlock failed: " + error.message);
 }
 
 // ---- chunk helpers ----
@@ -746,7 +759,26 @@ async function main() {
   let backoff = 250;
 
   while (true) {
-    // heartbeat log per loop
+    // ---- advisory lock gate ----
+    let gotLock = false;
+    try {
+      gotLock = await tryDarwinLock();
+    } catch (e) {
+      console.error("[darwin-processor] lock rpc error:", e?.message || e);
+      // treat as "no lock" and backoff a bit so we don't thrash
+      const jitter = Math.floor(Math.random() * 250);
+      await sleep(Math.min(10_000, backoff + jitter));
+      backoff = Math.min(10_000, backoff * 2);
+      continue;
+    }
+
+    if (!gotLock) {
+      // Another worker holds the lock — sleep and keep looping
+      await sleep(LOOP_SLEEP_MS);
+      continue;
+    }
+
+    // heartbeat log per loop (only when we're the lock holder)
     console.log("[darwin-processor] loop", { at: new Date().toISOString() });
 
     try {
@@ -759,6 +791,13 @@ async function main() {
       const jitter = Math.floor(Math.random() * 250);
       await sleep(Math.min(10_000, backoff + jitter));
       backoff = Math.min(10_000, backoff * 2);
+    } finally {
+      // release lock so another worker can take over if needed
+      try {
+        await darwinUnlock();
+      } catch (e) {
+        console.error("[darwin-processor] unlock rpc error:", e?.message || e);
+      }
     }
 
     await sleep(LOOP_SLEEP_MS);
