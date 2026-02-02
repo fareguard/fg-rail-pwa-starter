@@ -267,18 +267,6 @@ async function loadTiplocMap(force = false) {
   return m;
 }
 
-// ---- RPC lock helpers ----
-async function tryDarwinLock() {
-  const { data, error } = await db.rpc("darwin_try_lock");
-  if (error) throw new Error("darwin_try_lock failed: " + error.message);
-  return !!data;
-}
-
-async function darwinUnlock() {
-  const { error } = await db.rpc("darwin_unlock");
-  if (error) throw new Error("darwin_unlock failed: " + error.message);
-}
-
 // ---- chunk helpers ----
 function chunkArray(arr, size) {
   const out = [];
@@ -316,6 +304,16 @@ async function markProcessedKind(ids, kind, err = null) {
   }
 
   return marked;
+}
+
+// 1️⃣ Add this helper near your RPC helpers (near markProcessedKind)
+async function tryAcquireLock() {
+  const { data, error } = await db.rpc("darwin_try_lock");
+  if (error) {
+    console.error("[darwin-processor] lock rpc failed:", error.message);
+    return false;
+  }
+  return data === true;
 }
 
 // 1A) darwin_events: insert-only (ignore duplicates) on (msg_id, loc_index, event_type)
@@ -373,6 +371,21 @@ async function upsertServiceCalls(callRows) {
 }
 
 async function processOnce() {
+  // ---- advisory lock (single active processor) ----
+  const hasLock = await tryAcquireLock();
+  if (!hasLock) {
+    // another worker owns the lock – skip quietly
+    return {
+      ok: true,
+      examined: 0,
+      eventsInserted: 0,
+      callsUpserted: 0,
+      messagesMarked: 0,
+      skipped: { locked: 1 },
+      config: { MAX_MESSAGES, MAX_RUN_MS },
+    };
+  }
+
   const started = Date.now();
 
   const stats = {
@@ -382,6 +395,7 @@ async function processOnce() {
     callsUpserted: 0,
     messagesMarked: 0,
     skipped: {
+      locked: 0,
       no_bytes: 0,
       bad_json: 0,
       not_schedule: 0,
@@ -759,26 +773,7 @@ async function main() {
   let backoff = 250;
 
   while (true) {
-    // ---- advisory lock gate ----
-    let gotLock = false;
-    try {
-      gotLock = await tryDarwinLock();
-    } catch (e) {
-      console.error("[darwin-processor] lock rpc error:", e?.message || e);
-      // treat as "no lock" and backoff a bit so we don't thrash
-      const jitter = Math.floor(Math.random() * 250);
-      await sleep(Math.min(10_000, backoff + jitter));
-      backoff = Math.min(10_000, backoff * 2);
-      continue;
-    }
-
-    if (!gotLock) {
-      // Another worker holds the lock — sleep and keep looping
-      await sleep(LOOP_SLEEP_MS);
-      continue;
-    }
-
-    // heartbeat log per loop (only when we're the lock holder)
+    // heartbeat log per loop
     console.log("[darwin-processor] loop", { at: new Date().toISOString() });
 
     try {
@@ -791,13 +786,6 @@ async function main() {
       const jitter = Math.floor(Math.random() * 250);
       await sleep(Math.min(10_000, backoff + jitter));
       backoff = Math.min(10_000, backoff * 2);
-    } finally {
-      // release lock so another worker can take over if needed
-      try {
-        await darwinUnlock();
-      } catch (e) {
-        console.error("[darwin-processor] unlock rpc error:", e?.message || e);
-      }
     }
 
     await sleep(LOOP_SLEEP_MS);
