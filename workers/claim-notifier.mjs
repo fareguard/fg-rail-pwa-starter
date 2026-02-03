@@ -1,18 +1,20 @@
 // workers/claim-notifier.mjs
-// Queue-based notifier for FareGuard V1 (email CTA to Delay Repay).
-// - Normal mode: pops due claims via public.claims_pop_notify(), sends via Resend, updates claims notify_* fields.
-// - Test mode: if NOTIFY_TEST_CLAIM_ID is set, sends ONE email for that claim_id and exits (NO DB writes).
+// Outbox-based notifier for FareGuard V1 (email CTA to Delay Repay).
+// - Normal mode: locks worker via email_try_lock(), fetches+locks due rows from email_outbox, sends via Resend,
+//   logs to notifications_log, updates email_outbox + claims.email_outbox_id/emailed_at/status.
+// - Test mode: if NOTIFY_TEST_CLAIM_ID is set, sends ONE email for latest outbox row for that claim_id and exits (NO DB writes).
 //
 // Env vars required:
 //   SUPABASE_URL
 //   SUPABASE_SERVICE_ROLE_KEY
 //   RESEND_API_KEY
-//   EMAIL_FROM                 e.g. 'FareGuard <hello@notify.fareguard.co.uk>'
+//   EMAIL_FROM (or RESEND_FROM)  e.g. 'FareGuard <hello@notify.fareguard.co.uk>'
 // Optional:
 //   EMAIL_REPLY_TO             e.g. 'support@fareguard.co.uk'
 //   APP_PUBLIC_URL             e.g. 'https://fareguard.co.uk' (used for dashboard link)
-//   NOTIFY_SLEEP_MS            default 15000
-//   NOTIFY_BATCH               default 1
+//   NOTIFY_SLEEP_MS            default 5000
+//   NOTIFY_BATCH               default 25
+//   EMAIL_LOCK_KEY             default 92233721 (stable int for advisory lock)
 //   NOTIFY_TEST_CLAIM_ID       uuid - send once + exit (no DB writes)
 //   NOTIFY_TEST_TO_EMAIL       overrides recipient in test mode
 
@@ -24,10 +26,16 @@ const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const resendKey = process.env.RESEND_API_KEY;
 const EMAIL_FROM = process.env.EMAIL_FROM;
+const RESEND_FROM = process.env.RESEND_FROM || process.env.EMAIL_FROM; // support both env names
 const EMAIL_REPLY_TO = process.env.EMAIL_REPLY_TO || null;
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || "";
-const SLEEP_MS = parseInt(process.env.NOTIFY_SLEEP_MS || "15000", 10);
-const BATCH = parseInt(process.env.NOTIFY_BATCH || "1", 10);
+
+// --- constants (after env parsing) ---
+const WORKER_ID = process.env.RAILWAY_SERVICE_NAME || process.env.HOSTNAME || "claim-notifier";
+const LOCK_KEY = BigInt(process.env.EMAIL_LOCK_KEY || "92233721"); // pick any stable int
+const BATCH = parseInt(process.env.NOTIFY_BATCH || "25", 10);
+const SLEEP_MS = parseInt(process.env.NOTIFY_SLEEP_MS || "5000", 10);
+// -----------------------------------
 
 const TEST_CLAIM_ID = (process.env.NOTIFY_TEST_CLAIM_ID || "").trim();
 const TEST_TO_EMAIL = (process.env.NOTIFY_TEST_TO_EMAIL || "").trim();
@@ -42,7 +50,7 @@ function must(val, name) {
 must(supabaseUrl, "SUPABASE_URL");
 must(serviceKey, "SUPABASE_SERVICE_ROLE_KEY");
 must(resendKey, "RESEND_API_KEY");
-must(EMAIL_FROM, "EMAIL_FROM");
+must(RESEND_FROM, "EMAIL_FROM (or RESEND_FROM)");
 
 const db = createClient(supabaseUrl, serviceKey, {
   auth: { persistSession: false },
@@ -213,47 +221,79 @@ function buildClaimReadyEmail({
 }
 
 /**
- * Existing worker helpers
+ * Outbox + locking helpers
  */
-function safeText(x, fallback = "") {
-  if (x === null || x === undefined) return fallback;
-  return String(x);
+async function tryWorkerLock() {
+  const { data, error } = await db.rpc("email_try_lock", { p_key: Number(LOCK_KEY) });
+  if (error) throw error;
+  return !!data;
 }
 
-async function rpcClaimsPopNotify(limit) {
-  const { data, error } = await db.rpc("claims_pop_notify", { p_limit: limit });
-  if (error) throw error;
-  // returns [{ claim_id: uuid }, ...]
-  return (data || []).map((r) => r.claim_id);
+async function unlockWorker() {
+  const { error } = await db.rpc("email_unlock", { p_key: Number(LOCK_KEY) });
+  if (error) console.error("email_unlock failed", error.message);
 }
 
-async function rpcClaimGetCta(claimId) {
-  const { data, error } = await db.rpc("claim_get_cta", { p_claim_id: claimId });
-  if (error) throw error;
-  // returns array with one row or empty
-  return data?.[0] || null;
+async function logOutbox(outboxId, event, detail = {}) {
+  const { error } = await db.from("notifications_log").insert({
+    outbox_id: outboxId,
+    event,
+    detail,
+  });
+  if (error) console.error("notifications_log insert failed", error.message);
 }
 
-async function getClaimRow(claimId) {
-  const { data, error } = await db
-    .from("claims")
-    .select(
-      "id, trip_id, user_email, status, meta, operator, origin, destination, depart_planned, arrive_planned, notify_status, notify_attempts"
-    )
-    .eq("id", claimId)
-    .maybeSingle();
+async function fetchAndLockOutbox(limit) {
+  // 1) pick due rows
+  const { data: rows, error } = await db
+    .from("email_outbox")
+    .select("id, claim_id, trip_id, to_email, subject, template, payload, attempt_count, status")
+    .in("status", ["queued", "failed"])
+    .lte("next_attempt_at", new Date().toISOString())
+    .is("locked_at", null)
+    .order("next_attempt_at", { ascending: true })
+    .limit(limit);
+
   if (error) throw error;
-  return data || null;
+  if (!rows?.length) return [];
+
+  const ids = rows.map((r) => r.id);
+
+  // 2) lock them (best-effort; concurrency-safe enough for v1 if single worker)
+  const { error: lockErr } = await db
+    .from("email_outbox")
+    .update({
+      locked_at: new Date().toISOString(),
+      locked_by: WORKER_ID,
+      status: "sending",
+    })
+    .in("id", ids);
+
+  if (lockErr) throw lockErr;
+
+  // 3) return the locked rows
+  return rows.map((r) => ({ ...r, status: "sending" }));
 }
 
-async function patchClaim(claimId, patch) {
-  const { error } = await db.from("claims").update(patch).eq("id", claimId);
-  if (error) throw error;
+/**
+ * Build the email from outbox payload (simple V1)
+ */
+function buildOutboxEmail(row) {
+  return buildClaimReadyEmail({
+    appUrl: APP_PUBLIC_URL,
+    claimId: row.claim_id,
+    operator: row.payload?.operator || null,
+    claimUrl: row.payload?.claim_url || null,
+    origin: row.payload?.origin || null,
+    destination: row.payload?.destination || null,
+    departPlanned: row.payload?.depart_planned || null,
+    arrivePlanned: row.payload?.arrive_planned || null,
+  });
 }
 
 async function sendEmail({ to, subject, html }) {
   const payload = {
-    from: EMAIL_FROM,
+    from: RESEND_FROM,
     to,
     subject,
     html,
@@ -264,191 +304,159 @@ async function sendEmail({ to, subject, html }) {
   return resp;
 }
 
-/**
- * Step 1B/1C — Production-ish notifier state updates + wiring buildClaimReadyEmail
- */
-async function processOneClaim(claimId, { testMode = false } = {}) {
-  const claim = await getClaimRow(claimId);
+async function processOneOutbox(row, { testMode = false } = {}) {
+  const toEmail = testMode && TEST_TO_EMAIL ? TEST_TO_EMAIL : row.to_email;
+  const email = buildOutboxEmail(row);
 
-  if (!claim) {
-    if (!testMode) {
-      await patchClaim(claimId, {
-        notify_status: "failed",
-        notify_attempts: 999,
-        notify_last_error: "claim_row_missing",
-        updated_at: new Date().toISOString(),
-      });
-    }
-    return { ok: false, error: "claim_row_missing" };
-  }
+  await logOutbox(row.id, "sending", { to: toEmail, template: row.template });
 
-  // C) Bulletproof guard: only email if claim is actually ready.
-  if (claim.status !== "ready") {
-    // don’t send, put it back
-    if (!testMode) {
-      await patchClaim(claimId, {
-        notify_status: "failed",
-        notify_last_error: "claim_not_ready",
-        notify_queued_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-    }
-    return { ok: false, error: "claim_not_ready" };
-  }
-
-  // Only email if we can address it.
-  const toEmail = testMode && TEST_TO_EMAIL ? TEST_TO_EMAIL : claim.user_email;
-
-  if (!toEmail) {
-    if (!testMode) {
-      await patchClaim(claimId, {
-        notify_status: "suppressed",
-        notify_last_error: "missing_user_email",
-        updated_at: new Date().toISOString(),
-      });
-    }
-    return { ok: false, error: "missing_user_email" };
-  }
-
-  // Get CTA row
-  const cta = await rpcClaimGetCta(claimId);
-
-  // Build email params (Step 1C)
-  const email = buildClaimReadyEmail({
-    appUrl: APP_PUBLIC_URL,
-    claimId: cta?.claim_id || claim.id,
-    operator: cta?.operator,
-    claimUrl: cta?.claim_url,
-    origin: claim?.meta?.origin || claim.origin,
-    destination: claim?.meta?.destination || claim.destination,
-    departPlanned: claim?.meta?.depart_planned || claim.depart_planned,
-    arrivePlanned: claim?.meta?.arrive_planned || claim.arrive_planned,
-  });
-
-  // Send via Resend
   let res;
   try {
-    res = await sendEmail({
-      to: toEmail,
-      subject: email.subject,
-      html: email.html,
-    });
+    res = await sendEmail({ to: toEmail, subject: row.subject || email.subject, html: email.html });
   } catch (e) {
-    // Hard exception (network, etc.)
     const errMsg = e?.message || String(e);
-
-    if (!testMode) {
-      const attempts = (claim.notify_attempts ?? 0) + 1;
-      const backoffMin = Math.min(60, Math.max(2, attempts + 1));
-      const backoffMs = backoffMin * 60 * 1000;
-
-      await patchClaim(claimId, {
-        notify_status: "failed",
-        notify_attempts: attempts,
-        notify_last_error: errMsg,
-        notify_queued_at: new Date(Date.now() + backoffMs).toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-    }
-
-    return { ok: false, error: errMsg };
+    return { ok: false, error: errMsg, messageId: null };
   }
 
-  // Resend returns { data: { id }, error } style
   const resendId = res?.data?.id || null;
-  const sendErr = res?.error ? res.error.message || JSON.stringify(res.error) : null;
+  const sendErr = res?.error ? (res.error.message || JSON.stringify(res.error)) : null;
 
-  if (sendErr) {
-    if (!testMode) {
-      const attempts = (claim.notify_attempts ?? 0) + 1;
-      const backoffMin = Math.min(60, Math.max(2, attempts + 1));
-      const backoffMs = backoffMin * 60 * 1000;
+  if (sendErr) return { ok: false, error: sendErr, messageId: resendId };
 
-      await patchClaim(claimId, {
-        notify_status: "failed",
-        notify_attempts: attempts,
-        notify_last_error: sendErr,
-        notify_queued_at: new Date(Date.now() + backoffMs).toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-    }
+  return { ok: true, messageId: resendId };
+}
 
-    return { ok: false, error: sendErr, messageId: resendId };
-  }
+async function markOutboxSent(outboxId, messageId) {
+  await db
+    .from("email_outbox")
+    .update({
+      status: "sent",
+      provider_message_id: messageId,
+      last_error: null,
+      locked_at: null,
+      locked_by: null,
+    })
+    .eq("id", outboxId);
 
-  // On successful send (Step 1B)
-  if (!testMode) {
-    await patchClaim(claimId, {
-      notify_status: "sent",
-      notified_at: new Date().toISOString(),
-      notify_provider_id: "resend",
-      notify_message_id: resendId,
-      notify_last_error: null,
-      updated_at: new Date().toISOString(),
-    });
-  }
+  await logOutbox(outboxId, "sent", { provider_message_id: messageId });
+}
 
-  return {
-    ok: true,
-    messageId: resendId,
-    to: toEmail,
-    operator: cta?.operator || null,
-    claimUrl: cta?.claim_url || null,
-  };
+async function markOutboxFailed(outboxId, prevAttempts, errMsg) {
+  const attempts = (prevAttempts ?? 0) + 1;
+  const backoffMin = Math.min(60, Math.max(2, attempts)); // 2m, 3m, ... capped at 60
+  const nextAt = new Date(Date.now() + backoffMin * 60 * 1000).toISOString();
+
+  await db
+    .from("email_outbox")
+    .update({
+      status: attempts >= 8 ? "dead" : "failed",
+      attempt_count: attempts,
+      last_error: errMsg,
+      next_attempt_at: nextAt,
+      locked_at: null,
+      locked_by: null,
+    })
+    .eq("id", outboxId);
+
+  await logOutbox(outboxId, attempts >= 8 ? "dead" : "retry_scheduled", {
+    error: errMsg,
+    attempts,
+    nextAt,
+  });
+}
+
+async function markClaimEmailed(claimId, outboxId) {
+  await db
+    .from("claims")
+    .update({
+      status: "emailed",
+      emailed_at: new Date().toISOString(),
+      email_outbox_id: outboxId,
+    })
+    .eq("id", claimId);
 }
 
 async function tickOnce() {
-  // TEST MODE: send one email and exit (no DB writes)
-  if (TEST_CLAIM_ID) {
-    const out = await processOneClaim(TEST_CLAIM_ID, { testMode: true });
-    console.log(
-      JSON.stringify({
-        ok: true,
-        processed: 1,
-        source: "notify.test",
-        test_claim_id: TEST_CLAIM_ID,
-        result: out,
-      })
-    );
-    process.exit(0);
-  }
-
-  const claimIds = await rpcClaimsPopNotify(BATCH);
-  if (!claimIds.length) {
-    console.log(JSON.stringify({ ok: true, processed: 0, source: "notify.none" }));
+  const gotLock = await tryWorkerLock();
+  if (!gotLock) {
+    console.log(JSON.stringify({ ok: true, source: "notify.locked_elsewhere" }));
     return;
   }
 
-  let processed = 0;
-  for (const claimId of claimIds) {
-    let out;
-    try {
-      out = await processOneClaim(claimId, { testMode: false });
-    } catch (e) {
-      const msg = e?.message || String(e);
-      // best-effort mark failed
-      try {
-        const claim = await getClaimRow(claimId);
-        const attempts = (claim?.notify_attempts ?? 0) + 1;
-        const backoffMin = Math.min(60, Math.max(2, attempts + 1));
-        const backoffMs = backoffMin * 60 * 1000;
+  try {
+    // TEST MODE: send ONE outbox row by claim id (optional) - NO DB writes beyond provider send (and no logs)
+    if (TEST_CLAIM_ID) {
+      const { data: row, error } = await db
+        .from("email_outbox")
+        .select("*")
+        .eq("claim_id", TEST_CLAIM_ID)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-        await patchClaim(claimId, {
-          notify_status: "failed",
-          notify_attempts: attempts,
-          notify_last_error: msg,
-          notify_queued_at: new Date(Date.now() + backoffMs).toISOString(),
-          updated_at: new Date().toISOString(),
-        });
-      } catch {}
-      out = { ok: false, error: msg };
+      if (error) throw error;
+
+      if (!row) {
+        console.log(JSON.stringify({ ok: false, source: "notify.test", error: "no_outbox_for_claim" }));
+        return;
+      }
+
+      // in test mode: do not write notifications_log / outbox / claims
+      const out = await (async () => {
+        const toEmail = TEST_TO_EMAIL ? TEST_TO_EMAIL : row.to_email;
+        const email = buildOutboxEmail(row);
+
+        let res;
+        try {
+          res = await sendEmail({ to: toEmail, subject: row.subject || email.subject, html: email.html });
+        } catch (e) {
+          const errMsg = e?.message || String(e);
+          return { ok: false, error: errMsg, messageId: null };
+        }
+
+        const resendId = res?.data?.id || null;
+        const sendErr = res?.error ? (res.error.message || JSON.stringify(res.error)) : null;
+        if (sendErr) return { ok: false, error: sendErr, messageId: resendId };
+        return { ok: true, messageId: resendId };
+      })();
+
+      console.log(JSON.stringify({ ok: true, source: "notify.test", result: out }));
+      process.exit(0);
     }
 
-    processed += 1;
-    console.log(JSON.stringify({ ok: true, processed: 1, source: "notify.send", claim_id: claimId, result: out }));
-  }
+    const rows = await fetchAndLockOutbox(BATCH);
+    if (!rows.length) {
+      console.log(JSON.stringify({ ok: true, processed: 0, source: "notify.none" }));
+      return;
+    }
 
-  console.log(JSON.stringify({ ok: true, processed, source: "notify.batch" }));
+    let processed = 0;
+    for (const row of rows) {
+      const out = await processOneOutbox(row);
+
+      if (out.ok) {
+        await markOutboxSent(row.id, out.messageId);
+        await markClaimEmailed(row.claim_id, row.id);
+      } else {
+        await markOutboxFailed(row.id, row.attempt_count, out.error);
+      }
+
+      processed++;
+      console.log(
+        JSON.stringify({
+          ok: true,
+          source: "notify.outbox",
+          outbox_id: row.id,
+          claim_id: row.claim_id,
+          result: out,
+        })
+      );
+    }
+
+    console.log(JSON.stringify({ ok: true, processed, source: "notify.batch" }));
+  } finally {
+    await unlockWorker();
+  }
 }
 
 async function main() {
