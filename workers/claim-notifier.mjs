@@ -284,8 +284,11 @@ async function sendEmail({ to, subject, html }) {
   return resp;
 }
 
+/**
+ * FIX 1: Harden claims update (check error + throw)
+ */
 async function markClaimEmailed(claimId, outboxId) {
-  await db
+  const { error } = await db
     .from("claims")
     .update({
       status: "emailed",
@@ -293,6 +296,8 @@ async function markClaimEmailed(claimId, outboxId) {
       email_outbox_id: outboxId,
     })
     .eq("id", claimId);
+
+  if (error) throw new Error("claims_update_failed: " + error.message);
 }
 
 async function tickOnce() {
@@ -321,7 +326,9 @@ async function tickOnce() {
       res = await sendEmail({ to: toEmail, subject: row.subject || email.subject, html: email.html });
     } catch (e) {
       const errMsg = e?.message || String(e);
-      console.log(JSON.stringify({ ok: true, source: "notify.test", result: { ok: false, error: errMsg, messageId: null } }));
+      console.log(
+        JSON.stringify({ ok: true, source: "notify.test", result: { ok: false, error: errMsg, messageId: null } })
+      );
       process.exit(0);
     }
 
@@ -347,7 +354,7 @@ async function tickOnce() {
   let processed = 0;
 
   for (const o of rows) {
-    // best-effort log (non-fatal)
+    // keep: worker "sending" log (useful)
     await logOutbox(o.id, "sending", { to: o.to_email, template: o.template, worker: WORKER_ID });
 
     try {
@@ -365,8 +372,8 @@ async function tickOnce() {
       const sendErr = res?.error?.message || (res?.error ? JSON.stringify(res.error) : null);
       if (sendErr) throw new Error(sendErr);
 
+      // FIX 2: Stop double-logging "sent" (RPC owns "sent" log)
       await markSent(o.id, msgId);
-      await logOutbox(o.id, "sent", { provider_message_id: msgId, worker: WORKER_ID });
 
       // keep existing behavior: update claims after send
       if (o.claim_id) {
@@ -399,7 +406,9 @@ async function tickOnce() {
         );
       }
 
-      await logOutbox(o.id, "failed", { error: errMsg, worker: WORKER_ID });
+      // Optional cleanup (per your note): remove noisy extra "failed" log row.
+      // email_outbox_mark_failed already logs retry_scheduled/dead.
+      // await logOutbox(o.id, "failed", { error: errMsg, worker: WORKER_ID });
 
       processed++;
       console.log(
