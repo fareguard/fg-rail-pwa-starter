@@ -1,7 +1,7 @@
 // workers/claim-notifier.mjs
 // Outbox-based notifier for FareGuard V1 (email CTA to Delay Repay).
-// - Normal mode: locks worker via email_try_lock(), fetches+locks due rows from email_outbox, sends via Resend,
-//   logs to notifications_log, updates email_outbox + claims.email_outbox_id/emailed_at/status.
+// - Normal mode: pops due rows from email_outbox via email_outbox_pop(), sends via Resend,
+//   logs to notifications_log, marks outbox sent/failed, updates claims.email_outbox_id/emailed_at/status.
 // - Test mode: if NOTIFY_TEST_CLAIM_ID is set, sends ONE email for latest outbox row for that claim_id and exits (NO DB writes).
 //
 // Env vars required:
@@ -14,7 +14,6 @@
 //   APP_PUBLIC_URL             e.g. 'https://fareguard.co.uk' (used for dashboard link)
 //   NOTIFY_SLEEP_MS            default 5000
 //   NOTIFY_BATCH               default 25
-//   EMAIL_LOCK_KEY             default 92233721 (stable int for advisory lock)
 //   NOTIFY_TEST_CLAIM_ID       uuid - send once + exit (no DB writes)
 //   NOTIFY_TEST_TO_EMAIL       overrides recipient in test mode
 
@@ -31,8 +30,7 @@ const EMAIL_REPLY_TO = process.env.EMAIL_REPLY_TO || null;
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || "";
 
 // --- constants (after env parsing) ---
-const WORKER_ID = process.env.RAILWAY_SERVICE_NAME || process.env.HOSTNAME || "claim-notifier";
-const LOCK_KEY = BigInt(process.env.EMAIL_LOCK_KEY || "92233721"); // pick any stable int
+const WORKER_ID = process.env.RAILWAY_REPLICA_ID || process.env.HOSTNAME || "claim-notifier";
 const BATCH = parseInt(process.env.NOTIFY_BATCH || "25", 10);
 const SLEEP_MS = parseInt(process.env.NOTIFY_SLEEP_MS || "5000", 10);
 // -----------------------------------
@@ -221,19 +219,8 @@ function buildClaimReadyEmail({
 }
 
 /**
- * Outbox + locking helpers
+ * Outbox + logging helpers
  */
-async function tryWorkerLock() {
-  const { data, error } = await db.rpc("email_try_lock", { p_key: Number(LOCK_KEY) });
-  if (error) throw error;
-  return !!data;
-}
-
-async function unlockWorker() {
-  const { error } = await db.rpc("email_unlock", { p_key: Number(LOCK_KEY) });
-  if (error) console.error("email_unlock failed", error.message);
-}
-
 async function logOutbox(outboxId, event, detail = {}) {
   const { error } = await db.from("notifications_log").insert({
     outbox_id: outboxId,
@@ -243,36 +230,29 @@ async function logOutbox(outboxId, event, detail = {}) {
   if (error) console.error("notifications_log insert failed", error.message);
 }
 
-async function fetchAndLockOutbox(limit) {
-  // 1) pick due rows
-  const { data: rows, error } = await db
-    .from("email_outbox")
-    .select("id, claim_id, trip_id, to_email, subject, template, payload, attempt_count, status")
-    .in("status", ["queued", "failed"])
-    .lte("next_attempt_at", new Date().toISOString())
-    .is("locked_at", null)
-    .order("next_attempt_at", { ascending: true })
-    .limit(limit);
-
+/**
+ * Pop/mark RPC helpers (multi-replica safe)
+ */
+async function popOutbox(limit) {
+  const { data, error } = await db.rpc("email_outbox_pop", { p_limit: limit, p_worker: WORKER_ID });
   if (error) throw error;
-  if (!rows?.length) return [];
+  return data || [];
+}
 
-  const ids = rows.map((r) => r.id);
+async function markSent(id, providerMessageId) {
+  const { error } = await db.rpc("email_outbox_mark_sent", {
+    p_outbox_id: id,
+    p_provider_message_id: providerMessageId || null,
+  });
+  if (error) throw error;
+}
 
-  // 2) lock them (best-effort; concurrency-safe enough for v1 if single worker)
-  const { error: lockErr } = await db
-    .from("email_outbox")
-    .update({
-      locked_at: new Date().toISOString(),
-      locked_by: WORKER_ID,
-      status: "sending",
-    })
-    .in("id", ids);
-
-  if (lockErr) throw lockErr;
-
-  // 3) return the locked rows
-  return rows.map((r) => ({ ...r, status: "sending" }));
+async function markFailed(id, err) {
+  const { error } = await db.rpc("email_outbox_mark_failed", {
+    p_outbox_id: id,
+    p_error: String(err || "unknown_error").slice(0, 2000),
+  });
+  if (error) throw error;
 }
 
 /**
@@ -304,67 +284,6 @@ async function sendEmail({ to, subject, html }) {
   return resp;
 }
 
-async function processOneOutbox(row, { testMode = false } = {}) {
-  const toEmail = testMode && TEST_TO_EMAIL ? TEST_TO_EMAIL : row.to_email;
-  const email = buildOutboxEmail(row);
-
-  await logOutbox(row.id, "sending", { to: toEmail, template: row.template });
-
-  let res;
-  try {
-    res = await sendEmail({ to: toEmail, subject: row.subject || email.subject, html: email.html });
-  } catch (e) {
-    const errMsg = e?.message || String(e);
-    return { ok: false, error: errMsg, messageId: null };
-  }
-
-  const resendId = res?.data?.id || null;
-  const sendErr = res?.error ? (res.error.message || JSON.stringify(res.error)) : null;
-
-  if (sendErr) return { ok: false, error: sendErr, messageId: resendId };
-
-  return { ok: true, messageId: resendId };
-}
-
-async function markOutboxSent(outboxId, messageId) {
-  await db
-    .from("email_outbox")
-    .update({
-      status: "sent",
-      provider_message_id: messageId,
-      last_error: null,
-      locked_at: null,
-      locked_by: null,
-    })
-    .eq("id", outboxId);
-
-  await logOutbox(outboxId, "sent", { provider_message_id: messageId });
-}
-
-async function markOutboxFailed(outboxId, prevAttempts, errMsg) {
-  const attempts = (prevAttempts ?? 0) + 1;
-  const backoffMin = Math.min(60, Math.max(2, attempts)); // 2m, 3m, ... capped at 60
-  const nextAt = new Date(Date.now() + backoffMin * 60 * 1000).toISOString();
-
-  await db
-    .from("email_outbox")
-    .update({
-      status: attempts >= 8 ? "dead" : "failed",
-      attempt_count: attempts,
-      last_error: errMsg,
-      next_attempt_at: nextAt,
-      locked_at: null,
-      locked_by: null,
-    })
-    .eq("id", outboxId);
-
-  await logOutbox(outboxId, attempts >= 8 ? "dead" : "retry_scheduled", {
-    error: errMsg,
-    attempts,
-    nextAt,
-  });
-}
-
 async function markClaimEmailed(claimId, outboxId) {
   await db
     .from("claims")
@@ -377,68 +296,81 @@ async function markClaimEmailed(claimId, outboxId) {
 }
 
 async function tickOnce() {
-  const gotLock = await tryWorkerLock();
-  if (!gotLock) {
-    console.log(JSON.stringify({ ok: true, source: "notify.locked_elsewhere" }));
-    return;
-  }
+  // TEST MODE: send ONE outbox row by claim id (optional) - NO DB writes beyond provider send (and no logs)
+  if (TEST_CLAIM_ID) {
+    const { data: row, error } = await db
+      .from("email_outbox")
+      .select("*")
+      .eq("claim_id", TEST_CLAIM_ID)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-  try {
-    // TEST MODE: send ONE outbox row by claim id (optional) - NO DB writes beyond provider send (and no logs)
-    if (TEST_CLAIM_ID) {
-      const { data: row, error } = await db
-        .from("email_outbox")
-        .select("*")
-        .eq("claim_id", TEST_CLAIM_ID)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+    if (error) throw error;
 
-      if (error) throw error;
-
-      if (!row) {
-        console.log(JSON.stringify({ ok: false, source: "notify.test", error: "no_outbox_for_claim" }));
-        return;
-      }
-
-      // in test mode: do not write notifications_log / outbox / claims
-      const out = await (async () => {
-        const toEmail = TEST_TO_EMAIL ? TEST_TO_EMAIL : row.to_email;
-        const email = buildOutboxEmail(row);
-
-        let res;
-        try {
-          res = await sendEmail({ to: toEmail, subject: row.subject || email.subject, html: email.html });
-        } catch (e) {
-          const errMsg = e?.message || String(e);
-          return { ok: false, error: errMsg, messageId: null };
-        }
-
-        const resendId = res?.data?.id || null;
-        const sendErr = res?.error ? (res.error.message || JSON.stringify(res.error)) : null;
-        if (sendErr) return { ok: false, error: sendErr, messageId: resendId };
-        return { ok: true, messageId: resendId };
-      })();
-
-      console.log(JSON.stringify({ ok: true, source: "notify.test", result: out }));
-      process.exit(0);
-    }
-
-    const rows = await fetchAndLockOutbox(BATCH);
-    if (!rows.length) {
-      console.log(JSON.stringify({ ok: true, processed: 0, source: "notify.none" }));
+    if (!row) {
+      console.log(JSON.stringify({ ok: false, source: "notify.test", error: "no_outbox_for_claim" }));
       return;
     }
 
-    let processed = 0;
-    for (const row of rows) {
-      const out = await processOneOutbox(row);
+    const toEmail = TEST_TO_EMAIL ? TEST_TO_EMAIL : row.to_email;
+    const email = buildOutboxEmail(row);
 
-      if (out.ok) {
-        await markOutboxSent(row.id, out.messageId);
-        await markClaimEmailed(row.claim_id, row.id);
-      } else {
-        await markOutboxFailed(row.id, row.attempt_count, out.error);
+    let res;
+    try {
+      res = await sendEmail({ to: toEmail, subject: row.subject || email.subject, html: email.html });
+    } catch (e) {
+      const errMsg = e?.message || String(e);
+      console.log(JSON.stringify({ ok: true, source: "notify.test", result: { ok: false, error: errMsg, messageId: null } }));
+      process.exit(0);
+    }
+
+    const resendId = res?.data?.id || null;
+    const sendErr = res?.error ? (res.error.message || JSON.stringify(res.error)) : null;
+
+    console.log(
+      JSON.stringify({
+        ok: true,
+        source: "notify.test",
+        result: sendErr ? { ok: false, error: sendErr, messageId: resendId } : { ok: true, messageId: resendId },
+      })
+    );
+    process.exit(0);
+  }
+
+  const rows = await popOutbox(BATCH);
+  if (!rows.length) {
+    console.log(JSON.stringify({ ok: true, processed: 0, source: "notify.none" }));
+    return;
+  }
+
+  let processed = 0;
+
+  for (const o of rows) {
+    // best-effort log (non-fatal)
+    await logOutbox(o.id, "sending", { to: o.to_email, template: o.template, worker: WORKER_ID });
+
+    try {
+      const email = buildOutboxEmail(o);
+
+      const res = await resend.emails.send({
+        from: RESEND_FROM,
+        to: o.to_email,
+        subject: o.subject || email.subject,
+        html: email.html,
+        ...(EMAIL_REPLY_TO ? { reply_to: EMAIL_REPLY_TO } : {}),
+      });
+
+      const msgId = res?.data?.id || null;
+      const sendErr = res?.error?.message || (res?.error ? JSON.stringify(res.error) : null);
+      if (sendErr) throw new Error(sendErr);
+
+      await markSent(o.id, msgId);
+      await logOutbox(o.id, "sent", { provider_message_id: msgId, worker: WORKER_ID });
+
+      // keep existing behavior: update claims after send
+      if (o.claim_id) {
+        await markClaimEmailed(o.claim_id, o.id);
       }
 
       processed++;
@@ -446,17 +378,43 @@ async function tickOnce() {
         JSON.stringify({
           ok: true,
           source: "notify.outbox",
-          outbox_id: row.id,
-          claim_id: row.claim_id,
-          result: out,
+          outbox_id: o.id,
+          claim_id: o.claim_id,
+          result: { ok: true, messageId: msgId },
+        })
+      );
+    } catch (e) {
+      const errMsg = e?.message || String(e);
+
+      try {
+        await markFailed(o.id, errMsg);
+      } catch (markErr) {
+        console.error(
+          JSON.stringify({
+            ok: false,
+            source: "notify.mark_failed_error",
+            outbox_id: o.id,
+            error: markErr?.message || String(markErr),
+          })
+        );
+      }
+
+      await logOutbox(o.id, "failed", { error: errMsg, worker: WORKER_ID });
+
+      processed++;
+      console.log(
+        JSON.stringify({
+          ok: true,
+          source: "notify.outbox",
+          outbox_id: o.id,
+          claim_id: o.claim_id,
+          result: { ok: false, error: errMsg, messageId: null },
         })
       );
     }
-
-    console.log(JSON.stringify({ ok: true, processed, source: "notify.batch" }));
-  } finally {
-    await unlockWorker();
   }
+
+  console.log(JSON.stringify({ ok: true, processed, source: "notify.batch" }));
 }
 
 async function main() {
