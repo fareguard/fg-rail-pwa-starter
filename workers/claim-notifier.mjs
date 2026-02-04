@@ -60,6 +60,61 @@ function sleep(ms) {
 }
 
 /**
+ * Operator normalization + Delay Repay URL lookup
+ */
+function normOp(op) {
+  return String(op || "").trim();
+}
+
+// optional aliasing for common variations
+function canonicalOp(op) {
+  const s = normOp(op);
+  if (!s) return null;
+
+  const lower = s.toLowerCase();
+
+  // a few useful aliases
+  if (lower === "emr") return "East Midlands Railway";
+  if (lower === "gwr" || lower.includes("great western")) return "GWR";
+  if (lower.includes("west midlands")) return "West Midlands Railway";
+  if (lower === "c2c") return "c2c";
+  if (lower === "lner") return "LNER";
+
+  return s;
+}
+
+async function getDelayRepayUrl(operator) {
+  const op = canonicalOp(operator);
+  if (!op) return null;
+
+  // Try exact match first
+  {
+    const { data, error } = await db
+      .from("delay_repay_rules")
+      .select("claim_url, operator")
+      .eq("operator", op)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (data?.claim_url) return data.claim_url;
+  }
+
+  // Fallback: case-insensitive match (handles stored casing differences)
+  {
+    const { data, error } = await db
+      .from("delay_repay_rules")
+      .select("claim_url, operator")
+      .ilike("operator", op)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (data?.claim_url) return data.claim_url;
+  }
+
+  return null;
+}
+
+/**
  * Step 1A — New HTML template helpers + buildClaimReadyEmail
  */
 function escapeHtml(s = "") {
@@ -105,13 +160,10 @@ function buildClaimReadyEmail({
 
   const title = "Your Delay Repay claim looks ready";
   const preheader = claimUrl
-    ? `Your journey ${origin || ""} → ${destination || ""} looks eligible. Claim on ${
-        operator || "the operator"
-      } site.`
-    : `Your journey looks eligible. We’re fetching the Delay Repay link for ${
-        operator || "the operator"
-      }.`;
+    ? `Your journey ${origin || ""} → ${destination || ""} looks eligible. Claim on ${operator || "the operator"} site.`
+    : `Your journey looks eligible. Open your dashboard for the operator link.`;
 
+  // Remove the "yellow box" branch entirely and always show a clean CTA.
   const ctaHtml = claimUrl
     ? `
       <a href="${escapeHtml(claimUrl)}" style="
@@ -130,16 +182,19 @@ function buildClaimReadyEmail({
       </div>
     `
     : `
-      <div style="
-        border:1px solid #f59e0b;
-        background:#fffbeb;
-        color:#92400e;
+      <a href="${escapeHtml(dashboardUrl)}" style="
+        display:inline-block;
+        text-decoration:none;
+        font-weight:700;
+        padding:12px 18px;
         border-radius:10px;
-        padding:12px 14px;
-        font-size:14px;
+        background:#111827;
+        color:#ffffff;
         ">
-        We’re fetching the Delay Repay link for <strong>${safeOp}</strong>.
-        For now, open your dashboard and you’ll see the correct link there shortly.
+        Open dashboard
+      </a>
+      <div style="margin-top:10px;color:#6b7280;font-size:12px;">
+        We couldn’t match your operator automatically yet — the link will be shown on your dashboard.
       </div>
     `;
 
@@ -257,13 +312,21 @@ async function markFailed(id, err) {
 
 /**
  * Build the email from outbox payload (simple V1)
+ * - Always attempt to include operator claim link by looking up delay_repay_rules at send-time
  */
-function buildOutboxEmail(row) {
+async function buildOutboxEmail(row) {
+  const operator = row.payload?.operator || null;
+
+  let claimUrl = row.payload?.claim_url || null;
+  if (!claimUrl) {
+    claimUrl = await getDelayRepayUrl(operator);
+  }
+
   return buildClaimReadyEmail({
     appUrl: APP_PUBLIC_URL,
     claimId: row.claim_id,
-    operator: row.payload?.operator || null,
-    claimUrl: row.payload?.claim_url || null,
+    operator,
+    claimUrl,
     origin: row.payload?.origin || null,
     destination: row.payload?.destination || null,
     departPlanned: row.payload?.depart_planned || null,
@@ -319,7 +382,7 @@ async function tickOnce() {
     }
 
     const toEmail = TEST_TO_EMAIL ? TEST_TO_EMAIL : row.to_email;
-    const email = buildOutboxEmail(row);
+    const email = await buildOutboxEmail(row);
 
     let res;
     try {
@@ -333,7 +396,7 @@ async function tickOnce() {
     }
 
     const resendId = res?.data?.id || null;
-    const sendErr = res?.error ? (res.error.message || JSON.stringify(res.error)) : null;
+    const sendErr = res?.error ? res.error.message || JSON.stringify(res.error) : null;
 
     console.log(
       JSON.stringify({
@@ -358,7 +421,7 @@ async function tickOnce() {
     await logOutbox(o.id, "sending", { to: o.to_email, template: o.template, worker: WORKER_ID });
 
     try {
-      const email = buildOutboxEmail(o);
+      const email = await buildOutboxEmail(o);
 
       const res = await resend.emails.send({
         from: RESEND_FROM,
