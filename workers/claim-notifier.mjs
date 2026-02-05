@@ -83,35 +83,33 @@ function canonicalOp(op) {
   return s;
 }
 
+// PATCHED getDelayRepayUrl() (drop-in replacement)
 async function getDelayRepayUrl(operator) {
-  const op = canonicalOp(operator);
-  if (!op) return null;
+  if (!operator) return null;
 
-  // Try exact match first
-  {
-    const { data, error } = await db
-      .from("delay_repay_rules")
-      .select("claim_url, operator")
-      .eq("operator", op)
-      .limit(1)
-      .maybeSingle();
-    if (error) throw error;
-    if (data?.claim_url) return data.claim_url;
-  }
+  const norm = operator.trim().toLowerCase();
 
-  // Fallback: case-insensitive match (handles stored casing differences)
-  {
-    const { data, error } = await db
-      .from("delay_repay_rules")
-      .select("claim_url, operator")
-      .ilike("operator", op)
-      .limit(1)
-      .maybeSingle();
-    if (error) throw error;
-    if (data?.claim_url) return data.claim_url;
-  }
+  // 1) Exact normalized match
+  let { data, error } = await db
+    .from("delay_repay_rules")
+    .select("claim_url")
+    .ilike("operator", norm)
+    .limit(1)
+    .maybeSingle();
 
-  return null;
+  if (error) throw error;
+  if (data?.claim_url) return data.claim_url;
+
+  // 2) Fallback: fuzzy contains match
+  ({ data, error } = await db
+    .from("delay_repay_rules")
+    .select("claim_url")
+    .ilike("operator", `%${norm}%`)
+    .limit(1)
+    .maybeSingle());
+
+  if (error) throw error;
+  return data?.claim_url || null;
 }
 
 /**
