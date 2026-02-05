@@ -83,32 +83,38 @@ function canonicalOp(op) {
   return s;
 }
 
-// PATCHED getDelayRepayUrl() (drop-in replacement)
+// PATCHED getDelayRepayUrl() (drop-in replacement; eq -> ilike exact -> ilike contains)
 async function getDelayRepayUrl(operator) {
-  if (!operator) return null;
+  const op = (operator || "").trim();
+  if (!op) return null;
 
-  const norm = operator.trim().toLowerCase();
-
-  // 1) Exact normalized match
+  // 1) Exact match (fast + deterministic)
   let { data, error } = await db
     .from("delay_repay_rules")
     .select("claim_url")
-    .ilike("operator", norm)
-    .limit(1)
+    .eq("operator", op)
     .maybeSingle();
-
   if (error) throw error;
   if (data?.claim_url) return data.claim_url;
 
-  // 2) Fallback: fuzzy contains match
+  // 2) Case-insensitive exact
   ({ data, error } = await db
     .from("delay_repay_rules")
     .select("claim_url")
-    .ilike("operator", `%${norm}%`)
-    .limit(1)
+    .ilike("operator", op)
     .maybeSingle());
-
   if (error) throw error;
+  if (data?.claim_url) return data.claim_url;
+
+  // 3) Fuzzy contains
+  const escaped = op.replaceAll("%", "\\%").replaceAll("_", "\\_");
+  ({ data, error } = await db
+    .from("delay_repay_rules")
+    .select("claim_url")
+    .ilike("operator", `%${escaped}%`)
+    .maybeSingle());
+  if (error) throw error;
+
   return data?.claim_url || null;
 }
 
