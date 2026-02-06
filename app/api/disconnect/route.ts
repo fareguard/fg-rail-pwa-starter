@@ -1,68 +1,72 @@
-import { NextResponse } from "next/server";
+// lib/session.ts
+
 import { cookies } from "next/headers";
-import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { getSessionEmail, SESSION_COOKIE_NAME } from "@/lib/session";
+import type { NextRequest, NextResponse } from "next/server";
 
-async function revokeGoogleToken(token: string) {
-  // Google revoke endpoint (best-effort)
-  // If this fails, we still purge locally, but user may need to revoke manually in Google Security.
-  const url = "https://oauth2.googleapis.com/revoke";
-  const body = new URLSearchParams({ token });
+export const SESSION_COOKIE_NAME = "fg_session";
+const SESSION_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
+export type SessionData = {
+  email: string;
+};
 
-  // Google returns 200 even for some “already revoked” cases; treat non-2xx as soft-fail
-  return { ok: r.ok, status: r.status, text: await r.text().catch(() => "") };
+// Encode { email } into a compact cookie value
+export function encodeSession(data: SessionData): string {
+  return Buffer.from(JSON.stringify(data), "utf8").toString("base64url");
 }
 
-export async function POST() {
-  const email = getSessionEmail(cookies());
-  if (!email) {
-    return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+// Decode cookie value back into { email } or null
+export function decodeSession(raw: string | null | undefined): SessionData | null {
+  if (!raw) return null;
+  try {
+    const json = Buffer.from(raw, "base64url").toString("utf8");
+    const parsed = JSON.parse(json);
+    if (typeof parsed?.email === "string") {
+      return { email: parsed.email };
+    }
+  } catch {
+    // ignore bad cookie
   }
+  return null;
+}
 
-  const supa = getSupabaseAdmin();
+// ----- Read session in a Route Handler from Request -----
+export async function getSessionFromRequest(
+  req: Request | NextRequest
+): Promise<SessionData | null> {
+  const cookieHeader = (req as any).headers?.get?.("cookie") ?? "";
+  const match = cookieHeader
+    .split(";")
+    .map((c: string) => c.trim())
+    .find((c: string) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
 
-  // 1) Load tokens (best-effort)
-  const { data: tokenRows, error: tokErr } = await supa
-    .from("oauth_staging")
-    .select("access_token, refresh_token, provider, revoked")
-    .eq("user_email", email)
-    .limit(5);
+  if (!match) return null;
 
-  if (tokErr) {
-    // still continue to purge
-    console.error("disconnect: oauth_staging read failed", tokErr.message);
-  }
+  const value = decodeURIComponent(match.split("=").slice(1).join("="));
+  return decodeSession(value);
+}
 
-  // 2) Revoke with Google (best-effort)
-  const revocations: any[] = [];
-  for (const row of tokenRows || []) {
-    // Prefer refresh_token if present; access tokens expire quickly
-    const token = row?.refresh_token || row?.access_token;
-    if (!token) continue;
+// ----- Read session via next/headers in server code -----
+export function getSessionFromCookies(): SessionData | null {
+  const jar = cookies();
+  const raw = jar.get(SESSION_COOKIE_NAME)?.value ?? null;
+  return decodeSession(raw);
+}
 
-    const out = await revokeGoogleToken(token);
-    revocations.push({ provider: row.provider, using: row.refresh_token ? "refresh" : "access", ...out });
-  }
+// ----- Write the session cookie on a NextResponse -----
+// Signature: (email, res)
+export function createSessionCookie(email: string, res: NextResponse): void {
+  const value = encodeSession({ email });
 
-  // 3) Purge ALL user data
-  const { data: purgeData, error: purgeErr } = await supa.rpc("user_purge_v1", {
-    p_user_email: email,
+  // NextResponse has .cookies in the runtime env
+  // @ts-ignore
+  res.cookies.set({
+    name: SESSION_COOKIE_NAME,
+    value,
+    httpOnly: true,
+    sameSite: "lax",
+    secure: true,
+    path: "/",
+    maxAge: SESSION_MAX_AGE,
   });
-
-  if (purgeErr) {
-    console.error("disconnect: purge failed", purgeErr.message);
-    return NextResponse.json({ ok: false, error: "purge_failed", detail: purgeErr.message }, { status: 500 });
-  }
-
-  // 4) Clear session cookie
-  const res = NextResponse.json({ ok: true, revoked: revocations, purge: purgeData });
-  res.cookies.set(SESSION_COOKIE_NAME, "", { path: "/", maxAge: 0 });
-
-  return res;
 }
