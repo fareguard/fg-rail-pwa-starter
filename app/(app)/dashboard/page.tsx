@@ -1,7 +1,7 @@
 // app/(app)/dashboard/page.tsx
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import ConnectGmailButton from "@/app/components/ConnectGmailButton";
 import TripsLive from "@/components/TripsLive";
@@ -21,6 +21,11 @@ export default function DashboardPage() {
 
   // ✅ Welcome modal (first visit)
   const [showWelcome, setShowWelcome] = useState(false);
+
+  // ✅ Account / kebab menu (for destructive actions)
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const accountMenuBtnRef = useRef<HTMLButtonElement | null>(null);
+  const accountMenuPanelRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -92,6 +97,65 @@ export default function DashboardPage() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [showWelcome, closeWelcome]);
+
+  // ✅ Disconnect handler (reused by menu item)
+  const disconnectAndDelete = useCallback(async () => {
+    const ok = window.confirm("Disconnect FareGuard and delete all your data? This cannot be undone.");
+    if (!ok) return;
+
+    const r = await fetch("/api/disconnect", { method: "POST" });
+    const j = (await r.json().catch(() => ({}))) as any;
+
+    if (!r.ok) {
+      // ✅ show detail if present
+      const msg = j?.detail ? `${j?.error || "unknown_error"} — ${j.detail}` : j?.error || "unknown_error";
+      alert("Disconnect failed: " + msg);
+      return;
+    }
+
+    // optional: cleanup local flags
+    try {
+      localStorage.removeItem("fg-auth-ok");
+    } catch {}
+
+    window.location.href = "/";
+  }, []);
+
+  // ✅ Account menu close helper
+  const closeAccountMenu = useCallback(() => setShowAccountMenu(false), []);
+
+  // ✅ Close menu on outside click + ESC, restore focus to button
+  useEffect(() => {
+    if (!showAccountMenu) return;
+
+    const onPointerDown = (e: PointerEvent) => {
+      const btn = accountMenuBtnRef.current;
+      const panel = accountMenuPanelRef.current;
+      const t = e.target as Node | null;
+
+      if (!t) return;
+      if (btn?.contains(t)) return;
+      if (panel?.contains(t)) return;
+
+      closeAccountMenu();
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeAccountMenu();
+        // restore focus
+        accountMenuBtnRef.current?.focus();
+      }
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showAccountMenu, closeAccountMenu]);
 
   return (
     <div className="container section" style={{ paddingTop: 28 }}>
@@ -198,59 +262,104 @@ export default function DashboardPage() {
       {!loading && me && me.authenticated && (
         <>
           <div className="card" style={{ marginTop: 16 }}>
-            <span className="badge" style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}>
-              Live
-            </span>
+            {/* Header row: badge + kebab menu */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <span className="badge" style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}>
+                Live
+              </span>
+
+              {/* Kebab menu trigger */}
+              <div style={{ position: "relative" }}>
+                <button
+                  ref={accountMenuBtnRef}
+                  type="button"
+                  aria-label="Account menu"
+                  aria-haspopup="menu"
+                  aria-expanded={showAccountMenu}
+                  onClick={() => setShowAccountMenu((v) => !v)}
+                  className="btn"
+                  style={{
+                    padding: "6px 10px",
+                    fontSize: 18,
+                    lineHeight: 1,
+                    background: "transparent",
+                    border: "1px solid rgba(0,0,0,0.08)",
+                  }}
+                >
+                  ⋯
+                </button>
+
+                {showAccountMenu && (
+                  <div
+                    ref={accountMenuPanelRef}
+                    role="menu"
+                    aria-label="Account actions"
+                    style={{
+                      position: "absolute",
+                      right: 0,
+                      top: "calc(100% + 8px)",
+                      width: 240,
+                      background: "#fff",
+                      border: "1px solid rgba(0,0,0,0.10)",
+                      borderRadius: 12,
+                      boxShadow: "0 14px 34px rgba(0,0,0,0.18)",
+                      padding: 8,
+                      zIndex: 50,
+                    }}
+                  >
+                    {/* Placeholder for future items */}
+                    <div
+                      style={{
+                        padding: "8px 10px",
+                        fontSize: 12,
+                        color: "rgba(0,0,0,0.55)",
+                      }}
+                    >
+                      Account
+                    </div>
+
+                    <div style={{ height: 1, background: "rgba(0,0,0,0.08)", margin: "6px 0" }} />
+
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={async () => {
+                        closeAccountMenu();
+                        await disconnectAndDelete();
+                      }}
+                      style={{
+                        width: "100%",
+                        textAlign: "left",
+                        border: "1px solid rgba(239,68,68,0.22)",
+                        background: "rgba(239,68,68,0.08)",
+                        color: "#b91c1c",
+                        borderRadius: 10,
+                        padding: "10px 10px",
+                        cursor: "pointer",
+                        fontSize: 13,
+                        fontWeight: 600,
+                      }}
+                    >
+                      Disconnect & delete data
+                    </button>
+
+                    <div style={{ padding: "8px 10px", fontSize: 12, color: "rgba(0,0,0,0.55)" }}>
+                      This will remove access and delete your stored data.
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
             <h3 style={{ margin: "4px 0 8px", color: "var(--fg-navy)" }}>
               Welcome{me.email ? `, ${me.email}` : ""}.
             </h3>
             <p className="small">We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.</p>
 
             {summary?.ok && (
-              <>
-                <p className="small" style={{ marginTop: 8 }}>
-                  Claims in system: <strong>{summary.claims ?? 0}</strong>
-                </p>
-
-                {/* Subtle Disconnect button */}
-                <button
-                  type="button"
-                  className="btn"
-                  style={{
-                    marginTop: 12,
-                    background: "#ef4444",
-                    border: "1px solid #ef4444",
-                    color: "#ffffff",
-                    padding: "8px 10px",
-                    fontSize: 13,
-                  }}
-                  onClick={async () => {
-                    const ok = window.confirm("Disconnect FareGuard and delete all your data? This cannot be undone.");
-                    if (!ok) return;
-
-                    const r = await fetch("/api/disconnect", { method: "POST" });
-                    const j = (await r.json().catch(() => ({}))) as any;
-
-                    if (!r.ok) {
-                      // ✅ show detail if present
-                      const msg = j?.detail
-                        ? `${j?.error || "unknown_error"} — ${j.detail}`
-                        : j?.error || "unknown_error";
-                      alert("Disconnect failed: " + msg);
-                      return;
-                    }
-
-                    // optional: cleanup local flags
-                    try {
-                      localStorage.removeItem("fg-auth-ok");
-                    } catch {}
-
-                    window.location.href = "/";
-                  }}
-                >
-                  Disconnect & delete data
-                </button>
-              </>
+              <p className="small" style={{ marginTop: 8 }}>
+                Claims in system: <strong>{summary.claims ?? 0}</strong>
+              </p>
             )}
           </div>
 
