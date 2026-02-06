@@ -225,16 +225,18 @@ export default function DashboardPage() {
                     fontSize: 13,
                   }}
                   onClick={async () => {
-                    const ok = window.confirm(
-                      "Disconnect FareGuard and delete all your data? This cannot be undone."
-                    );
+                    const ok = window.confirm("Disconnect FareGuard and delete all your data? This cannot be undone.");
                     if (!ok) return;
 
                     const r = await fetch("/api/disconnect", { method: "POST" });
-                    const j = await r.json().catch(() => ({}));
+                    const j = (await r.json().catch(() => ({}))) as any;
 
                     if (!r.ok) {
-                      alert("Disconnect failed: " + ((j as any)?.error || "unknown_error"));
+                      // ✅ show detail if present
+                      const msg = j?.detail
+                        ? `${j?.error || "unknown_error"} — ${j.detail}`
+                        : j?.error || "unknown_error";
+                      alert("Disconnect failed: " + msg);
                       return;
                     }
 
