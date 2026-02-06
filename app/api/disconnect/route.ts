@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getSessionEmail, SESSION_COOKIE_NAME } from "@/lib/session";
 
 async function revokeGoogleToken(token: string) {
@@ -25,7 +25,7 @@ export async function POST() {
     return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
   }
 
-  const supa = supabaseAdmin();
+  const supa = getSupabaseAdmin();
 
   // 1) Load tokens (best-effort)
   const { data: tokenRows, error: tokErr } = await supa
