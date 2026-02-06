@@ -128,7 +128,7 @@ export default function DashboardPage() {
           >
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <h2 id="fgWelcomeTitle" style={{ margin: 0, fontSize: "1.25rem" }}>
-                Welcome to FareGuard! 
+                Welcome to FareGuard!
               </h2>
               <button
                 type="button"
@@ -148,19 +148,14 @@ export default function DashboardPage() {
 
             <div style={{ marginTop: 10 }}>
               <p style={{ margin: "12px 0" }}>
-                FareGuard automatically tracks your e-tickets, monitors delays, 
-                and reminds you when you’re eligible for Delay Repay — so you never miss money you’re owed.
+                FareGuard automatically tracks your e-tickets, monitors delays, and reminds you when you’re eligible for
+                Delay Repay — so you never miss money you’re owed.
               </p>
               <p style={{ margin: "12px 0" }}>We’re continuously improving FareGuard with new features and updates.</p>
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-              <button
-                type="button"
-                onClick={closeWelcome}
-                className="btn btnPrimary"
-                style={{ padding: "10px 14px" }}
-              >
+              <button type="button" onClick={closeWelcome} className="btn btnPrimary" style={{ padding: "10px 14px" }}>
                 Got it
               </button>
             </div>
@@ -212,9 +207,48 @@ export default function DashboardPage() {
             <p className="small">We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.</p>
 
             {summary?.ok && (
-              <p className="small" style={{ marginTop: 8 }}>
-                Claims in system: <strong>{summary.claims ?? 0}</strong>
-              </p>
+              <>
+                <p className="small" style={{ marginTop: 8 }}>
+                  Claims in system: <strong>{summary.claims ?? 0}</strong>
+                </p>
+
+                {/* Subtle Disconnect button */}
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    marginTop: 12,
+                    background: "transparent",
+                    border: "1px solid #e5e7eb",
+                    color: "#6b7280",
+                    padding: "8px 10px",
+                    fontSize: 13,
+                  }}
+                  onClick={async () => {
+                    const ok = window.confirm(
+                      "Disconnect FareGuard and delete all your data? This cannot be undone."
+                    );
+                    if (!ok) return;
+
+                    const r = await fetch("/api/disconnect", { method: "POST" });
+                    const j = await r.json().catch(() => ({}));
+
+                    if (!r.ok) {
+                      alert("Disconnect failed: " + ((j as any)?.error || "unknown_error"));
+                      return;
+                    }
+
+                    // optional: cleanup local flags
+                    try {
+                      localStorage.removeItem("fg-auth-ok");
+                    } catch {}
+
+                    window.location.href = "/";
+                  }}
+                >
+                  Disconnect & delete data
+                </button>
+              </>
             )}
           </div>
 
