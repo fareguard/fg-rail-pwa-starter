@@ -1,72 +1,75 @@
-// lib/session.ts
-
+// app/api/disconnect/route.ts
+import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import type { NextRequest, NextResponse } from "next/server";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getSessionFromCookies, SESSION_COOKIE_NAME } from "@/lib/session";
 
-export const SESSION_COOKIE_NAME = "fg_session";
-const SESSION_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
-
-export type SessionData = {
-  email: string;
-};
-
-// Encode { email } into a compact cookie value
-export function encodeSession(data: SessionData): string {
-  return Buffer.from(JSON.stringify(data), "utf8").toString("base64url");
-}
-
-// Decode cookie value back into { email } or null
-export function decodeSession(raw: string | null | undefined): SessionData | null {
-  if (!raw) return null;
+async function revokeGoogleToken(token: string) {
   try {
-    const json = Buffer.from(raw, "base64url").toString("utf8");
-    const parsed = JSON.parse(json);
-    if (typeof parsed?.email === "string") {
-      return { email: parsed.email };
-    }
+    await fetch("https://oauth2.googleapis.com/revoke", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token }).toString(),
+    });
   } catch {
-    // ignore bad cookie
+    // ignore
   }
-  return null;
 }
 
-// ----- Read session in a Route Handler from Request -----
-export async function getSessionFromRequest(
-  req: Request | NextRequest
-): Promise<SessionData | null> {
-  const cookieHeader = (req as any).headers?.get?.("cookie") ?? "";
-  const match = cookieHeader
-    .split(";")
-    .map((c: string) => c.trim())
-    .find((c: string) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
+export async function POST() {
+  try {
+    const session = getSessionFromCookies();
+    if (!session?.email) {
+      return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+    }
 
-  if (!match) return null;
+    const userEmail = session.email;
+    const supa = getSupabaseAdmin();
 
-  const value = decodeURIComponent(match.split("=").slice(1).join("="));
-  return decodeSession(value);
-}
+    const { data: stg } = await supa
+      .from("oauth_staging")
+      .select("access_token, refresh_token")
+      .eq("user_email", userEmail)
+      .maybeSingle();
 
-// ----- Read session via next/headers in server code -----
-export function getSessionFromCookies(): SessionData | null {
-  const jar = cookies();
-  const raw = jar.get(SESSION_COOKIE_NAME)?.value ?? null;
-  return decodeSession(raw);
-}
+    const { data: acc } = await supa
+      .from("oauth_accounts")
+      .select("access_token, refresh_token")
+      .eq("email", userEmail)
+      .maybeSingle();
 
-// ----- Write the session cookie on a NextResponse -----
-// Signature: (email, res)
-export function createSessionCookie(email: string, res: NextResponse): void {
-  const value = encodeSession({ email });
+    const tokens = [
+      stg?.access_token,
+      stg?.refresh_token,
+      acc?.access_token,
+      acc?.refresh_token,
+    ].filter(Boolean) as string[];
 
-  // NextResponse has .cookies in the runtime env
-  // @ts-ignore
-  res.cookies.set({
-    name: SESSION_COOKIE_NAME,
-    value,
-    httpOnly: true,
-    sameSite: "lax",
-    secure: true,
-    path: "/",
-    maxAge: SESSION_MAX_AGE,
-  });
+    for (const t of tokens) await revokeGoogleToken(t);
+
+    const { data: purge, error: purgeErr } = await supa.rpc("user_purge_v1", {
+      p_user_email: userEmail,
+    });
+
+    if (purgeErr) {
+      return NextResponse.json(
+        { ok: false, error: "purge_failed", detail: purgeErr.message },
+        { status: 500 }
+      );
+    }
+
+    const res = NextResponse.json({ ok: true, purge }, { status: 200 });
+
+    // Clear session cookie (do it on the response)
+    res.cookies.delete(SESSION_COOKIE_NAME);
+    // Also clear via server cookies() as a belt-and-braces
+    cookies().delete(SESSION_COOKIE_NAME);
+
+    return res;
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: "disconnect_failed", detail: e?.message || String(e) },
+      { status: 500 }
+    );
+  }
 }
