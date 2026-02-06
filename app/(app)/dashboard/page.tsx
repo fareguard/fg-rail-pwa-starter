@@ -218,9 +218,9 @@ export default function DashboardPage() {
                   className="btn"
                   style={{
                     marginTop: 12,
-                    background: "transparent",
-                    border: "1px solid #e5e7eb",
-                    color: "#6b7280",
+                    background: "#ef4444",
+                    border: "1px solid #ef4444",
+                    color: "#ffffff",
                     padding: "8px 10px",
                     fontSize: 13,
                   }}
