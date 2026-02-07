@@ -211,6 +211,7 @@ export async function GET(req: NextRequest) {
                 snippet: null,
                 body_plain: null,
                 is_train: false,
+                parsed_at: new Date().toISOString(), // ✅ add
                 redacted_at: new Date().toISOString(),
                 redaction_reason: "non_train_filtered",
               },
@@ -236,6 +237,7 @@ export async function GET(req: NextRequest) {
               is_train: true,
               redacted_at: null,
               redaction_reason: null,
+              // parsed_at intentionally set later after LLM decision / outcome
             },
             { onConflict: "provider,user_email,message_id" } as any
           );
@@ -243,24 +245,58 @@ export async function GET(req: NextRequest) {
           if (!rawErr) savedRaw++;
 
           // ✅ If OpenAI key missing, we stop here (body already not persisted).
+          // Mark as done + redact other content to avoid retention.
           if (!OPENAI_ENABLED) {
+            await supa
+              .from("raw_emails")
+              .update({
+                subject: null,
+                sender: null,
+                snippet: null,
+                body_plain: null,
+                parsed_at: new Date().toISOString(),
+                redacted_at: new Date().toISOString(),
+                redaction_reason: "openai_disabled_no_parse",
+              })
+              .eq("provider", "gmail")
+              .eq("user_email", user_email)
+              .eq("message_id", fullMsg.id);
+
             return;
           }
 
-          // ✅ Lazy import at runtime only (prevents build-time OpenAI init)
-          const { ingestEmail } = await import("@/lib/ingestEmail");
+          let parsed: any = null;
 
-          const parsed: any = await ingestEmail({
-            id,
-            from,
-            subject,
-            body_plain: body,
-            snippet,
-          });
+          try {
+            // ✅ Lazy import at runtime only (prevents build-time OpenAI init)
+            const { ingestEmail } = await import("@/lib/ingestEmail");
 
-          // Log parser output for debugging
+            parsed = await ingestEmail({
+              id,
+              from,
+              subject,
+              body_plain: body,
+              snippet,
+            });
+          } catch (e: any) {
+            // Parsing failed: mark parsed_at but keep content temporarily for debugging/retention job.
+            await supa
+              .from("raw_emails")
+              .update({
+                parsed_at: new Date().toISOString(),
+                redaction_reason: "llm_parse_failed_keep_temp",
+              })
+              .eq("provider", "gmail")
+              .eq("user_email", user_email)
+              .eq("message_id", fullMsg.id);
+
+            throw e;
+          }
+
+          // Log parser output for debugging (after parsing)
           try {
             await supa.from("debug_llm_outputs").insert({
+              user_email, // ✅ add this
               email_id: id,
               from_addr: from,
               subject,
@@ -271,7 +307,23 @@ export async function GET(req: NextRequest) {
             // ignore debug errors
           }
 
+          // ✅ TrainOk but not a ticket: redact immediately after decision
           if (!parsed?.is_ticket) {
+            await supa
+              .from("raw_emails")
+              .update({
+                subject: null,
+                sender: null,
+                snippet: null,
+                body_plain: null,
+                parsed_at: new Date().toISOString(),
+                redacted_at: new Date().toISOString(),
+                redaction_reason: "train_filter_not_ticket",
+              })
+              .eq("provider", "gmail")
+              .eq("user_email", user_email)
+              .eq("message_id", fullMsg.id);
+
             return;
           }
 
@@ -353,16 +405,31 @@ export async function GET(req: NextRequest) {
               email_id: id,
               message: tripErr.message ?? String(tripErr),
             });
-          } else {
-            savedTrips++;
 
-            // After successful parse + trip insert: strip full body (privacy + Google read-only compliance)
+            // ✅ If trip write fails: still mark parsed_at, keep content temporarily for debugging.
             await supa
               .from("raw_emails")
               .update({
-                body_plain: null,
-                // optional: snippet: null,
                 parsed_at: new Date().toISOString(),
+                redaction_reason: "trip_write_failed_keep_temp",
+              })
+              .eq("provider", "gmail")
+              .eq("user_email", user_email)
+              .eq("message_id", fullMsg.id);
+          } else {
+            savedTrips++;
+
+            // ✅ After successful trip insert/update: redact consistently
+            await supa
+              .from("raw_emails")
+              .update({
+                subject: null,
+                sender: null,
+                snippet: null,
+                body_plain: null,
+                parsed_at: new Date().toISOString(),
+                redacted_at: new Date().toISOString(),
+                redaction_reason: "ticket_parsed_redact",
               })
               .eq("provider", "gmail")
               .eq("user_email", user_email)
