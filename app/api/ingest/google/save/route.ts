@@ -195,28 +195,54 @@ export async function GET(req: NextRequest) {
           const body = extractBody(fullMsg.payload);
           const snippet = fullMsg.snippet || "";
 
-          // Save raw email (idempotent on provider+message_id)
+          // Decide train eligibility BEFORE writing anything sensitive
+          const trainOk = isTrainEmail({ from, subject, body });
+
+          // Write raw email, but minimise aggressively
+          if (!trainOk) {
+            // keep only the dedupe keys + audit fields; delete content immediately
+            const { error: rawErr } = await supa.from("raw_emails").upsert(
+              {
+                provider: "gmail",
+                user_email,
+                message_id: fullMsg.id,
+                subject: null,
+                sender: null,
+                snippet: null,
+                body_plain: null,
+                is_train: false,
+                redacted_at: new Date().toISOString(),
+                redaction_reason: "non_train_filtered",
+              },
+              { onConflict: "provider,user_email,message_id" } as any
+            );
+
+            if (!rawErr) savedRaw++;
+            // skip parsing entirely
+            return;
+          }
+
+          // train email: store (temporarily) for parsing
+          // If OpenAI is disabled, don't persist body at all (no parse to justify retention).
           const { error: rawErr } = await supa.from("raw_emails").upsert(
             {
-              provider: "google",
+              provider: "gmail",
               user_email,
-              message_id: id,
-              subject,
-              sender: from,
-              snippet,
-              body_plain: body || null,
+              message_id: fullMsg.id,
+              subject: subject || null,
+              sender: from || null,
+              snippet: snippet || null,
+              body_plain: OPENAI_ENABLED ? body || null : null,
+              is_train: true,
+              redacted_at: null,
+              redaction_reason: null,
             },
-            { onConflict: "provider,message_id" } as any
+            { onConflict: "provider,user_email,message_id" } as any
           );
 
           if (!rawErr) savedRaw++;
 
-          // filter before calling the LLM parser
-          if (!isTrainEmail({ from, subject, body })) {
-            return;
-          }
-
-          // ✅ If OpenAI key missing, we stop here (raw email still saved).
+          // ✅ If OpenAI key missing, we stop here (body already not persisted).
           if (!OPENAI_ENABLED) {
             return;
           }
@@ -329,6 +355,18 @@ export async function GET(req: NextRequest) {
             });
           } else {
             savedTrips++;
+
+            // After successful parse + trip insert: strip full body (privacy + Google read-only compliance)
+            await supa
+              .from("raw_emails")
+              .update({
+                body_plain: null,
+                // optional: snippet: null,
+                parsed_at: new Date().toISOString(),
+              })
+              .eq("provider", "gmail")
+              .eq("user_email", user_email)
+              .eq("message_id", fullMsg.id);
           }
         })
       );
