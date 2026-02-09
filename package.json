@@ -12,7 +12,8 @@
     "worker:darwin:retention": "node workers/darwin-retention.mjs",
     "worker:claims:check": "node workers/claim-checker.mjs",
     "worker:claims:submit": "node scripts/process-queue.mjs",
-    "worker:claims:notify": "node workers/claim-notifier.mjs"
+    "worker:claims:notify": "node workers/claim-notifier.mjs",
+    "worker:email:retention": "node workers/email-retention.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.7.0",
