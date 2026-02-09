@@ -296,11 +296,11 @@ export async function GET(req: NextRequest) {
           // Log parser output for debugging (after parsing)
           try {
             await supa.from("debug_llm_outputs").insert({
-              user_email, // ✅ add this
               email_id: id,
+              user_email, // ✅ add this now that column exists
               from_addr: from,
               subject,
-              raw_input: body || snippet || "",
+              raw_input: null, // ✅ don’t store bodies
               raw_output: JSON.stringify(parsed),
             });
           } catch {
