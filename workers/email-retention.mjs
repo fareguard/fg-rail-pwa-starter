@@ -60,18 +60,18 @@ async function runCleanup() {
   }
 
   // 3) Belt & braces: wipe raw_input everywhere (recommended)
-  // You already did a one-off wipe; this keeps it enforced forever.
+  // Call RPC instead of direct update and log returned { wiped: n }.
   if (WIPE_DEBUG_RAW_INPUT) {
-    const { error: wipeErr, count } = await db
-      .from("debug_llm_outputs")
-      .update({ raw_input: null })
-      .not("raw_input", "is", null)
-      .select("id", { count: "exact", head: true });
+    const { data: wipeData, error: wipeErr } = await db.rpc("debug_llm_outputs_wipe_raw_input");
 
     if (wipeErr) {
-      console.error("[email-retention] wipe debug_llm_outputs.raw_input error:", wipeErr.message);
+      console.error("[email-retention] debug_llm_outputs_wipe_raw_input error:", wipeErr.message);
     } else {
-      console.log("[email-retention] wiped debug_llm_outputs.raw_input:", { rows: count ?? null });
+      // Expected shape: { wiped: n }
+      console.log("[email-retention] debug_llm_outputs_wipe_raw_input ok:", wipeData);
+      console.log("[email-retention] wiped debug_llm_outputs.raw_input:", {
+        wiped: wipeData?.wiped ?? null,
+      });
     }
   }
 }
