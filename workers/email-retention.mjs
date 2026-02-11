@@ -23,6 +23,36 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
+// -----------------------------------------------------------------------------
+// NEW: helper for "train emails body-only" storage
+// Call this right after a successful trip insert, to null subject/from/snippet/etc.
+// Example:
+//   await redactTrainRawEmailAfterTripInsert(db, { user_email, message_id: fullMsg.id });
+// -----------------------------------------------------------------------------
+export async function redactTrainRawEmailAfterTripInsert(
+  supa,
+  { user_email, message_id, provider = "gmail" }
+) {
+  if (!supa) throw new Error("Missing supabase client (supa)");
+  if (!user_email) throw new Error("Missing user_email");
+  if (!message_id) throw new Error("Missing message_id");
+
+  return await supa
+    .from("raw_emails")
+    .update({
+      subject: null,
+      sender: null,
+      snippet: null,
+      body_plain: null,
+      parsed_at: new Date().toISOString(),
+      redacted_at: new Date().toISOString(),
+      redaction_reason: "parsed_and_redacted",
+    })
+    .eq("provider", provider)
+    .eq("user_email", user_email)
+    .eq("message_id", message_id);
+}
+
 // Tunables
 const NON_TRAIN_REDACT_AFTER_MIN = Number(process.env.RAW_EMAILS_NON_TRAIN_REDACT_AFTER_MIN ?? "0");
 const TRAIN_REDACT_AFTER_DAYS = Number(process.env.RAW_EMAILS_TRAIN_REDACT_AFTER_DAYS ?? "7");
