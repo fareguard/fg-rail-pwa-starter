@@ -24,18 +24,42 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 });
 
 // -----------------------------------------------------------------------------
-// NEW: helper for "train emails body-only" storage
-// Call this right after a successful trip insert, to null subject/from/snippet/etc.
-// Example:
-//   await redactTrainRawEmailAfterTripInsert(db, { user_email, message_id: fullMsg.id });
+// Helper: "no compromise" raw email redaction for train flows
+//
+// You can call this from your ingest/train pipeline in a `finally` block so the
+// raw email content is ALWAYS removed, regardless of parse/trip insert outcome.
+//
+// Example usage (elsewhere):
+//   let reason = "parsed_and_redacted";
+//   try { ... } catch { reason = "parse_failed"; } finally {
+//     await redactTrainRawEmailAfterTripInsert(db, {
+//       user_email,
+//       message_id: fullMsg.id,
+//       redaction_reason: reason,
+//       is_train: true,
+//     });
+//   }
+//
+// Notes:
+// - Always sets parsed_at + redacted_at (prevents re-processing loops).
+// - Keeps dedupe keys (provider,user_email,message_id) but removes content.
+// - redaction_reason lets you audit without content.
 // -----------------------------------------------------------------------------
 export async function redactTrainRawEmailAfterTripInsert(
   supa,
-  { user_email, message_id, provider = "gmail" }
+  {
+    user_email,
+    message_id,
+    provider = "gmail",
+    redaction_reason = "parsed_and_redacted",
+    is_train = true,
+  }
 ) {
   if (!supa) throw new Error("Missing supabase client (supa)");
   if (!user_email) throw new Error("Missing user_email");
   if (!message_id) throw new Error("Missing message_id");
+
+  const nowIso = new Date().toISOString();
 
   return await supa
     .from("raw_emails")
@@ -44,9 +68,16 @@ export async function redactTrainRawEmailAfterTripInsert(
       sender: null,
       snippet: null,
       body_plain: null,
-      parsed_at: new Date().toISOString(),
-      redacted_at: new Date().toISOString(),
-      redaction_reason: "parsed_and_redacted",
+
+      // Mark processed + redacted every time this helper runs.
+      parsed_at: nowIso,
+      redacted_at: nowIso,
+
+      // Audit-only reason (no content retained)
+      redaction_reason,
+
+      // Optional marker for train flows
+      is_train,
     })
     .eq("provider", provider)
     .eq("user_email", user_email)
