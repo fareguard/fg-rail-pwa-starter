@@ -28,11 +28,7 @@ const NON_TRAIN_REDACT_AFTER_MIN = Number(process.env.RAW_EMAILS_NON_TRAIN_REDAC
 const TRAIN_REDACT_AFTER_DAYS = Number(process.env.RAW_EMAILS_TRAIN_REDACT_AFTER_DAYS ?? "7");
 
 // Prefer existing batch env if present; otherwise allow RETENTION_BATCH; otherwise default.
-const BATCH = Number(
-  process.env.RAW_EMAILS_RETENTION_BATCH ??
-    process.env.RETENTION_BATCH ??
-    "2000"
-);
+const BATCH = Number(process.env.RAW_EMAILS_RETENTION_BATCH ?? process.env.RETENTION_BATCH ?? "2000");
 
 // Debug minimisation retention windows
 const DEBUG_KEEP_SUBJECT_FROM_DAYS = Number(process.env.DEBUG_KEEP_SUBJECT_FROM_DAYS ?? "7");
@@ -44,6 +40,9 @@ const TARGET_MIN_UTC = Number(process.env.EMAIL_RETENTION_MIN_UTC ?? "20");
 
 // Safety switches
 const WIPE_DEBUG_RAW_INPUT = String(process.env.WIPE_DEBUG_RAW_INPUT ?? "true").toLowerCase() === "true";
+
+// add near your other env reads
+const RUN_ON_START = String(process.env.EMAIL_RETENTION_RUN_ON_START ?? "false").toLowerCase() === "true";
 
 let lastRunDay = null;
 
@@ -121,18 +120,29 @@ function shouldRunNow() {
 
 async function loop() {
   try {
+    const config = {
+      NON_TRAIN_REDACT_AFTER_MIN,
+      TRAIN_REDACT_AFTER_DAYS,
+      BATCH,
+      DEBUG_KEEP_SUBJECT_FROM_DAYS,
+      DEBUG_KEEP_RAW_OUTPUT_DAYS,
+      TARGET_HOUR_UTC,
+      TARGET_MIN_UTC,
+      WIPE_DEBUG_RAW_INPUT,
+      RUN_ON_START,
+    };
+
+    if (RUN_ON_START && lastRunDay == null) {
+      lastRunDay = new Date().toISOString().slice(0, 10);
+      console.log("[email-retention] running (run_on_start)", config);
+      await runCleanup();
+      console.log("[email-retention] done (run_on_start)");
+      return; // optional: or continue scheduling after
+    }
+
     if (shouldRunNow()) {
       lastRunDay = new Date().toISOString().slice(0, 10);
-      console.log("[email-retention] running", {
-        NON_TRAIN_REDACT_AFTER_MIN,
-        TRAIN_REDACT_AFTER_DAYS,
-        BATCH,
-        DEBUG_KEEP_SUBJECT_FROM_DAYS,
-        DEBUG_KEEP_RAW_OUTPUT_DAYS,
-        TARGET_HOUR_UTC,
-        TARGET_MIN_UTC,
-        WIPE_DEBUG_RAW_INPUT,
-      });
+      console.log("[email-retention] running", config);
       await runCleanup();
       console.log("[email-retention] done");
     }
@@ -152,6 +162,7 @@ console.log("[email-retention] started", {
   TARGET_HOUR_UTC,
   TARGET_MIN_UTC,
   WIPE_DEBUG_RAW_INPUT,
+  RUN_ON_START,
 });
 
 loop();
