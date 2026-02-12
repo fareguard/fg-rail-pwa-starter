@@ -15,10 +15,7 @@ const CONCURRENCY = 5;
 
 function noStoreJson(body: any, status = 200) {
   const res = NextResponse.json(body, { status });
-  res.headers.set(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, max-age=0"
-  );
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   return res;
 }
 
@@ -101,6 +98,42 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
   return s;
 }
 
+// Fail-safe redaction helper (ALWAYS wipe content, mark parsed+redacted)
+async function redactTrainRawEmailFailSafe(
+  supa: any,
+  {
+    user_email,
+    message_id,
+    provider = "gmail",
+    redaction_reason,
+    is_train = true,
+  }: {
+    user_email: string;
+    message_id: string;
+    provider?: string;
+    redaction_reason: string;
+    is_train?: boolean;
+  }
+) {
+  const nowIso = new Date().toISOString();
+
+  return await supa
+    .from("raw_emails")
+    .update({
+      subject: null,
+      sender: null,
+      snippet: null,
+      body_plain: null,
+      parsed_at: nowIso,
+      redacted_at: nowIso,
+      redaction_reason,
+      is_train,
+    })
+    .eq("provider", provider)
+    .eq("user_email", user_email)
+    .eq("message_id", message_id);
+}
+
 export async function GET(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
@@ -123,9 +156,7 @@ export async function GET(req: NextRequest) {
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
-    const url = new URL(
-      "https://gmail.googleapis.com/gmail/v1/users/me/messages"
-    );
+    const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
     url.searchParams.set("q", SEARCH_QUERY);
     url.searchParams.set("maxResults", "50");
 
@@ -140,9 +171,7 @@ export async function GET(req: NextRequest) {
     }).then((x) => x.json());
 
     const messageIds: string[] = Array.isArray(list.messages)
-      ? list.messages
-          .map((m: any) => m?.id)
-          .filter((id: string | undefined) => !!id)
+      ? list.messages.map((m: any) => m?.id).filter((id: string | undefined) => !!id)
       : [];
 
     const scanned = messageIds.length;
@@ -211,7 +240,7 @@ export async function GET(req: NextRequest) {
                 snippet: null,
                 body_plain: null,
                 is_train: false,
-                parsed_at: new Date().toISOString(), // ✅ add
+                parsed_at: new Date().toISOString(),
                 redacted_at: new Date().toISOString(),
                 redaction_reason: "non_train_filtered",
               },
@@ -219,7 +248,6 @@ export async function GET(req: NextRequest) {
             );
 
             if (!rawErr) savedRaw++;
-            // skip parsing entirely
             return;
           }
 
@@ -237,7 +265,7 @@ export async function GET(req: NextRequest) {
               is_train: true,
               redacted_at: null,
               redaction_reason: null,
-              // parsed_at intentionally set later after LLM decision / outcome
+              // parsed_at intentionally set later (but will always be set in fail-safe redaction)
             },
             { onConflict: "provider,user_email,message_id" } as any
           );
@@ -247,25 +275,22 @@ export async function GET(req: NextRequest) {
           // ✅ If OpenAI key missing, we stop here (body already not persisted).
           // Mark as done + redact other content to avoid retention.
           if (!OPENAI_ENABLED) {
-            await supa
-              .from("raw_emails")
-              .update({
-                subject: null,
-                sender: null,
-                snippet: null,
-                body_plain: null,
-                parsed_at: new Date().toISOString(),
-                redacted_at: new Date().toISOString(),
-                redaction_reason: "openai_disabled_no_parse",
-              })
-              .eq("provider", "gmail")
-              .eq("user_email", user_email)
-              .eq("message_id", fullMsg.id);
-
+            await redactTrainRawEmailFailSafe(supa, {
+              user_email,
+              message_id: fullMsg.id,
+              redaction_reason: "openai_disabled_no_parse",
+              is_train: true,
+            });
             return;
           }
 
+          // -------------------------
+          // ✅ FAIL-SAFE TRAIN FLOW:
+          // Always redact in `finally`, regardless of downstream success/failure.
+          // -------------------------
           let parsed: any = null;
+          let tripInserted = false;
+          let redactionReason = "train_processed_unknown";
 
           try {
             // ✅ Lazy import at runtime only (prevents build-time OpenAI init)
@@ -278,162 +303,131 @@ export async function GET(req: NextRequest) {
               body_plain: body,
               snippet,
             });
-          } catch (e: any) {
-            // Parsing failed: mark parsed_at but keep content temporarily for debugging/retention job.
-            await supa
-              .from("raw_emails")
-              .update({
-                parsed_at: new Date().toISOString(),
-                redaction_reason: "llm_parse_failed_keep_temp",
-              })
-              .eq("provider", "gmail")
-              .eq("user_email", user_email)
-              .eq("message_id", fullMsg.id);
 
-            throw e;
-          }
-
-          // Log parser output for debugging (after parsing)
-          try {
-            await supa.from("debug_llm_outputs").insert({
-              email_id: id,
-              user_email, // ✅ add this now that column exists
-              from_addr: from,
-              subject,
-              raw_input: null, // ✅ don’t store bodies
-              raw_output: JSON.stringify(parsed),
-            });
-          } catch {
-            // ignore debug errors
-          }
-
-          // ✅ TrainOk but not a ticket: redact immediately after decision
-          if (!parsed?.is_ticket) {
-            await supa
-              .from("raw_emails")
-              .update({
-                subject: null,
-                sender: null,
-                snippet: null,
-                body_plain: null,
-                parsed_at: new Date().toISOString(),
-                redacted_at: new Date().toISOString(),
-                redaction_reason: "train_filter_not_ticket",
-              })
-              .eq("provider", "gmail")
-              .eq("user_email", user_email)
-              .eq("message_id", fullMsg.id);
-
-            return;
-          }
-
-          // Normalisation for DB
-          const operatorRaw = parsed.operator ?? parsed.provider ?? null;
-          const operator = normaliseOperatorName(operatorRaw);
-          const retailer = parsed.retailer ?? parsed.provider ?? null;
-
-          const departStr =
-            parsed.depart_planned || parsed.outbound_departure || null;
-          const arriveStr = parsed.arrive_planned || null;
-          const outboundStr =
-            parsed.outbound_departure || parsed.depart_planned || null;
-
-          const departIso = safeTimestamp(departStr);
-          const arriveIso = safeTimestamp(arriveStr);
-          const outboundIso = safeTimestamp(outboundStr);
-
-          // Check for existing trip by booking_ref + origin + destination
-          let existingTrip:
-            | { id: string; depart_planned: string | null }
-            | null = null;
-
-          if (parsed.booking_ref && parsed.origin && parsed.destination) {
-            const { data: existingRows, error: existingErr } = await supa
-              .from("trips")
-              .select("id, depart_planned")
-              .eq("user_email", user_email)
-              .eq("booking_ref", parsed.booking_ref)
-              .eq("origin", parsed.origin)
-              .eq("destination", parsed.destination)
-              .limit(1);
-
-            if (!existingErr && existingRows && existingRows.length) {
-              existingTrip = existingRows[0] as any;
+            // Log parser output for debugging (after parsing)
+            try {
+              await supa.from("debug_llm_outputs").insert({
+                email_id: id,
+                user_email, // ✅ add this now that column exists
+                from_addr: from,
+                subject,
+                raw_input: null, // ✅ don’t store bodies
+                raw_output: JSON.stringify(parsed),
+              });
+            } catch {
+              // ignore debug errors
             }
-          }
 
-          let finalDepart = departIso;
-          if (existingTrip?.depart_planned && finalDepart) {
-            const existingDate = new Date(existingTrip.depart_planned);
-            const newDate = new Date(finalDepart);
-            if (existingDate <= newDate) {
-              finalDepart = existingTrip.depart_planned;
+            // ✅ TrainOk but not a ticket: redact immediately after decision (still via finally)
+            if (!parsed?.is_ticket) {
+              redactionReason = "train_filter_not_ticket";
+              return;
             }
-          }
 
-          const baseRecord = {
-            user_email,
-            retailer,
-            email_id: id,
-            operator,
-            booking_ref: parsed.booking_ref || null,
-            origin: parsed.origin || null,
-            destination: parsed.destination || null,
-            depart_planned: finalDepart,
-            arrive_planned: arriveIso,
-            outbound_departure: outboundIso,
-            is_ticket: true,
-            pnr_json: parsed,
-            source: "gmail",
-          };
+            // Normalisation for DB
+            const operatorRaw = parsed.operator ?? parsed.provider ?? null;
+            const operator = normaliseOperatorName(operatorRaw);
+            const retailer = parsed.retailer ?? parsed.provider ?? null;
 
-          let tripErr: any = null;
+            const departStr = parsed.depart_planned || parsed.outbound_departure || null;
+            const arriveStr = parsed.arrive_planned || null;
+            const outboundStr = parsed.outbound_departure || parsed.depart_planned || null;
 
-          if (existingTrip) {
-            const { error } = await supa
-              .from("trips")
-              .update(baseRecord)
-              .eq("id", existingTrip.id);
-            tripErr = error;
-          } else {
-            const { error } = await supa.from("trips").insert(baseRecord);
-            tripErr = error;
-          }
+            const departIso = safeTimestamp(departStr);
+            const arriveIso = safeTimestamp(arriveStr);
+            const outboundIso = safeTimestamp(outboundStr);
 
-          if (tripErr) {
-            tripErrors.push({
+            // Check for existing trip by booking_ref + origin + destination
+            let existingTrip: { id: string; depart_planned: string | null } | null = null;
+
+            if (parsed.booking_ref && parsed.origin && parsed.destination) {
+              const { data: existingRows, error: existingErr } = await supa
+                .from("trips")
+                .select("id, depart_planned")
+                .eq("user_email", user_email)
+                .eq("booking_ref", parsed.booking_ref)
+                .eq("origin", parsed.origin)
+                .eq("destination", parsed.destination)
+                .limit(1);
+
+              if (!existingErr && existingRows && existingRows.length) {
+                existingTrip = existingRows[0] as any;
+              }
+            }
+
+            let finalDepart = departIso;
+            if (existingTrip?.depart_planned && finalDepart) {
+              const existingDate = new Date(existingTrip.depart_planned);
+              const newDate = new Date(finalDepart);
+              if (existingDate <= newDate) {
+                finalDepart = existingTrip.depart_planned;
+              }
+            }
+
+            const baseRecord = {
+              user_email,
+              retailer,
               email_id: id,
-              message: tripErr.message ?? String(tripErr),
-            });
+              operator,
+              booking_ref: parsed.booking_ref || null,
+              origin: parsed.origin || null,
+              destination: parsed.destination || null,
+              depart_planned: finalDepart,
+              arrive_planned: arriveIso,
+              outbound_departure: outboundIso,
+              is_ticket: true,
+              pnr_json: parsed,
+              source: "gmail",
+            };
 
-            // ✅ If trip write fails: still mark parsed_at, keep content temporarily for debugging.
-            await supa
-              .from("raw_emails")
-              .update({
-                parsed_at: new Date().toISOString(),
-                redaction_reason: "trip_write_failed_keep_temp",
-              })
-              .eq("provider", "gmail")
-              .eq("user_email", user_email)
-              .eq("message_id", fullMsg.id);
-          } else {
+            let tripErr: any = null;
+
+            if (existingTrip) {
+              const { error } = await supa.from("trips").update(baseRecord).eq("id", existingTrip.id);
+              tripErr = error;
+            } else {
+              const { error } = await supa.from("trips").insert(baseRecord);
+              tripErr = error;
+            }
+
+            if (tripErr) {
+              tripErrors.push({
+                email_id: id,
+                message: tripErr.message ?? String(tripErr),
+              });
+
+              redactionReason = "trip_write_failed";
+              tripInserted = false;
+              return;
+            }
+
+            // ✅ Trip success
             savedTrips++;
+            tripInserted = true;
+            redactionReason = "ticket_parsed_redact";
+          } catch (err) {
+            console.error("[train] unexpected parsing/insert error:", err);
+            // Keep reason specific for auditing (no content retained)
+            redactionReason = tripInserted ? "unexpected_error_after_trip" : "llm_parse_or_insert_failed";
+            // Re-throw so it still shows up in Promise.allSettled as rejected (keeps your current visibility)
+            throw err;
+          } finally {
+            // ✅ ALWAYS redact raw email (even if parsing/insert fails)
+            const { error: redactErr } = await redactTrainRawEmailFailSafe(supa, {
+              user_email,
+              message_id: fullMsg.id,
+              redaction_reason: redactionReason || (tripInserted ? "ticket_parsed_redact" : "parse_or_insert_failed"),
+              is_train: true,
+            });
 
-            // ✅ After successful trip insert/update: redact consistently
-            await supa
-              .from("raw_emails")
-              .update({
-                subject: null,
-                sender: null,
-                snippet: null,
-                body_plain: null,
-                parsed_at: new Date().toISOString(),
-                redacted_at: new Date().toISOString(),
-                redaction_reason: "ticket_parsed_redact",
-              })
-              .eq("provider", "gmail")
-              .eq("user_email", user_email)
-              .eq("message_id", fullMsg.id);
+            if (redactErr) {
+              console.error("[train] raw email redaction failed:", redactErr.message);
+            } else {
+              console.log("[train] raw email redacted (fail-safe)", {
+                email_id: id,
+                reason: redactionReason,
+              });
+            }
           }
         })
       );
