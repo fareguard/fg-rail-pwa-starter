@@ -26,19 +26,43 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 // -----------------------------------------------------------------------------
 // Helper: "no compromise" raw email redaction for train flows
 //
-// You can call this from your ingest/train pipeline in a `finally` block so the
-// raw email content is ALWAYS removed, regardless of parse/trip insert outcome.
+// The edge case we’re fixing:
+// If trainOk === true, then parsing/inserting might throw, and if redaction
+// happens after those steps (without a finally), raw email content can remain.
 //
-// Example usage (elsewhere):
-//   let reason = "parsed_and_redacted";
-//   try { ... } catch { reason = "parse_failed"; } finally {
-//     await redactTrainRawEmailAfterTripInsert(db, {
+// ✅ Fail-safe model (recommended usage elsewhere):
+//
+// if (trainOk === true) {
+//   let tripInserted = false;
+//
+//   try {
+//     // parse + build tripRow (may throw)
+//     // 1) Insert trip
+//     const { error: tripErr } = await db.from("trips").insert(tripRow);
+//
+//     if (tripErr) {
+//       console.error("[train] trip insert failed:", tripErr.message);
+//     } else {
+//       tripInserted = true;
+//     }
+//   } catch (err) {
+//     console.error("[train] unexpected parsing/insert error:", err);
+//   } finally {
+//     // 2) ALWAYS redact raw email (even if parsing/insert fails)
+//     const { error: redactErr } = await redactTrainRawEmailAfterTripInsert(db, {
 //       user_email,
 //       message_id: fullMsg.id,
-//       redaction_reason: reason,
+//       redaction_reason: tripInserted ? "parsed_and_redacted" : "parse_or_insert_failed",
 //       is_train: true,
 //     });
+//
+//     if (redactErr) {
+//       console.error("[train] raw email redaction failed:", redactErr.message);
+//     } else {
+//       console.log("[train] raw email redacted (fail-safe)");
+//     }
 //   }
+// }
 //
 // Notes:
 // - Always sets parsed_at + redacted_at (prevents re-processing loops).
@@ -82,6 +106,12 @@ export async function redactTrainRawEmailAfterTripInsert(
     .eq("provider", provider)
     .eq("user_email", user_email)
     .eq("message_id", message_id);
+}
+
+// Optional alias (clearer name for the fail-safe intent).
+// Kept as a thin wrapper to avoid breaking existing imports.
+export async function redactTrainRawEmailFailSafe(supa, args) {
+  return await redactTrainRawEmailAfterTripInsert(supa, args);
 }
 
 // Tunables
