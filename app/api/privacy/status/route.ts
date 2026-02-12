@@ -15,35 +15,48 @@ function noStoreJson(body: any, status = 200) {
 
 export async function GET() {
   try {
-    // ✅ Don’t expose internal counts to the public internet
     const session = getSessionFromCookies();
-    if (!session?.email) return noStoreJson({ ok: false, error: "Not authenticated" }, 401);
+    const user_email = session?.email?.trim().toLowerCase();
+
+    if (!user_email) {
+      return noStoreJson({ ok: false, error: "Not authenticated" }, 401);
+    }
 
     const db = getSupabaseAdmin();
 
-    // Raw email content at rest (should always be 0)
-    const { count: rawWithContent } = await db
+    // 1) Raw email content at rest for THIS user (should always be 0)
+    const { count: rawWithContent, error: rawErr } = await db
       .from("raw_emails")
       .select("*", { count: "exact", head: true })
+      .eq("user_email", user_email)
       .is("redacted_at", null)
       .or("subject.is.not.null,sender.is.not.null,snippet.is.not.null,body_plain.is.not.null");
 
-    // Debug raw_input at rest (should always be 0)
-    const { count: debugRawInputLeft } = await db
+    if (rawErr) throw rawErr;
+
+    // 2) Debug raw_input at rest for THIS user (should always be 0)
+    const { count: debugRawInputLeft, error: inErr } = await db
       .from("debug_llm_outputs")
       .select("*", { count: "exact", head: true })
+      .eq("user_email", user_email)
       .not("raw_input", "is", null);
 
-    // Debug raw_output older than 14d (should always be 0)
+    if (inErr) throw inErr;
+
+    // 3) Debug raw_output older than 14d for THIS user (should always be 0)
     const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-    const { count: debugRawOutputOver14d } = await db
+    const { count: debugRawOutputOver14d, error: outErr } = await db
       .from("debug_llm_outputs")
       .select("*", { count: "exact", head: true })
+      .eq("user_email", user_email)
       .lt("created_at", cutoff)
       .not("raw_output", "is", null);
 
+    if (outErr) throw outErr;
+
     return noStoreJson({
       ok: true,
+      user_email,
       guarantees: {
         raw_email_content_at_rest: (rawWithContent ?? 0) === 0,
         debug_raw_input_at_rest: (debugRawInputLeft ?? 0) === 0,
