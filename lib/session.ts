@@ -1,25 +1,26 @@
 // lib/session.ts
-import { cookies } from "next/headers";
-import crypto from "crypto";
 import type { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const SESSION_COOKIE_NAME = "fg_session";
-const SESSION_MAX_AGE = 60 * 60 * 24 * 14; // 2 weeks
 
-// Must be set in Railway/Env. Use a long random string.
+// 14 days (you already changed this)
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 14;
+
+// Optional extra hardening: sign the session id cookie
+// (Not strictly required because UUID is unguessable, but it prevents
+// attackers from probing with malformed values and gives you tamper evidence.)
 const SESSION_SECRET = process.env.SESSION_SECRET;
-if (!SESSION_SECRET) {
-  // Fail fast in production to avoid running unsigned sessions.
-  // (If you prefer not to crash locally, wrap this in a NODE_ENV check.)
-  throw new Error("Missing env var: SESSION_SECRET");
-}
+if (!SESSION_SECRET) throw new Error("Missing env var: SESSION_SECRET");
 
 export type SessionData = {
   email: string;
+  session_id: string;
 };
 
 // -----------------------
-// helpers
+// low-level cookie helpers
 // -----------------------
 function b64url(input: Buffer | string) {
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, "utf8");
@@ -30,14 +31,8 @@ function b64url(input: Buffer | string) {
     .replace(/=+$/g, "");
 }
 
-function b64urlToBuf(input: string) {
-  const pad = input.length % 4 === 0 ? "" : "=".repeat(4 - (input.length % 4));
-  const s = input.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  return Buffer.from(s, "base64");
-}
-
-function sign(payloadB64: string) {
-  const mac = crypto.createHmac("sha256", SESSION_SECRET!).update(payloadB64).digest();
+function sign(value: string) {
+  const mac = crypto.createHmac("sha256", SESSION_SECRET!).update(value).digest();
   return b64url(mac);
 }
 
@@ -48,64 +43,50 @@ function timingSafeEqualStr(a: string, b: string) {
   return crypto.timingSafeEqual(ab, bb);
 }
 
-// Encode {email} -> "payload.signature"
-export function encodeSession(data: SessionData): string {
-  const payload = b64url(JSON.stringify(data));
-  const sig = sign(payload);
-  return `${payload}.${sig}`;
+// Cookie value format: "<session_id>.<sig>"
+export function encodeSessionId(sessionId: string): string {
+  const sig = sign(sessionId);
+  return `${sessionId}.${sig}`;
 }
 
-// Decode "payload.signature" -> {email} | null
-export function decodeSession(raw: string | null | undefined): SessionData | null {
+export function decodeSessionId(raw: string | null | undefined): string | null {
   if (!raw) return null;
-
   const parts = raw.split(".");
   if (parts.length !== 2) return null;
-
-  const [payloadB64, sig] = parts;
-  const expected = sign(payloadB64);
-
+  const [sessionId, sig] = parts;
+  if (!sessionId || !sig) return null;
+  const expected = sign(sessionId);
   if (!timingSafeEqualStr(sig, expected)) return null;
-
-  try {
-    const json = b64urlToBuf(payloadB64).toString("utf8");
-    const parsed = JSON.parse(json);
-    if (typeof parsed?.email === "string" && parsed.email.trim().length > 0) {
-      return { email: parsed.email.trim() };
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
+  return sessionId;
 }
 
-// ----- Read session in a Route Handler from Request -----
-export async function getSessionFromRequest(req: Request | NextRequest): Promise<SessionData | null> {
+function readCookieFromHeader(req: Request | NextRequest, name: string): string | null {
   const cookieHeader = (req as any).headers?.get?.("cookie") ?? "";
   const match = cookieHeader
     .split(";")
     .map((c: string) => c.trim())
-    .find((c: string) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
-
+    .find((c: string) => c.startsWith(`${name}=`));
   if (!match) return null;
-
-  const value = decodeURIComponent(match.split("=").slice(1).join("="));
-  return decodeSession(value);
+  return decodeURIComponent(match.split("=").slice(1).join("="));
 }
 
-// ----- Read session via next/headers in server code -----
-export function getSessionFromCookies(): SessionData | null {
-  const jar = cookies();
-  const raw = jar.get(SESSION_COOKIE_NAME)?.value ?? null;
-  return decodeSession(raw);
+function clearCookie(res: NextResponse) {
+  // @ts-ignore
+  res.cookies.set({
+    name: SESSION_COOKIE_NAME,
+    value: "",
+    httpOnly: true,
+    sameSite: "lax",
+    secure: true,
+    path: "/",
+    maxAge: 0,
+  });
 }
 
-// ----- Write the session cookie on a NextResponse -----
-export function createSessionCookie(email: string, res: NextResponse): void {
-  const value = encodeSession({ email });
+function setCookie(res: NextResponse, sessionId: string) {
+  const value = encodeSessionId(sessionId);
 
-  // @ts-ignore NextResponse cookies available at runtime
+  // @ts-ignore
   res.cookies.set({
     name: SESSION_COOKIE_NAME,
     value,
@@ -113,6 +94,118 @@ export function createSessionCookie(email: string, res: NextResponse): void {
     sameSite: "lax",
     secure: true,
     path: "/",
-    maxAge: SESSION_MAX_AGE,
+    maxAge: SESSION_MAX_AGE_SECONDS,
   });
+}
+
+// -----------------------
+// main API
+// -----------------------
+
+export async function getSessionFromRequest(req: Request | NextRequest): Promise<SessionData | null> {
+  const raw = readCookieFromHeader(req, SESSION_COOKIE_NAME);
+  const sessionId = decodeSessionId(raw);
+  if (!sessionId) return null;
+
+  const db = getSupabaseAdmin();
+
+  const { data, error } = await db
+    .from("app_sessions")
+    .select("id, user_email, expires_at, revoked_at")
+    .eq("id", sessionId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  if (data.revoked_at) return null;
+
+  const exp = new Date(data.expires_at).getTime();
+  if (!Number.isFinite(exp) || exp <= Date.now()) return null;
+
+  // best-effort last_seen update (don’t block request)
+  db.from("app_sessions")
+    .update({ last_seen_at: new Date().toISOString() })
+    .eq("id", sessionId)
+    .then(() => {})
+    .catch(() => {});
+
+  return { email: data.user_email, session_id: data.id };
+}
+
+export async function requireSessionFromRequest(req: Request | NextRequest): Promise<SessionData> {
+  const s = await getSessionFromRequest(req);
+  if (!s?.email) throw new Error("Not authenticated");
+  return s;
+}
+
+// Creates DB session + sets cookie on response
+export async function createAppSessionAndSetCookie(
+  req: Request | NextRequest,
+  res: NextResponse,
+  email: string
+): Promise<{ session_id: string }> {
+  const db = getSupabaseAdmin();
+
+  const now = Date.now();
+  const expiresAt = new Date(now + SESSION_MAX_AGE_SECONDS * 1000).toISOString();
+
+  const userAgent = (req as any).headers?.get?.("user-agent") ?? null;
+  // Behind Vercel, this is usually present:
+  const ip =
+    (req as any).headers?.get?.("x-forwarded-for")?.split(",")?.[0]?.trim() ??
+    (req as any).headers?.get?.("x-real-ip") ??
+    null;
+
+  const { data, error } = await db
+    .from("app_sessions")
+    .insert({
+      user_email: email,
+      expires_at: expiresAt,
+      user_agent: userAgent,
+      ip,
+    })
+    .select("id")
+    .single();
+
+  if (error || !data?.id) {
+    throw new Error(error?.message || "Failed to create session");
+  }
+
+  setCookie(res, data.id);
+  return { session_id: data.id };
+}
+
+// Revoke ONE session (this device) + clear cookie
+export async function revokeSessionAndClearCookie(
+  req: Request | NextRequest,
+  res: NextResponse
+): Promise<{ revoked: boolean }> {
+  const raw = readCookieFromHeader(req, SESSION_COOKIE_NAME);
+  const sessionId = decodeSessionId(raw);
+
+  clearCookie(res);
+
+  if (!sessionId) return { revoked: false };
+
+  const db = getSupabaseAdmin();
+  await db
+    .from("app_sessions")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("id", sessionId);
+
+  return { revoked: true };
+}
+
+// Revoke ALL sessions for a user (logout everywhere)
+export async function revokeAllSessionsForEmail(email: string): Promise<{ revoked: number }> {
+  const db = getSupabaseAdmin();
+
+  const { data, error } = await db
+    .from("app_sessions")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("user_email", email)
+    .is("revoked_at", null)
+    .select("id");
+
+  if (error) throw new Error(error.message);
+  return { revoked: Array.isArray(data) ? data.length : 0 };
 }
