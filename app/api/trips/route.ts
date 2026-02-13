@@ -1,8 +1,7 @@
 // app/api/trips/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { requireSessionEmailFromCookies } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,10 +21,12 @@ type DashboardMetrics = {
 
 export async function GET(req: NextRequest) {
   try {
-    const cookieStore = cookies();
-    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
-    const session = decodeSession(raw);
-    const email = session?.email;
+    const supa = getSupabaseAdmin();
+
+    const email = await requireSessionEmailFromCookies(supa, {
+      user_agent: req.headers.get("user-agent"),
+      ip: req.headers.get("x-forwarded-for"), // Vercel will set this (may be a list)
+    });
 
     if (!email) {
       return noStoreJson(
@@ -40,7 +41,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const supa = getSupabaseAdmin();
     const { searchParams } = new URL(req.url);
     const sortDir = searchParams.get("sort") === "asc" ? "asc" : "desc";
 
