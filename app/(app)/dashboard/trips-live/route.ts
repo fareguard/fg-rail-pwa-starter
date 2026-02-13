@@ -1,10 +1,10 @@
 // app/(app)/dashboard/trips-live/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import { requireSessionEmailFromCookies } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
@@ -16,20 +16,16 @@ function noStoreJson(body: any, status = 200) {
 
 export async function GET(req: NextRequest) {
   try {
-    // 🔑 Read signed Gmail session from cookie
-    const cookieStore = cookies();
-    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
-    const session = decodeSession(raw);
-    const email = session?.email;
+    const supa = getSupabaseAdmin();
+
+    const email = await requireSessionEmailFromCookies(supa, {
+      user_agent: req.headers.get("user-agent"),
+      ip: req.headers.get("x-forwarded-for"), // Vercel will set this (may be a list)
+    });
 
     if (!email) {
-      return noStoreJson(
-        { ok: false, error: "Not authenticated", trips: [] },
-        401
-      );
+      return noStoreJson({ ok: false, error: "Not authenticated", trips: [] }, 401);
     }
-
-    const supa = getSupabaseAdmin();
 
     // optional sort param: /dashboard/trips-live?sort=asc|desc
     const { searchParams } = new URL(req.url);
@@ -49,9 +45,6 @@ export async function GET(req: NextRequest) {
     });
   } catch (e: any) {
     console.error("trips-live route error", e);
-    return noStoreJson(
-      { ok: false, error: String(e?.message || e), trips: [] },
-      500
-    );
+    return noStoreJson({ ok: false, error: String(e?.message || e), trips: [] }, 500);
   }
 }
