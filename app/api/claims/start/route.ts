@@ -1,8 +1,7 @@
 // app/api/claims/start/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import { requireSessionEmailFromCookies } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,27 +20,19 @@ type StartClaimBody = {
 
 function noStoreJson(body: any, status = 200) {
   const res = NextResponse.json(body, { status });
-  res.headers.set(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, max-age=0"
-  );
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   return res;
 }
 
 function isUuid(v: string): boolean {
   // strict-ish UUID v4/v1 format check (good enough for input validation)
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    v
+    v,
   );
 }
 
-function normaliseProviderFromOperator(
-  operatorRaw: string | null | undefined
-): string | null {
-  const s = String(operatorRaw || "")
-    .trim()
-    .toLowerCase();
-
+function normaliseProviderFromOperator(operatorRaw: string | null | undefined): string | null {
+  const s = String(operatorRaw || "").trim().toLowerCase();
   if (!s) return null;
 
   // keep these aligned with your scripts/provider-*.mjs + process-queue.mjs routing
@@ -75,7 +66,7 @@ function coerceFeePct(): number {
 
 async function getOrCreateProfileId(
   supa: ReturnType<typeof getSupabaseAdmin>,
-  email: string
+  email: string,
 ): Promise<string> {
   // Assumption (based on your description): profiles has { id uuid, email text unique }
   // If your column name differs, we’ll adjust once you paste the profiles schema.
@@ -101,17 +92,16 @@ async function getOrCreateProfileId(
 
 export async function POST(req: NextRequest) {
   try {
-    // 1) session
-    const cookieStore = cookies();
-    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
-    const session = decodeSession(raw);
-    const userEmail = session?.email;
+    const supa = getSupabaseAdmin();
+
+    // 1) session (new cookie helper)
+    const userEmail = await requireSessionEmailFromCookies(supa, {
+      user_agent: req.headers.get("user-agent"),
+      ip: req.headers.get("x-forwarded-for"), // Vercel will set this (may be a list)
+    });
 
     if (!userEmail) {
-      return noStoreJson(
-        { ok: false, error: "Not authenticated" },
-        401
-      );
+      return noStoreJson({ ok: false, error: "Not authenticated" }, 401);
     }
 
     // 2) parse + validate body
@@ -127,13 +117,11 @@ export async function POST(req: NextRequest) {
       return noStoreJson({ ok: false, error: "trip_id must be a UUID" }, 400);
     }
 
-    const supa = getSupabaseAdmin();
-
     // 3) Load trip (strict per-user isolation)
     const { data: trip, error: tripErr } = await supa
       .from("trips")
       .select(
-        "id,user_email,retailer,operator,booking_ref,origin,destination,depart_planned,arrive_planned,eligible,eligibility_reason"
+        "id,user_email,retailer,operator,booking_ref,origin,destination,depart_planned,arrive_planned,eligible,eligibility_reason",
       )
       .eq("id", tripId)
       .eq("user_email", userEmail)
@@ -153,7 +141,7 @@ export async function POST(req: NextRequest) {
           error: "Operator not supported for auto-claim yet",
           operator: trip.operator ?? null,
         },
-        400
+        400,
       );
     }
 
@@ -172,7 +160,6 @@ export async function POST(req: NextRequest) {
     if (existErr) throw existErr;
 
     if (existingClaim?.id) {
-      // Ensure it's queued at least once (optional: you can remove this if you want strict no-touch)
       return noStoreJson({
         ok: true,
         reused: true,
@@ -265,9 +252,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (e: any) {
     console.error("claims/start error", e);
-    return noStoreJson(
-      { ok: false, error: String(e?.message || e) },
-      500
-    );
+    return noStoreJson({ ok: false, error: String(e?.message || e) }, 500);
   }
 }
