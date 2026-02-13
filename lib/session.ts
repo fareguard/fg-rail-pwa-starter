@@ -1,5 +1,7 @@
 // lib/session.ts
 import type { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
@@ -96,6 +98,65 @@ function setCookie(res: NextResponse, sessionId: string) {
     path: "/",
     maxAge: SESSION_MAX_AGE_SECONDS,
   });
+}
+
+// -----------------------
+// new helpers for routes
+// -----------------------
+
+// Server Components / Route Handlers (cookies() API)
+export function getSessionIdFromCookies(): string | null {
+  const jar = cookies();
+  const raw = jar.get(SESSION_COOKIE_NAME)?.value ?? null;
+  return decodeSessionId(raw);
+}
+
+// Route Handlers / edge-ish contexts where you have a Request
+export async function getSessionIdFromRequest(req: Request | NextRequest): Promise<string | null> {
+  const cookieHeader = (req as any).headers?.get?.("cookie") ?? "";
+  const match = cookieHeader
+    .split(";")
+    .map((c: string) => c.trim())
+    .find((c: string) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
+
+  if (!match) return null;
+  const value = decodeURIComponent(match.split("=").slice(1).join("="));
+  return decodeSessionId(value);
+}
+
+// Production-grade: decode cookie -> session_id -> DB lookup -> user_email
+export async function requireSessionEmailFromCookies(
+  db: SupabaseClient,
+  opts?: { ip?: string | null; user_agent?: string | null }
+): Promise<string | null> {
+  const sid = getSessionIdFromCookies();
+  if (!sid) return null;
+
+  const { data, error } = await db
+    .from("app_sessions")
+    .select("user_email, revoked_at, expires_at")
+    .eq("id", sid)
+    .maybeSingle();
+
+  if (error || !data?.user_email) return null;
+  if (data.revoked_at) return null;
+  if (data.expires_at && new Date(data.expires_at).getTime() <= Date.now()) return null;
+
+  // Update last_seen (best-effort)
+  try {
+    await db
+      .from("app_sessions")
+      .update({
+        last_seen_at: new Date().toISOString(),
+        ...(opts?.ip ? { ip: opts.ip } : {}),
+        ...(opts?.user_agent ? { user_agent: opts.user_agent } : {}),
+      })
+      .eq("id", sid);
+  } catch {
+    // ignore
+  }
+
+  return data.user_email;
 }
 
 // -----------------------
