@@ -1,7 +1,7 @@
 // app/api/auth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { createSessionCookie } from "@/lib/session";
+import { createAppSessionAndSetCookie } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -156,8 +156,8 @@ export async function GET(req: Request) {
     // --- 7) Set session cookie + redirect ---
     const res = NextResponse.redirect(redirectUrl);
 
-    // Our helper signature is (email, res)
-    createSessionCookie(email, res);
+    // Create DB session row + set opaque cookie
+    await createAppSessionAndSetCookie(req, res, email);
 
     return res;
   } catch (e: any) {
