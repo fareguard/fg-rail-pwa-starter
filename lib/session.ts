@@ -4,7 +4,7 @@ import crypto from "crypto";
 import type { NextRequest, NextResponse } from "next/server";
 
 export const SESSION_COOKIE_NAME = "fg_session";
-const SESSION_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+const SESSION_MAX_AGE = 60 * 60 * 24 * 14; // 2 weeks
 
 // Must be set in Railway/Env. Use a long random string.
 const SESSION_SECRET = process.env.SESSION_SECRET;
