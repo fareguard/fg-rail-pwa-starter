@@ -1,8 +1,7 @@
 // app/(app)/dashboard/trips/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import { requireSessionEmailFromCookies } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -11,10 +10,7 @@ export const runtime = "nodejs";
 
 function noStoreJson(body: any, status = 200) {
   const res = NextResponse.json(body, { status });
-  res.headers.set(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, max-age=0"
-  );
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   return res;
 }
 
@@ -29,20 +25,17 @@ function toNumberOrZero(v: unknown): number {
 
 export async function GET(req: NextRequest) {
   try {
-    // 1) Read session
-    const cookieStore = cookies();
-    const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
-    const session = decodeSession(raw);
-    const email = session?.email;
+    const supa = getSupabaseAdmin();
+
+    // 1) Read session (new cookie helper)
+    const email = await requireSessionEmailFromCookies(supa, {
+      user_agent: req.headers.get("user-agent"),
+      ip: req.headers.get("x-forwarded-for"), // Vercel will set this (may be a list)
+    });
 
     if (!email) {
-      return noStoreJson(
-        { ok: false, error: "Not authenticated", trips: [] },
-        401
-      );
+      return noStoreJson({ ok: false, error: "Not authenticated", trips: [] }, 401);
     }
-
-    const supa = getSupabaseAdmin();
 
     const { searchParams } = new URL(req.url);
     const sortDir = searchParams.get("sort") === "asc" ? "asc" : "desc";
@@ -97,7 +90,7 @@ export async function GET(req: NextRequest) {
     }
 
     const eligibleUnclaimed = eligibleTrips.filter(
-      (t: any) => !alreadyClaimedTripIds.has(String(t?.id || "").trim())
+      (t: any) => !alreadyClaimedTripIds.has(String(t?.id || "").trim()),
     );
 
     const potentialRefundsCount = eligibleUnclaimed.length;
@@ -138,9 +131,6 @@ export async function GET(req: NextRequest) {
     });
   } catch (e: any) {
     console.error("dashboard/trips route error", e);
-    return noStoreJson(
-      { ok: false, error: String(e?.message || e), trips: [] },
-      500
-    );
+    return noStoreJson({ ok: false, error: String(e?.message || e), trips: [] }, 500);
   }
 }
