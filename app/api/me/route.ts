@@ -1,9 +1,10 @@
 // app/api/me/route.ts
-import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { SESSION_COOKIE_NAME, decodeSession } from "@/lib/session";
+import { NextRequest, NextResponse } from "next/server";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { requireSessionEmailFromCookies } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
@@ -13,19 +14,22 @@ function noStoreJson(body: any, status = 200) {
   return res;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const cookieStore = cookies();
-    const token = cookieStore.get(SESSION_COOKIE_NAME)?.value || null;
-    const session = decodeSession(token);
+    const supa = getSupabaseAdmin();
 
-    if (!session?.email) {
+    const email = await requireSessionEmailFromCookies(supa, {
+      user_agent: req.headers.get("user-agent"),
+      ip: req.headers.get("x-forwarded-for"), // Vercel will set this (may be a list)
+    });
+
+    if (!email) {
       return noStoreJson({ authenticated: false });
     }
 
     return noStoreJson({
       authenticated: true,
-      email: session.email,
+      email,
       via: "gmail-session",
     });
   } catch (e: any) {
