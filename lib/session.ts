@@ -183,11 +183,14 @@ export async function getSessionFromRequest(req: Request | NextRequest): Promise
   if (!Number.isFinite(exp) || exp <= Date.now()) return null;
 
   // best-effort last_seen update (don’t block request)
-  db.from("app_sessions")
-    .update({ last_seen_at: new Date().toISOString() })
-    .eq("id", sessionId)
-    .then(() => {})
-    .catch(() => {});
+  try {
+    await db
+      .from("app_sessions")
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq("id", sessionId);
+  } catch {
+    // ignore (best-effort last_seen)
+  }
 
   return { email: data.user_email, session_id: data.id };
 }
