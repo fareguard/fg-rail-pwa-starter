@@ -57,7 +57,7 @@ export default function PrivacyPolicy() {
               </a>
               <br />
               <strong>Email:</strong>{" "}
-              <a href="mailto:support@fareguard.co.uk">support@fareguard.co.uk</a>
+              <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>
             </p>
             <p>
               If you have any questions about this policy or wish to exercise your data
