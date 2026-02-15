@@ -267,10 +267,7 @@ export default function PrivacyPolicy() {
               <li>Does not determine compensation outcomes</li>
               <li>Does not replace decisions made by rail operators</li>
             </ul>
-            <p>
-              Users may request human review of assessments by contacting support.
-            </p>
-
+          
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>10. Data Sharing</h3>
             <p>We do not sell personal data.</p>
             <p>We share personal data only with:</p>
