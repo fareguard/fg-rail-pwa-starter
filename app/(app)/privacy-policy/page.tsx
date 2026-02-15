@@ -234,7 +234,7 @@ export default function PrivacyPolicy() {
             <p>You may revoke access at any time through:</p>
             <ul>
               <li>Google account permissions, or</li>
-              <li>FareGuard account settings</li>
+              <li>The FareGuard dashboard</li>
             </ul>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
