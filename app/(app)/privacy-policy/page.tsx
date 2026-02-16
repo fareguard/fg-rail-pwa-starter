@@ -43,33 +43,42 @@ export default function PrivacyPolicy() {
               <li>Privacy and Electronic Communications Regulations (PECR)</li>
             </ul>
 
-            <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>1. Who We Are</h3>
-            <p>
-              FareGuard is the data controller responsible for the personal data
-              described in this policy.
-            </p>
-            <p>
-              <strong>Controller:</strong> FareGuard
-              <br />
-              <strong>Website:</strong>{" "}
-              <a href="https://fareguard.co.uk" target="_blank" rel="noreferrer">
-                https://fareguard.co.uk
-              </a>
-              <br />
-              <strong>Email:</strong>{" "}
-              <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>
-            </p>
-            <p>
-              If you have any questions about this policy or wish to exercise your data
-              protection rights, contact us using the details above.
-            </p>
-            <p>
-              You also have the right to lodge a complaint with the Information
-              Commissioner’s Office (ICO):{" "}
-              <a href="https://ico.org.uk" target="_blank" rel="noreferrer">
-                https://ico.org.uk
-              </a>
-            </p>
+        <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>1. Who We Are</h3>
+
+<p>
+  FareGuard is the data controller responsible for the personal data described in this policy.
+</p>
+
+<p>
+  <strong>Controller legal name:</strong> FareGuard Ltd
+  <br />
+  <strong>Registered address:</strong> 64 Lincoln Street, Birmingham, B12 9EX
+  <br />
+  <strong>Company number:</strong> 16810407
+  <br />
+  <strong>Website:</strong>{" "}
+  <a href="https://fareguard.co.uk" target="_blank" rel="noreferrer">
+    https://fareguard.co.uk
+  </a>
+</p>
+
+<p>
+  <strong>Email:</strong>{" "}
+  <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>
+</p>
+
+<p>
+  FareGuard has determined that it is not required to appoint a Data Protection Officer.
+  Data protection enquiries may be directed to the contact details above.
+</p>
+
+<p>
+  You have the right to lodge a complaint with the Information Commissioner’s Office (ICO):{" "}
+  <a href="https://ico.org.uk" target="_blank" rel="noreferrer">
+    https://ico.org.uk
+  </a>
+</p>
+
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
               2. Overview of How FareGuard Works
