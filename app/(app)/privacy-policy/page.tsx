@@ -43,42 +43,41 @@ export default function PrivacyPolicy() {
               <li>Privacy and Electronic Communications Regulations (PECR)</li>
             </ul>
 
-        <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>1. Who We Are</h3>
+            <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>1. Who We Are</h3>
 
-<p>
-  FareGuard is the data controller responsible for the personal data described in this policy.
-</p>
+            <p>
+              FareGuard is the data controller responsible for the personal data described in this policy.
+            </p>
 
-<p>
-  <strong>Controller legal name:</strong> FareGuard Ltd
-  <br />
-  <strong>Registered address:</strong> 64 Lincoln Street, Birmingham, B12 9EX
-  <br />
-  <strong>Company number:</strong> 16810407
-  <br />
-  <strong>Website:</strong>{" "}
-  <a href="https://fareguard.co.uk" target="_blank" rel="noreferrer">
-    https://fareguard.co.uk
-  </a>
-</p>
+            <p>
+              <strong>Controller legal name:</strong> FareGuard Ltd
+              <br />
+              <strong>Registered address:</strong> 64 Lincoln Street, Birmingham, B12 9EX
+              <br />
+              <strong>Company number:</strong> 16810407
+              <br />
+              <strong>Website:</strong>{" "}
+              <a href="https://fareguard.co.uk" target="_blank" rel="noreferrer">
+                https://fareguard.co.uk
+              </a>
+            </p>
 
-<p>
-  <strong>Email:</strong>{" "}
-  <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>
-</p>
+            <p>
+              <strong>Email:</strong>{" "}
+              <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>
+            </p>
 
-<p>
-  FareGuard has determined that it is not required to appoint a Data Protection Officer.
-  Data protection enquiries may be directed to the contact details above.
-</p>
+            <p>
+              FareGuard has determined that it is not required to appoint a Data Protection Officer.
+              Data protection enquiries may be directed to the contact details above.
+            </p>
 
-<p>
-  You have the right to lodge a complaint with the Information Commissioner’s Office (ICO):{" "}
-  <a href="https://ico.org.uk" target="_blank" rel="noreferrer">
-    https://ico.org.uk
-  </a>
-</p>
-
+            <p>
+              You have the right to lodge a complaint with the Information Commissioner’s Office (ICO):{" "}
+              <a href="https://ico.org.uk" target="_blank" rel="noreferrer">
+                https://ico.org.uk
+              </a>
+            </p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
               2. Overview of How FareGuard Works
@@ -264,7 +263,29 @@ export default function PrivacyPolicy() {
             </ul>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
-              9. Automated Processing
+              9. Additional Google User Data Protections (Limited Use Compliance)
+            </h3>
+            <p>
+              FareGuard accesses Gmail data solely to provide the user-requested functionality of identifying rail booking confirmation emails and generating journey monitoring and compensation eligibility notifications.
+            </p>
+            <p>
+              FareGuard does not use Google user data for advertising, marketing, profiling unrelated to the requested service, or training machine learning or artificial intelligence models.
+            </p>
+            <p>
+              FareGuard does not sell, transfer, or disclose Gmail data to third parties except to service providers that are strictly necessary to operate the Service and who are contractually bound to process data only on FareGuard’s documented instructions and in accordance with applicable data protection law.
+            </p>
+            <p>
+              Access to Gmail-derived data by FareGuard personnel is strictly limited and controlled. Human access may occur only where necessary for technical troubleshooting, security investigation, or user-requested support. All such access is logged, access-restricted, and subject to confidentiality obligations.
+            </p>
+            <p>
+              FareGuard implements technical and organisational safeguards to protect Google user data, including encryption in transit and at rest, access controls, authentication mechanisms, monitoring, and secure infrastructure management.
+            </p>
+            <p>
+              FareGuard’s use and transfer of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements.
+            </p>
+
+            <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
+              10. Automated Processing
             </h3>
             <p>
               FareGuard uses automated processing to assess whether journeys may be
@@ -276,8 +297,8 @@ export default function PrivacyPolicy() {
               <li>Does not determine compensation outcomes</li>
               <li>Does not replace decisions made by rail operators</li>
             </ul>
-          
-            <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>10. Data Sharing</h3>
+
+            <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>11. Data Sharing</h3>
             <p>We do not sell personal data.</p>
             <p>We share personal data only with:</p>
             <ul>
@@ -288,7 +309,7 @@ export default function PrivacyPolicy() {
             <p>All processors are contractually bound to protect personal data.</p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
-              11. International Transfers
+              12. International Transfers
             </h3>
             <p>
               Where personal data is transferred outside the UK, we implement
@@ -300,7 +321,7 @@ export default function PrivacyPolicy() {
               <li>Adequacy regulations where applicable</li>
             </ul>
 
-            <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>12. Data Retention</h3>
+            <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>13. Data Retention</h3>
             <p>
               We retain personal data only as long as necessary for the purposes
               described.
@@ -365,7 +386,7 @@ export default function PrivacyPolicy() {
             </p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
-              13. Account Disconnection and Deletion
+              14. Account Disconnection and Deletion
             </h3>
             <p>If you disconnect Gmail or delete your FareGuard account:</p>
             <ul>
@@ -376,7 +397,7 @@ export default function PrivacyPolicy() {
             <p>Some data may be retained where required by law.</p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
-              14. Cookies and Similar Technologies
+              15. Cookies and Similar Technologies
             </h3>
             <p>
               FareGuard uses cookies and similar technologies necessary to:
@@ -393,7 +414,7 @@ export default function PrivacyPolicy() {
             </p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
-              15. Security Measures
+              16. Security Measures
             </h3>
             <p>
               We implement appropriate technical and organisational security measures
@@ -412,7 +433,7 @@ export default function PrivacyPolicy() {
             </p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
-              16. Your Data Protection Rights
+              17. Your Data Protection Rights
             </h3>
             <p>You have the right to:</p>
             <ul>
@@ -433,7 +454,7 @@ export default function PrivacyPolicy() {
             </p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
-              17. Changes to This Policy
+              18. Changes to This Policy
             </h3>
             <p>
               We may update this policy from time to time. Material changes will be
