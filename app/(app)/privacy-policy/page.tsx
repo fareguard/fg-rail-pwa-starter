@@ -22,9 +22,9 @@ export default function PrivacyPolicy() {
         <div className="container" style={{ maxWidth: 780 }}>
           <h1 className="h1">FareGuard Privacy Policy</h1>
           <p className="sub" style={{ marginTop: 8 }}>
-            Effective date: <strong>January 2026</strong>
+            Effective date: <strong>February 2026</strong>
             <br />
-            Last updated: <strong>January 2026</strong>
+            Last updated: <strong>February 2026</strong>
           </p>
 
           <div style={{ marginTop: 28, lineHeight: 1.7 }}>
