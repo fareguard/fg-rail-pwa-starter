@@ -326,6 +326,11 @@ export default function PrivacyPolicy() {
               We retain personal data only as long as necessary for the purposes
               described.
             </p>
+
+            <p>
+              Users may request deletion of their FareGuard account and associated data directly within the FareGuard dashboard under Account Settings, or by contacting support. Upon deletion, Gmail access is revoked and all associated personal data is permanently removed from FareGuard systems except where retention is required by law.
+            </p>
+
             <p>Typical retention periods:</p>
 
             <div style={{ overflowX: "auto" }}>
@@ -407,6 +412,9 @@ export default function PrivacyPolicy() {
               <li>Operate the service</li>
               <li>Ensure technical functionality</li>
             </ul>
+            <p>
+              Access to production systems containing Gmail-derived data is restricted to authorised personnel on a least-privilege basis. Administrative access requires strong authentication and is monitored. Encryption keys are managed using secure key management processes. System access and data processing activities are logged and regularly reviewed.
+            </p>
             <p>We do not use advertising or tracking cookies.</p>
             <p>
               Where non-essential cookies are introduced, we will obtain consent in
