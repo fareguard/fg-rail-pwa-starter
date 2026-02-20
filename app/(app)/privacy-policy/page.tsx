@@ -450,7 +450,7 @@ export default function PrivacyPolicy() {
             </p>
             <p>
               To exercise your rights, contact:{" "}
-              <a href="mailto:support@fareguard.co.uk">support@fareguard.co.uk</a>
+              <a href="mailto:hello@fareguard.co.uk">hello@fareguard.co.uk</a>
             </p>
 
             <h3 style={{ marginTop: 24, color: "var(--fg-navy)" }}>
