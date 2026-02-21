@@ -122,7 +122,7 @@ export default function Home() {
                 Only structured journey details necessary to provide delay reminders are retained.
               </p>
 
-              <p style={{ margin: "12px 0" }}>You can revoke access at any time in your Google account settings.</p>
+              <p style={{ margin: "12px 0" }}>You can revoke access at any time either in your FareGuard dashboard or your Google account settings.</p>
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
