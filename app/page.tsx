@@ -173,7 +173,7 @@ export default function Home() {
 
             {/* “Trust strip” */}
             <p className="small" style={{ marginTop: 12, color: "var(--fg-muted)" }}>
-              🔒 Uses Gmail read-only access to identify rail booking confirmations.{" "}
+              🔒 Uses Gmail read-only access to identify rail booking confirmation emails.{" "}
               <button
                 type="button"
                 onClick={openGmailInfo}
