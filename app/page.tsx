@@ -220,8 +220,8 @@ export default function Home() {
               </span>
               <h3 style={{ margin: "4px 0 6px" }}>Secure, read-only access</h3>
               <p className="small">
-                Sign in with Google so FareGuard can securely find your train tickets and track your journeys. We only
-                use ticket emails.
+                Sign in with Google so FareGuard can securely find your train tickets and track your journeys. 
+                We automatically identify recognised rail booking confirmation emails to extract journey details.
               </p>
             </div>
 
