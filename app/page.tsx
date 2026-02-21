@@ -103,8 +103,9 @@ export default function Home() {
               <p style={{ margin: "12px 0" }}>FareGuard connects to your Gmail account using read-only access.</p>
 
               <p style={{ margin: "12px 0" }}>
-                To detect your train journeys across all UK operators, FareGuard automatically scans your inbox to identify recognised rail booking confirmation emails. 
-                Because train operators send rail e-ticket confirmations as standard emails, inbox scanning is required to reliably detect journeys.
+                FareGuard automatically detects your train journeys across all UK operators by scanning your inbox for recognised rail booking confirmation emails.
+                
+                Since e-tickets are typically issued as standard email confirmations by train operators, inbox scanning is essential to identify your journeys accurately and reliably.
               </p>
 
               <p style={{ margin: "12px 0" }}>We do not:</p>
