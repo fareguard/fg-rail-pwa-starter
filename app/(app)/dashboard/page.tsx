@@ -32,7 +32,6 @@ export default function DashboardPage() {
       const r = await fetch("/api/me", { cache: "no-store" });
       const j: Me = await r.json();
       setMe(j);
-
     } catch (e: any) {
       setMe({ authenticated: false, error: String(e?.message || e) });
     } finally {
@@ -96,20 +95,22 @@ export default function DashboardPage() {
 
   // ✅ Disconnect handler (reused by menu item)
   const disconnectAndDelete = useCallback(async () => {
-    const ok = window.confirm("Disconnect FareGuard and delete all your data? This cannot be undone.");
+    const ok = window.confirm(
+      "Disconnect FareGuard and delete all your data? This cannot be undone.",
+    );
     if (!ok) return;
 
     const r = await fetch("/api/disconnect", { method: "POST" });
     const j = (await r.json().catch(() => ({}))) as any;
 
     if (!r.ok) {
-      // ✅ show detail if present
-      const msg = j?.detail ? `${j?.error || "unknown_error"} — ${j.detail}` : j?.error || "unknown_error";
+      const msg = j?.detail
+        ? `${j?.error || "unknown_error"} — ${j.detail}`
+        : j?.error || "unknown_error";
       alert("Disconnect failed: " + msg);
       return;
     }
 
-    // optional: cleanup local flags
     try {
       localStorage.removeItem("fg-auth-ok");
     } catch {}
@@ -140,7 +141,6 @@ export default function DashboardPage() {
       if (e.key === "Escape") {
         e.preventDefault();
         closeAccountMenu();
-        // restore focus
         accountMenuBtnRef.current?.focus();
       }
     };
@@ -160,7 +160,6 @@ export default function DashboardPage() {
         <div
           role="presentation"
           onClick={(e) => {
-            // click backdrop to close
             if (e.target === e.currentTarget) closeWelcome();
           }}
           style={{
@@ -186,7 +185,14 @@ export default function DashboardPage() {
               padding: 16,
             }}
           >
-            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
               <h2 id="fgWelcomeTitle" style={{ margin: 0, fontSize: "1.25rem" }}>
                 Welcome to FareGuard!
               </h2>
@@ -208,14 +214,29 @@ export default function DashboardPage() {
 
             <div style={{ marginTop: 10 }}>
               <p style={{ margin: "12px 0" }}>
-                FareGuard automatically tracks your e-tickets, monitors delays, and reminds you when you’re eligible for
-                Delay Repay — so you never miss money you’re owed.
+                FareGuard automatically tracks your e-tickets, monitors delays,
+                and reminds you when you’re eligible for Delay Repay — so you
+                never miss money you’re owed.
               </p>
-              <p style={{ margin: "12px 0" }}>We’re continuously improving FareGuard with new features and updates.</p>
+              <p style={{ margin: "12px 0" }}>
+                We’re continuously improving FareGuard with new features and
+                updates.
+              </p>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-              <button type="button" onClick={closeWelcome} className="btn btnPrimary" style={{ padding: "10px 14px" }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                marginTop: 16,
+              }}
+            >
+              <button
+                type="button"
+                onClick={closeWelcome}
+                className="btn btnPrimary"
+                style={{ padding: "10px 14px" }}
+              >
                 Got it
               </button>
             </div>
@@ -229,7 +250,9 @@ export default function DashboardPage() {
         </h1>
         <RefreshIconButton />
       </div>
-      <p className="sub">We're tracking your tickets and checking for eligible delays.</p>
+      <p className="sub">
+        We're tracking your tickets and checking for eligible delays.
+      </p>
 
       {loading && (
         <div className="card" style={{ marginTop: 16 }}>
@@ -242,15 +265,23 @@ export default function DashboardPage() {
           <span className="badge" style={{ marginBottom: 8 }}>
             Setup
           </span>
-          <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>Finish connecting Gmail</h3>
+          <h3 style={{ margin: "6px 0 8px", color: "var(--fg-navy)" }}>
+            Finish connecting Gmail
+          </h3>
           <p className="small" style={{ marginBottom: 12 }}>
-            Connect your Gmail (read-only) so we can find your tickets and track delays automatically.
+            Connect your Gmail (read-only) so we can find your tickets and track
+            delays automatically.
           </p>
 
-          <ConnectGmailButton label="Connect Gmail (1–click)" className="btn btnPrimary" next="/dashboard" />
+          <ConnectGmailButton
+            label="Connect Gmail (1–click)"
+            className="btn btnPrimary"
+            next="/dashboard"
+          />
 
           <p className="small" style={{ marginTop: 10 }}>
-            Having trouble? <Link href="/?connect=1">Try from the homepage</Link>.
+            Having trouble? <Link href="/?connect=1">Try from the homepage</Link>
+            .
           </p>
         </div>
       )}
@@ -259,8 +290,22 @@ export default function DashboardPage() {
         <>
           <div className="card" style={{ marginTop: 16 }}>
             {/* Header row: badge + kebab menu */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-              <span className="badge" style={{ marginBottom: 8, background: "#ecf8f2", color: "var(--fg-green)" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <span
+                className="badge"
+                style={{
+                  marginBottom: 8,
+                  background: "#ecf8f2",
+                  color: "var(--fg-green)",
+                }}
+              >
                 Live
               </span>
 
@@ -303,7 +348,6 @@ export default function DashboardPage() {
                       zIndex: 50,
                     }}
                   >
-                    {/* Placeholder for future items */}
                     <div
                       style={{
                         padding: "8px 10px",
@@ -314,7 +358,13 @@ export default function DashboardPage() {
                       Account
                     </div>
 
-                    <div style={{ height: 1, background: "rgba(0,0,0,0.08)", margin: "6px 0" }} />
+                    <div
+                      style={{
+                        height: 1,
+                        background: "rgba(0,0,0,0.08)",
+                        margin: "6px 0",
+                      }}
+                    />
 
                     <button
                       type="button"
@@ -339,7 +389,13 @@ export default function DashboardPage() {
                       Disconnect & delete data
                     </button>
 
-                    <div style={{ padding: "8px 10px", fontSize: 12, color: "rgba(0,0,0,0.55)" }}>
+                    <div
+                      style={{
+                        padding: "8px 10px",
+                        fontSize: 12,
+                        color: "rgba(0,0,0,0.55)",
+                      }}
+                    >
                       This will remove access and delete your stored data.
                     </div>
                   </div>
@@ -350,8 +406,11 @@ export default function DashboardPage() {
             <h3 style={{ margin: "4px 0 8px", color: "var(--fg-navy)" }}>
               Welcome{me.email ? `, ${me.email}` : ""}.
             </h3>
-            <p className="small">We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.</p>
-
+            <p className="small">
+              We’ll populate this list as your e-tickets are detected. Future
+              trips show as “Queued”.
+            </p>
+          </div>
 
           <TripsLive />
         </>
