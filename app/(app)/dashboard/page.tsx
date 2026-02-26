@@ -16,7 +16,6 @@ type Me = {
 
 export default function DashboardPage() {
   const [me, setMe] = useState<Me | null>(null);
-  const [summary, setSummary] = useState<{ ok: boolean; claims?: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
   // ✅ Welcome modal (first visit)
@@ -34,9 +33,6 @@ export default function DashboardPage() {
       const j: Me = await r.json();
       setMe(j);
 
-      const s = await fetch("/dashboard/summary", { cache: "no-store" });
-      const sj = await s.json();
-      setSummary(sj);
     } catch (e: any) {
       setMe({ authenticated: false, error: String(e?.message || e) });
     } finally {
@@ -356,12 +352,6 @@ export default function DashboardPage() {
             </h3>
             <p className="small">We’ll populate this list as your e-tickets are detected. Future trips show as “Queued”.</p>
 
-            {summary?.ok && (
-              <p className="small" style={{ marginTop: 8 }}>
-                Claims in system: <strong>{summary.claims ?? 0}</strong>
-              </p>
-            )}
-          </div>
 
           <TripsLive />
         </>
