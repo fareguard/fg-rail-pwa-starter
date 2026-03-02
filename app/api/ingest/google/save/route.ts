@@ -202,17 +202,16 @@ export async function GET(req: NextRequest) {
     for (const chunk of chunks) {
       const results = await Promise.allSettled(
         chunk.map(async (id) => {
-          // Skip if already in debug table (means already parsed)
+          // ✅ Production-grade dedupe: scope to user (Gmail message IDs can collide across accounts)
           const { data: existingDebug } = await supa
             .from("debug_llm_outputs")
             .select("id")
             .eq("email_id", id)
+            .eq("user_email", user_email)
             .limit(1)
             .maybeSingle();
 
-          if (existingDebug) {
-            return;
-          }
+          if (existingDebug) return;
 
           const fullMsg = await fetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
@@ -307,8 +306,8 @@ export async function GET(req: NextRequest) {
             // Log parser output for debugging (after parsing)
             try {
               await supa.from("debug_llm_outputs").insert({
+                user_email, // ✅ ensure user scoping is stored
                 email_id: id,
-                user_email, // ✅ add this now that column exists
                 from_addr: from,
                 subject,
                 raw_input: null, // ✅ don’t store bodies
@@ -416,7 +415,8 @@ export async function GET(req: NextRequest) {
             const { error: redactErr } = await redactTrainRawEmailFailSafe(supa, {
               user_email,
               message_id: fullMsg.id,
-              redaction_reason: redactionReason || (tripInserted ? "ticket_parsed_redact" : "parse_or_insert_failed"),
+              redaction_reason:
+                redactionReason || (tripInserted ? "ticket_parsed_redact" : "parse_or_insert_failed"),
               is_train: true,
             });
 
