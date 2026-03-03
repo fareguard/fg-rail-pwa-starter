@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getFreshAccessToken } from "@/lib/google";
 import { isTrainEmail } from "@/lib/trainEmailFilter";
-// ✅ IMPORTANT: DO NOT import ingestEmail at top-level (it may init OpenAI during build)
 import { getSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -69,50 +68,65 @@ function headerValue(payload: any, name: string): string | undefined {
 function safeTimestamp(value: string | null | undefined): string | null {
   if (!value) return null;
   const d = new Date(value);
-  if (isNaN(d.getTime())) {
-    return null;
-  }
+  if (isNaN(d.getTime())) return null;
   return d.toISOString();
 }
 
-/** Normalise operator names (small UX thing) */
 function normaliseOperatorName(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const s = raw.trim();
   const lower = s.toLowerCase();
 
   if (lower.startsWith("west midlands")) return "West Midlands Railway";
-
-  if (lower === "crosscountry trains" || lower === "cross country trains") {
-    return "CrossCountry";
-  }
-
-  if (
-    lower === "northern rail" ||
-    lower === "northern railway" ||
-    lower === "northern trains"
-  ) {
-    return "Northern";
-  }
+  if (lower === "crosscountry trains" || lower === "cross country trains") return "CrossCountry";
+  if (lower === "northern rail" || lower === "northern railway" || lower === "northern trains") return "Northern";
 
   return s;
 }
 
-// Fail-safe redaction helper (ALWAYS wipe content, mark parsed+redacted)
-async function redactTrainRawEmailFailSafe(
+type GmailFetchResult =
+  | { ok: true; status: number; data: any }
+  | { ok: false; status: number; data: any; message: string };
+
+async function fetchGmailJson(url: string, accessToken: string): Promise<GmailFetchResult> {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  let data: any = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      status: res.status,
+      data,
+      message: data?.error?.message || `Gmail API error ${res.status}`,
+    };
+  }
+
+  return { ok: true, status: res.status, data };
+}
+
+// ✅ ALWAYS wipe content, mark parsed+redacted for a specific (provider,user_email,message_id)
+async function redactRawEmailFailSafe(
   supa: any,
   {
     user_email,
     message_id,
     provider = "gmail",
     redaction_reason,
-    is_train = true,
+    is_train,
   }: {
     user_email: string;
     message_id: string;
     provider?: string;
     redaction_reason: string;
-    is_train?: boolean;
+    is_train: boolean;
   }
 ) {
   const nowIso = new Date().toISOString();
@@ -140,38 +154,43 @@ export async function GET(req: NextRequest) {
     const user_email = session?.email;
 
     if (!user_email) {
-      return noStoreJson(
-        { ok: false, error: "Not authenticated", scanned: 0, saved_trips: 0 },
-        401
-      );
+      return noStoreJson({ ok: false, error: "Not authenticated", scanned: 0, saved_trips: 0 }, 401);
     }
 
     const supa = getSupabaseAdmin();
     const accessToken = await getFreshAccessToken(user_email);
 
-    // ✅ If key missing (e.g. local build / Codespaces), skip LLM parsing safely.
     const OPENAI_ENABLED = !!process.env.OPENAI_API_KEY?.trim();
 
-    // 2) Build Gmail search query
     const SEARCH_QUERY =
       'in:anywhere ("ticket" OR "eticket" OR "e-ticket" OR "booking" OR "journey" OR "rail" OR "train") newer_than:2y';
 
-    const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
-    url.searchParams.set("q", SEARCH_QUERY);
-    url.searchParams.set("maxResults", "50");
+    const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+    listUrl.searchParams.set("q", SEARCH_QUERY);
+    listUrl.searchParams.set("maxResults", "50");
 
     const reqUrl = new URL(req.url);
     const requestPageToken = reqUrl.searchParams.get("pageToken");
-    if (requestPageToken) {
-      url.searchParams.set("pageToken", requestPageToken);
+    if (requestPageToken) listUrl.searchParams.set("pageToken", requestPageToken);
+
+    const listRes = await fetchGmailJson(listUrl.toString(), accessToken);
+    if (!listRes.ok) {
+      return noStoreJson(
+        {
+          ok: false,
+          step: "gmail_list",
+          status: listRes.status,
+          error: listRes.message,
+          detail: listRes.data ?? null,
+        },
+        502
+      );
     }
 
-    const list = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    }).then((x) => x.json());
+    const list = listRes.data;
 
-    const messageIds: string[] = Array.isArray(list.messages)
-      ? list.messages.map((m: any) => m?.id).filter((id: string | undefined) => !!id)
+    const messageIds: string[] = Array.isArray(list?.messages)
+      ? list.messages.map((m: any) => m?.id).filter((x: any) => typeof x === "string" && x.length > 0)
       : [];
 
     const scanned = messageIds.length;
@@ -182,7 +201,7 @@ export async function GET(req: NextRequest) {
         scanned: 0,
         saved_raw: 0,
         saved_trips: 0,
-        nextPageToken: list.nextPageToken ?? null,
+        nextPageToken: list?.nextPageToken ?? null,
         user_email,
         trip_errors: [],
         note: OPENAI_ENABLED ? null : "OPENAI_API_KEY missing; LLM parsing skipped",
@@ -193,7 +212,6 @@ export async function GET(req: NextRequest) {
     let savedTrips = 0;
     const tripErrors: { email_id: string; message: string }[] = [];
 
-    // Chunk IDs for limited concurrency
     const chunks: string[][] = [];
     for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
       chunks.push(messageIds.slice(i, i + CONCURRENCY));
@@ -202,38 +220,63 @@ export async function GET(req: NextRequest) {
     for (const chunk of chunks) {
       const results = await Promise.allSettled(
         chunk.map(async (id) => {
-          // ✅ Production-grade dedupe: scope to user (Gmail message IDs can collide across accounts)
-          const { data: existingDebug } = await supa
-            .from("debug_llm_outputs")
-            .select("id")
-            .eq("email_id", id)
+          // ✅ Dedupe by raw_emails (source of truth), not debug table
+          const { data: existingRaw } = await supa
+            .from("raw_emails")
+            .select("message_id")
+            .eq("provider", "gmail")
             .eq("user_email", user_email)
+            .eq("message_id", id)
             .limit(1)
             .maybeSingle();
 
-          if (existingDebug) return;
+          if (existingRaw) return;
 
-          const fullMsg = await fetch(
-            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
-          ).then((x) => x.json());
+          // ✅ Fetch the actual message (and check res.ok)
+          const msgUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
+          const msgRes = await fetchGmailJson(msgUrl, accessToken);
 
-          const subject = headerValue(fullMsg.payload, "Subject") || "";
-          const from = headerValue(fullMsg.payload, "From") || "";
-          const body = extractBody(fullMsg.payload);
-          const snippet = fullMsg.snippet || "";
+          if (!msgRes.ok) {
+            // Audit row: no content stored, but we record we tried this message_id.
+            const reason = `gmail_fetch_failed_${msgRes.status}`;
+            const { error: upsertErr } = await supa.from("raw_emails").upsert(
+              {
+                provider: "gmail",
+                user_email,
+                message_id: id, // ✅ ALWAYS use list id
+                subject: null,
+                sender: null,
+                snippet: null,
+                body_plain: null,
+                is_train: false,
+                parsed_at: new Date().toISOString(),
+                redacted_at: new Date().toISOString(),
+                redaction_reason: reason,
+              },
+              { onConflict: "provider,user_email,message_id" } as any
+            );
 
-          // Decide train eligibility BEFORE writing anything sensitive
+            if (!upsertErr) savedRaw++;
+            tripErrors.push({ email_id: id, message: `${reason}: ${msgRes.message}` });
+            return;
+          }
+
+          const fullMsg = msgRes.data;
+
+          const subject = headerValue(fullMsg?.payload, "Subject") || "";
+          const from = headerValue(fullMsg?.payload, "From") || "";
+          const body = extractBody(fullMsg?.payload);
+          const snippet = fullMsg?.snippet || "";
+
           const trainOk = isTrainEmail({ from, subject, body });
 
-          // Write raw email, but minimise aggressively
+          // Non-train: write minimal + redacted immediately
           if (!trainOk) {
-            // keep only the dedupe keys + audit fields; delete content immediately
             const { error: rawErr } = await supa.from("raw_emails").upsert(
               {
                 provider: "gmail",
                 user_email,
-                message_id: fullMsg.id,
+                message_id: id, // ✅ ALWAYS id
                 subject: null,
                 sender: null,
                 snippet: null,
@@ -247,228 +290,20 @@ export async function GET(req: NextRequest) {
             );
 
             if (rawErr) {
-              console.error("[raw_emails] upsert failed", {
-                user_email,
-                message_id: fullMsg?.id,
-                err: rawErr.message ?? rawErr,
-              });
+              tripErrors.push({ email_id: id, message: `raw_emails upsert failed: ${rawErr.message}` });
+            } else {
+              savedRaw++;
             }
-
-            if (!rawErr) savedRaw++;
             return;
           }
 
-          // train email: store (temporarily) for parsing
-          // If OpenAI is disabled, don't persist body at all (no parse to justify retention).
+          // Train: store temporarily (subject/from/snippet; body only if OpenAI enabled)
           const { error: rawErr } = await supa.from("raw_emails").upsert(
             {
               provider: "gmail",
               user_email,
-              message_id: fullMsg.id,
+              message_id: id, // ✅ ALWAYS id
               subject: subject || null,
               sender: from || null,
               snippet: snippet || null,
-              body_plain: OPENAI_ENABLED ? body || null : null,
-              is_train: true,
-              redacted_at: null,
-              redaction_reason: null,
-              // parsed_at intentionally set later (but will always be set in fail-safe redaction)
-            },
-            { onConflict: "provider,user_email,message_id" } as any
-          );
-
-          if (rawErr) {
-            console.error("[raw_emails] upsert failed", {
-              user_email,
-              message_id: fullMsg?.id,
-              err: rawErr.message ?? rawErr,
-            });
-          }
-
-          if (!rawErr) savedRaw++;
-
-          // ✅ If OpenAI key missing, we stop here (body already not persisted).
-          // Mark as done + redact other content to avoid retention.
-          if (!OPENAI_ENABLED) {
-            await redactTrainRawEmailFailSafe(supa, {
-              user_email,
-              message_id: fullMsg.id,
-              redaction_reason: "openai_disabled_no_parse",
-              is_train: true,
-            });
-            return;
-          }
-
-          // -------------------------
-          // ✅ FAIL-SAFE TRAIN FLOW:
-          // Always redact in `finally`, regardless of downstream success/failure.
-          // -------------------------
-          let parsed: any = null;
-          let tripInserted = false;
-          let redactionReason = "train_processed_unknown";
-
-          try {
-            // ✅ Lazy import at runtime only (prevents build-time OpenAI init)
-            const { ingestEmail } = await import("@/lib/ingestEmail");
-
-            parsed = await ingestEmail({
-              id,
-              from,
-              subject,
-              body_plain: body,
-              snippet,
-            });
-
-            // Log parser output for debugging (after parsing)
-            try {
-              await supa.from("debug_llm_outputs").insert({
-                user_email, // ✅ ensure user scoping is stored
-                email_id: id,
-                from_addr: from,
-                subject,
-                raw_input: null, // ✅ don’t store bodies
-                raw_output: JSON.stringify(parsed),
-              });
-            } catch {
-              // ignore debug errors
-            }
-
-            // ✅ TrainOk but not a ticket: redact immediately after decision (still via finally)
-            if (!parsed?.is_ticket) {
-              redactionReason = "train_filter_not_ticket";
-              return;
-            }
-
-            // Normalisation for DB
-            const operatorRaw = parsed.operator ?? parsed.provider ?? null;
-            const operator = normaliseOperatorName(operatorRaw);
-            const retailer = parsed.retailer ?? parsed.provider ?? null;
-
-            const departStr = parsed.depart_planned || parsed.outbound_departure || null;
-            const arriveStr = parsed.arrive_planned || null;
-            const outboundStr = parsed.outbound_departure || parsed.depart_planned || null;
-
-            const departIso = safeTimestamp(departStr);
-            const arriveIso = safeTimestamp(arriveStr);
-            const outboundIso = safeTimestamp(outboundStr);
-
-            // Check for existing trip by booking_ref + origin + destination
-            let existingTrip: { id: string; depart_planned: string | null } | null = null;
-
-            if (parsed.booking_ref && parsed.origin && parsed.destination) {
-              const { data: existingRows, error: existingErr } = await supa
-                .from("trips")
-                .select("id, depart_planned")
-                .eq("user_email", user_email)
-                .eq("booking_ref", parsed.booking_ref)
-                .eq("origin", parsed.origin)
-                .eq("destination", parsed.destination)
-                .limit(1);
-
-              if (!existingErr && existingRows && existingRows.length) {
-                existingTrip = existingRows[0] as any;
-              }
-            }
-
-            let finalDepart = departIso;
-            if (existingTrip?.depart_planned && finalDepart) {
-              const existingDate = new Date(existingTrip.depart_planned);
-              const newDate = new Date(finalDepart);
-              if (existingDate <= newDate) {
-                finalDepart = existingTrip.depart_planned;
-              }
-            }
-
-            const baseRecord = {
-              user_email,
-              retailer,
-              email_id: id,
-              operator,
-              booking_ref: parsed.booking_ref || null,
-              origin: parsed.origin || null,
-              destination: parsed.destination || null,
-              depart_planned: finalDepart,
-              arrive_planned: arriveIso,
-              outbound_departure: outboundIso,
-              is_ticket: true,
-              pnr_json: parsed,
-              source: "gmail",
-            };
-
-            let tripErr: any = null;
-
-            if (existingTrip) {
-              const { error } = await supa.from("trips").update(baseRecord).eq("id", existingTrip.id);
-              tripErr = error;
-            } else {
-              const { error } = await supa.from("trips").insert(baseRecord);
-              tripErr = error;
-            }
-
-            if (tripErr) {
-              tripErrors.push({
-                email_id: id,
-                message: tripErr.message ?? String(tripErr),
-              });
-
-              redactionReason = "trip_write_failed";
-              tripInserted = false;
-              return;
-            }
-
-            // ✅ Trip success
-            savedTrips++;
-            tripInserted = true;
-            redactionReason = "ticket_parsed_redact";
-          } catch (err) {
-            console.error("[train] unexpected parsing/insert error:", err);
-            // Keep reason specific for auditing (no content retained)
-            redactionReason = tripInserted ? "unexpected_error_after_trip" : "llm_parse_or_insert_failed";
-            // Re-throw so it still shows up in Promise.allSettled as rejected (keeps your current visibility)
-            throw err;
-          } finally {
-            // ✅ ALWAYS redact raw email (even if parsing/insert fails)
-            const { error: redactErr } = await redactTrainRawEmailFailSafe(supa, {
-              user_email,
-              message_id: fullMsg.id,
-              redaction_reason:
-                redactionReason || (tripInserted ? "ticket_parsed_redact" : "parse_or_insert_failed"),
-              is_train: true,
-            });
-
-            if (redactErr) {
-              console.error("[train] raw email redaction failed:", redactErr.message);
-            } else {
-              console.log("[train] raw email redacted (fail-safe)", {
-                email_id: id,
-                reason: redactionReason,
-              });
-            }
-          }
-        })
-      );
-
-      for (const r of results) {
-        if (r.status === "rejected") {
-          console.error("Error processing Gmail message:", r.reason);
-        }
-      }
-    }
-
-    return noStoreJson({
-      ok: true,
-      scanned,
-      saved_raw: savedRaw,
-      saved_trips: savedTrips,
-      nextPageToken: list.nextPageToken ?? null,
-      user_email,
-      trip_errors: tripErrors,
-      note: OPENAI_ENABLED ? null : "OPENAI_API_KEY missing; LLM parsing skipped",
-    });
-  } catch (e: any) {
-    console.error("ingest/google/save error", e);
-    return noStoreJson({ ok: false, error: e?.message || String(e) }, 500);
-  }
-}
-
-export const POST = GET;
+              body_plain: OPENAI_ENABLED
