@@ -79,16 +79,13 @@ function normaliseOperatorName(raw: string | null | undefined): string | null {
 
   if (lower.startsWith("west midlands")) return "West Midlands Railway";
   if (lower === "crosscountry trains" || lower === "cross country trains") return "CrossCountry";
-  if (lower === "northern rail" || lower === "northern railway" || lower === "northern trains") return "Northern";
+  if (lower === "northern rail" || lower === "northern railway" || lower === "northern trains")
+    return "Northern";
 
   return s;
 }
 
-type GmailFetchResult =
-  | { ok: true; status: number; data: any }
-  | { ok: false; status: number; data: any; message: string };
-
-async function fetchGmailJson(url: string, accessToken: string): Promise<GmailFetchResult> {
+async function fetchGmailJson(url: string, accessToken: string) {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -100,31 +97,23 @@ async function fetchGmailJson(url: string, accessToken: string): Promise<GmailFe
     data = null;
   }
 
-  if (!res.ok) {
-    return {
-      ok: false,
-      status: res.status,
-      data,
-      message: data?.error?.message || `Gmail API error ${res.status}`,
-    };
-  }
-
-  return { ok: true, status: res.status, data };
+  return {
+    ok: res.ok,
+    status: res.status,
+    data,
+  };
 }
 
-// ✅ ALWAYS wipe content, mark parsed+redacted for a specific (provider,user_email,message_id)
-async function redactRawEmailFailSafe(
+async function redactRawEmail(
   supa: any,
   {
     user_email,
     message_id,
-    provider = "gmail",
     redaction_reason,
     is_train,
   }: {
     user_email: string;
     message_id: string;
-    provider?: string;
     redaction_reason: string;
     is_train: boolean;
   }
@@ -143,7 +132,7 @@ async function redactRawEmailFailSafe(
       redaction_reason,
       is_train,
     })
-    .eq("provider", provider)
+    .eq("provider", "gmail")
     .eq("user_email", user_email)
     .eq("message_id", message_id);
 }
@@ -154,12 +143,11 @@ export async function GET(req: NextRequest) {
     const user_email = session?.email;
 
     if (!user_email) {
-      return noStoreJson({ ok: false, error: "Not authenticated", scanned: 0, saved_trips: 0 }, 401);
+      return noStoreJson({ ok: false, error: "Not authenticated" }, 401);
     }
 
     const supa = getSupabaseAdmin();
     const accessToken = await getFreshAccessToken(user_email);
-
     const OPENAI_ENABLED = !!process.env.OPENAI_API_KEY?.trim();
 
     const SEARCH_QUERY =
@@ -169,141 +157,184 @@ export async function GET(req: NextRequest) {
     listUrl.searchParams.set("q", SEARCH_QUERY);
     listUrl.searchParams.set("maxResults", "50");
 
-    const reqUrl = new URL(req.url);
-    const requestPageToken = reqUrl.searchParams.get("pageToken");
-    if (requestPageToken) listUrl.searchParams.set("pageToken", requestPageToken);
-
     const listRes = await fetchGmailJson(listUrl.toString(), accessToken);
+
     if (!listRes.ok) {
-      return noStoreJson(
-        {
-          ok: false,
-          step: "gmail_list",
-          status: listRes.status,
-          error: listRes.message,
-          detail: listRes.data ?? null,
-        },
-        502
-      );
-    }
-
-    const list = listRes.data;
-
-    const messageIds: string[] = Array.isArray(list?.messages)
-      ? list.messages.map((m: any) => m?.id).filter((x: any) => typeof x === "string" && x.length > 0)
-      : [];
-
-    const scanned = messageIds.length;
-
-    if (!messageIds.length) {
       return noStoreJson({
-        ok: true,
-        scanned: 0,
-        saved_raw: 0,
-        saved_trips: 0,
-        nextPageToken: list?.nextPageToken ?? null,
-        user_email,
-        trip_errors: [],
-        note: OPENAI_ENABLED ? null : "OPENAI_API_KEY missing; LLM parsing skipped",
+        ok: false,
+        step: "gmail_list_failed",
+        status: listRes.status,
+        detail: listRes.data,
       });
     }
+
+    const messageIds: string[] = Array.isArray(listRes.data?.messages)
+      ? listRes.data.messages.map((m: any) => m?.id).filter(Boolean)
+      : [];
 
     let savedRaw = 0;
     let savedTrips = 0;
     const tripErrors: { email_id: string; message: string }[] = [];
 
-    const chunks: string[][] = [];
-    for (let i = 0; i < messageIds.length; i += CONCURRENCY) {
-      chunks.push(messageIds.slice(i, i + CONCURRENCY));
+    for (const id of messageIds) {
+      const { data: existing } = await supa
+        .from("raw_emails")
+        .select("message_id")
+        .eq("provider", "gmail")
+        .eq("user_email", user_email)
+        .eq("message_id", id)
+        .maybeSingle();
+
+      if (existing) continue;
+
+      const msgRes = await fetchGmailJson(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
+        accessToken
+      );
+
+      if (!msgRes.ok) {
+        await supa.from("raw_emails").upsert(
+          {
+            provider: "gmail",
+            user_email,
+            message_id: id,
+            subject: null,
+            sender: null,
+            snippet: null,
+            body_plain: null,
+            is_train: false,
+            parsed_at: new Date().toISOString(),
+            redacted_at: new Date().toISOString(),
+            redaction_reason: `gmail_fetch_failed_${msgRes.status}`,
+          },
+          { onConflict: "provider,user_email,message_id" } as any
+        );
+        savedRaw++;
+        continue;
+      }
+
+      const fullMsg = msgRes.data;
+      const subject = headerValue(fullMsg?.payload, "Subject") || "";
+      const from = headerValue(fullMsg?.payload, "From") || "";
+      const body = extractBody(fullMsg?.payload);
+      const snippet = fullMsg?.snippet || "";
+
+      const trainOk = isTrainEmail({ from, subject, body });
+
+      if (!trainOk) {
+        await supa.from("raw_emails").upsert(
+          {
+            provider: "gmail",
+            user_email,
+            message_id: id,
+            subject: null,
+            sender: null,
+            snippet: null,
+            body_plain: null,
+            is_train: false,
+            parsed_at: new Date().toISOString(),
+            redacted_at: new Date().toISOString(),
+            redaction_reason: "non_train_filtered",
+          },
+          { onConflict: "provider,user_email,message_id" } as any
+        );
+        savedRaw++;
+        continue;
+      }
+
+      await supa.from("raw_emails").upsert(
+        {
+          provider: "gmail",
+          user_email,
+          message_id: id,
+          subject: subject || null,
+          sender: from || null,
+          snippet: snippet || null,
+          body_plain: OPENAI_ENABLED ? body || null : null,
+          is_train: true,
+          redacted_at: null,
+          redaction_reason: null,
+        },
+        { onConflict: "provider,user_email,message_id" } as any
+      );
+      savedRaw++;
+
+      if (!OPENAI_ENABLED) {
+        await redactRawEmail(supa, {
+          user_email,
+          message_id: id,
+          redaction_reason: "openai_disabled_no_parse",
+          is_train: true,
+        });
+        continue;
+      }
+
+      try {
+        const { ingestEmail } = await import("@/lib/ingestEmail");
+
+        const parsed = await ingestEmail({
+          id,
+          from,
+          subject,
+          body_plain: body,
+          snippet,
+        });
+
+        if (!parsed?.is_ticket) {
+          await redactRawEmail(supa, {
+            user_email,
+            message_id: id,
+            redaction_reason: "train_filter_not_ticket",
+            is_train: true,
+          });
+          continue;
+        }
+
+        await supa.from("trips").insert({
+          user_email,
+          email_id: id,
+          operator: normaliseOperatorName(parsed.operator),
+          booking_ref: parsed.booking_ref || null,
+          origin: parsed.origin || null,
+          destination: parsed.destination || null,
+          depart_planned: safeTimestamp(parsed.depart_planned),
+          arrive_planned: safeTimestamp(parsed.arrive_planned),
+          is_ticket: true,
+          pnr_json: parsed,
+          source: "gmail",
+        });
+
+        savedTrips++;
+
+        await redactRawEmail(supa, {
+          user_email,
+          message_id: id,
+          redaction_reason: "ticket_parsed_redact",
+          is_train: true,
+        });
+      } catch (err: any) {
+        tripErrors.push({ email_id: id, message: err?.message || String(err) });
+
+        await redactRawEmail(supa, {
+          user_email,
+          message_id: id,
+          redaction_reason: "llm_parse_or_insert_failed",
+          is_train: true,
+        });
+      }
     }
 
-    for (const chunk of chunks) {
-      const results = await Promise.allSettled(
-        chunk.map(async (id) => {
-          // ✅ Dedupe by raw_emails (source of truth), not debug table
-          const { data: existingRaw } = await supa
-            .from("raw_emails")
-            .select("message_id")
-            .eq("provider", "gmail")
-            .eq("user_email", user_email)
-            .eq("message_id", id)
-            .limit(1)
-            .maybeSingle();
+    return noStoreJson({
+      ok: true,
+      scanned: messageIds.length,
+      saved_raw: savedRaw,
+      saved_trips: savedTrips,
+      user_email,
+      trip_errors: tripErrors,
+    });
+  } catch (e: any) {
+    return noStoreJson({ ok: false, error: e?.message || String(e) }, 500);
+  }
+}
 
-          if (existingRaw) return;
-
-          // ✅ Fetch the actual message (and check res.ok)
-          const msgUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
-          const msgRes = await fetchGmailJson(msgUrl, accessToken);
-
-          if (!msgRes.ok) {
-            // Audit row: no content stored, but we record we tried this message_id.
-            const reason = `gmail_fetch_failed_${msgRes.status}`;
-            const { error: upsertErr } = await supa.from("raw_emails").upsert(
-              {
-                provider: "gmail",
-                user_email,
-                message_id: id, // ✅ ALWAYS use list id
-                subject: null,
-                sender: null,
-                snippet: null,
-                body_plain: null,
-                is_train: false,
-                parsed_at: new Date().toISOString(),
-                redacted_at: new Date().toISOString(),
-                redaction_reason: reason,
-              },
-              { onConflict: "provider,user_email,message_id" } as any
-            );
-
-            if (!upsertErr) savedRaw++;
-            tripErrors.push({ email_id: id, message: `${reason}: ${msgRes.message}` });
-            return;
-          }
-
-          const fullMsg = msgRes.data;
-
-          const subject = headerValue(fullMsg?.payload, "Subject") || "";
-          const from = headerValue(fullMsg?.payload, "From") || "";
-          const body = extractBody(fullMsg?.payload);
-          const snippet = fullMsg?.snippet || "";
-
-          const trainOk = isTrainEmail({ from, subject, body });
-
-          // Non-train: write minimal + redacted immediately
-          if (!trainOk) {
-            const { error: rawErr } = await supa.from("raw_emails").upsert(
-              {
-                provider: "gmail",
-                user_email,
-                message_id: id, // ✅ ALWAYS id
-                subject: null,
-                sender: null,
-                snippet: null,
-                body_plain: null,
-                is_train: false,
-                parsed_at: new Date().toISOString(),
-                redacted_at: new Date().toISOString(),
-                redaction_reason: "non_train_filtered",
-              },
-              { onConflict: "provider,user_email,message_id" } as any
-            );
-
-            if (rawErr) {
-              tripErrors.push({ email_id: id, message: `raw_emails upsert failed: ${rawErr.message}` });
-            } else {
-              savedRaw++;
-            }
-            return;
-          }
-
-          // Train: store temporarily (subject/from/snippet; body only if OpenAI enabled)
-          const { error: rawErr } = await supa.from("raw_emails").upsert(
-            {
-              provider: "gmail",
-              user_email,
-              message_id: id, // ✅ ALWAYS id
-              subject: subject || null,
-              sender: from || null,
-              snippet: snippet || null,
-              body_plain: OPENAI_ENABLED
+export const POST = GET;
