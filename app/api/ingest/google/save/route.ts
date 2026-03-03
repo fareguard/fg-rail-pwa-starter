@@ -246,6 +246,14 @@ export async function GET(req: NextRequest) {
               { onConflict: "provider,user_email,message_id" } as any
             );
 
+            if (rawErr) {
+              console.error("[raw_emails] upsert failed", {
+                user_email,
+                message_id: fullMsg?.id,
+                err: rawErr.message ?? rawErr,
+              });
+            }
+
             if (!rawErr) savedRaw++;
             return;
           }
@@ -268,6 +276,14 @@ export async function GET(req: NextRequest) {
             },
             { onConflict: "provider,user_email,message_id" } as any
           );
+
+          if (rawErr) {
+            console.error("[raw_emails] upsert failed", {
+              user_email,
+              message_id: fullMsg?.id,
+              err: rawErr.message ?? rawErr,
+            });
+          }
 
           if (!rawErr) savedRaw++;
 
